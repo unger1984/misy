@@ -72,7 +72,8 @@ MISY_FAIL_AFTER_TAKEOVER requested a post-takeover failure
 
 ## Commits created
 
-Будет указан после создания коммита Task 5.
+- `82d3ce3` — `Implement TUI terminal lifecycle` (implementation).
+- `Record Task 5 report` (this report).
 
 ## Concerns
 

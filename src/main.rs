@@ -33,6 +33,22 @@ impl AppState {
     }
 }
 
+#[allow(dead_code)]
+struct ScreenCopy {
+    title: &'static str,
+    body: &'static str,
+    footer: &'static str,
+}
+
+#[allow(dead_code)]
+fn screen_copy(_state: &AppState) -> ScreenCopy {
+    ScreenCopy {
+        title: "misy",
+        body: "TUI shell booted",
+        footer: "Press q to quit",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +66,14 @@ mod tests {
 
         assert!(!state.running);
         assert_eq!(outcome, Outcome::Quit);
+    }
+
+    #[test]
+    fn screen_copy_returns_bootstrap_text() {
+        let copy = screen_copy(&AppState::new());
+
+        assert_eq!(copy.title, "misy");
+        assert_eq!(copy.body, "TUI shell booted");
+        assert_eq!(copy.footer, "Press q to quit");
     }
 }

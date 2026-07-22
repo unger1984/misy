@@ -41,12 +41,17 @@
 - `cargo test` — run Rust unit and integration tests.
 
 ## Code Conventions & Common Patterns
-- Conventions are not yet established by code; the following is the Rust baseline for new files.
-- Keep `main.rs` thin; put application and business logic in library modules.
-- Use `Result` for fallible operations and error propagation; avoid `unwrap` outside tests.
-- Avoid unnecessary allocations and copies; prefer borrowing and explicit data structures.
-- Use `snake_case` for functions/modules and `CamelCase` for types.
+- Conventions are not yet established by code; use the following Rust baseline for new files.
+- Keep `main.rs` thin; application and business logic belong in focused modules and explicit state structures, not hidden global mutable state.
+- Use `Result` for fallible operations; avoid `unwrap` outside tests, do not silently swallow errors, and document intentional fallbacks in English.
+- Avoid unnecessary allocations and copies; prefer borrowing, explicit readable types, and small deliberate public APIs.
+- Use `snake_case` for functions/modules and `CamelCase` for types; keep each enum focused on one responsibility.
 - Treat the TUI as a client over core state; do not duplicate orchestration or state ownership in the UI.
+- Keep side effects at the edges: filesystem, process, network, and environment access should stay out of core logic where possible.
+- Rendering should be deterministic and depend only on explicit input state; map input to actions first, then apply actions to state.
+- Write comments and docs only where they carry real information; use English, prefer `///` and `//!` for public APIs and reusable contracts, and explain *why*, invariants, cleanup/error-path reasoning, lifecycle constraints, and other non-obvious behavior.
+- External integrations must stay capability-scoped and explicit, and new external-facing contracts should remain versionable from the start.
+- Tests should prefer observable behavior over implementation details; avoid mocks unless they are genuinely necessary.
 
 ## Important Files
 - The bootstrap baseline includes `Cargo.toml`, `rust-toolchain.toml`, and `.gitignore`; product source files do not exist yet.

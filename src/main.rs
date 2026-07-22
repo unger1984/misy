@@ -1,3 +1,5 @@
+//! Minimal bootstrap TUI shell and terminal lifecycle for `misy`.
+
 use std::io;
 
 use crossterm::{
@@ -17,6 +19,8 @@ fn main() -> io::Result<()> {
     run_app()
 }
 
+// Restore terminal state in reverse acquisition order so partially completed
+// setup can still be unwound safely after a failure.
 #[derive(Debug, PartialEq, Eq)]
 enum CleanupStep {
     ShowCursor,
@@ -63,6 +67,7 @@ fn restore_terminal(
     alternate_screen_entered: bool,
     cursor_hidden: bool,
 ) -> io::Result<()> {
+    // Keep the first cleanup error, but keep attempting the remaining steps.
     let mut first_error = None;
     let mut stdout = io::stdout();
 
@@ -84,6 +89,8 @@ fn restore_terminal(
 }
 
 fn run_app() -> io::Result<()> {
+    // Acquire terminal capabilities step by step so each failure path can
+    // restore only the state that was actually taken over.
     enable_raw_mode()?;
     let raw_mode_enabled = true;
 
@@ -110,6 +117,8 @@ fn run_app() -> io::Result<()> {
     };
 
     let app_result = (|| {
+        // This hook exists only to exercise the post-takeover error path in
+        // smoke verification.
         if std::env::var_os("MISY_FAIL_AFTER_TAKEOVER").is_some() {
             return Err(io::Error::other(
                 "MISY_FAIL_AFTER_TAKEOVER requested a post-takeover failure",
@@ -130,6 +139,8 @@ fn run_app() -> io::Result<()> {
         Ok(())
     })();
 
+    // Drop the terminal before raw crossterm cleanup so the backend no longer
+    // holds stdout while we restore the outer terminal state.
     drop(terminal);
     let restoration_result =
         restore_terminal(raw_mode_enabled, alternate_screen_entered, cursor_hidden);

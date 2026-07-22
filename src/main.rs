@@ -5,6 +5,13 @@ enum Action {
     Quit,
 }
 
+fn action_from_key(code: crossterm::event::KeyCode) -> Option<Action> {
+    match code {
+        crossterm::event::KeyCode::Char('q') => Some(Action::Quit),
+        _ => None,
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -52,6 +59,8 @@ fn screen_copy(_state: &AppState) -> ScreenCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
+
 
     #[test]
     fn new_creates_a_running_state() {
@@ -75,5 +84,15 @@ mod tests {
         assert_eq!(copy.title, "misy");
         assert_eq!(copy.body, "TUI shell booted");
         assert_eq!(copy.footer, "Press q to quit");
+    }
+
+    #[test]
+    fn q_key_maps_to_quit_action() {
+        assert_eq!(action_from_key(KeyCode::Char('q')), Some(Action::Quit));
+    }
+
+    #[test]
+    fn unrelated_key_does_not_map_to_an_action() {
+        assert_eq!(action_from_key(KeyCode::Enter), None);
     }
 }

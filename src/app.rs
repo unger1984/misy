@@ -42,6 +42,7 @@ pub enum Action {
     Activate,
     SelectSection(usize),
     SelectMessage(usize),
+    FocusComposer,
     InsertText(String),
     InsertLineBreak,
     Backspace,
@@ -204,6 +205,10 @@ impl AppState {
             }
             Action::SelectMessage(index) => {
                 self.select_message(index);
+                Outcome::Continue
+            }
+            Action::FocusComposer => {
+                self.focused_pane = FocusedPane::Composer;
                 Outcome::Continue
             }
             Action::InsertText(text) => {

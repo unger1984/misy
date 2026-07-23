@@ -5,11 +5,15 @@ use crossterm::{
     cursor::{Hide, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{
     Frame, Terminal,
@@ -32,6 +36,7 @@ struct SetupState {
     mouse_capture_enabled: bool,
     cursor_hidden: bool,
     bracketed_paste_enabled: bool,
+    keyboard_enhancement_enabled: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanupStep {
@@ -39,6 +44,7 @@ enum CleanupStep {
     DisableMouseCapture,
     LeaveAlternateScreen,
     DisableBracketedPaste,
+    PopKeyboardEnhancement,
     DisableRawMode,
 }
 
@@ -58,6 +64,7 @@ struct UiAreas {
 struct ComposerLineMetrics {
     total_rows: usize,
     cursor_row: usize,
+    cursor_column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +112,17 @@ pub fn run_app() -> io::Result<()> {
         return Err(merge_cleanup_error(error, restore_terminal(setup)));
     }
     setup.cursor_hidden = true;
+
+    let keyboard_enhancement_supported = supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhancement_supported {
+        if let Err(error) = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        ) {
+            return Err(merge_cleanup_error(error, restore_terminal(setup)));
+        }
+        setup.keyboard_enhancement_enabled = true;
+    }
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = match Terminal::new(backend) {
@@ -155,7 +173,7 @@ fn merge_cleanup_error(primary: io::Error, cleanup: io::Result<()>) -> io::Error
 }
 
 fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
-    let mut steps = Vec::with_capacity(5);
+    let mut steps = Vec::with_capacity(6);
     if state.cursor_hidden {
         steps.push(CleanupStep::ShowCursor);
     }
@@ -167,6 +185,9 @@ fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
     }
     if state.bracketed_paste_enabled {
         steps.push(CleanupStep::DisableBracketedPaste);
+    }
+    if state.keyboard_enhancement_enabled {
+        steps.push(CleanupStep::PopKeyboardEnhancement);
     }
     if state.raw_mode_enabled {
         steps.push(CleanupStep::DisableRawMode);
@@ -184,6 +205,7 @@ fn restore_terminal(state: SetupState) -> io::Result<()> {
             CleanupStep::DisableMouseCapture => execute!(stdout, DisableMouseCapture),
             CleanupStep::LeaveAlternateScreen => execute!(stdout, LeaveAlternateScreen),
             CleanupStep::DisableBracketedPaste => execute!(stdout, DisableBracketedPaste),
+            CleanupStep::PopKeyboardEnhancement => execute!(stdout, PopKeyboardEnhancementFlags),
             CleanupStep::DisableRawMode => disable_raw_mode(),
         };
 
@@ -344,7 +366,9 @@ fn handle_terminal_event(
             }
         }
         Event::Mouse(mouse) => {
-            if let Some(action) = action_from_mouse_event(
+            if let Some(action) = composer_action_from_mouse_event(mouse, last_ui_areas.composer) {
+                state.apply(action);
+            } else if let Some(action) = action_from_mouse_event(
                 mouse,
                 &last_ui_areas.panes,
                 view.sections.offset(),
@@ -397,11 +421,13 @@ fn composer_line_metrics(text: &str, width: usize, cursor: usize) -> ComposerLin
     let cursor = cursor.min(text.len());
     let mut total_rows = 0usize;
     let mut cursor_row = 0usize;
+    let mut cursor_column = 0usize;
     let mut current_width = 0usize;
 
     for (idx, ch) in text.char_indices() {
         if idx == cursor {
             cursor_row = total_rows;
+            cursor_column = current_width;
         }
 
         if ch == '\n' {
@@ -410,27 +436,71 @@ fn composer_line_metrics(text: &str, width: usize, cursor: usize) -> ComposerLin
             continue;
         }
 
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if ch_width == 0 {
-            continue;
-        }
-
-        if current_width > 0 && current_width.saturating_add(ch_width) > width {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width > 0 && current_width.saturating_add(char_width) > width {
             total_rows += 1;
             current_width = 0;
         }
-
-        current_width = current_width.saturating_add(ch_width.min(width));
+        current_width = current_width.saturating_add(char_width);
     }
 
     if cursor == text.len() {
         cursor_row = total_rows;
+        cursor_column = current_width;
     }
 
     ComposerLineMetrics {
         total_rows: total_rows.saturating_add(1),
         cursor_row,
+        cursor_column,
     }
+}
+fn composer_display_text(state: &AppState) -> (String, usize) {
+    let text = state.composer_text();
+    let mut displayed = String::with_capacity(text.len());
+    let mut raw_index = 0;
+    let mut cursor = 0;
+
+    while raw_index < text.len() {
+        if raw_index == state.composer_cursor() {
+            cursor = displayed.len();
+        }
+        if let Some((end, id)) = image_token_at(text, raw_index)
+            && let Some(attachment) = state
+                .attachments()
+                .iter()
+                .find(|attachment| attachment.id == id)
+        {
+            displayed.push_str(&format!(
+                "[Image #{id}, {}x{}]",
+                attachment.width, attachment.height
+            ));
+            raw_index = end;
+            continue;
+        }
+        let Some(ch) = text[raw_index..].chars().next() else {
+            break;
+        };
+        displayed.push(ch);
+        raw_index += ch.len_utf8();
+    }
+    if raw_index == state.composer_cursor() {
+        cursor = displayed.len();
+    }
+
+    (displayed, cursor)
+}
+
+fn image_token_at(text: &str, start: usize) -> Option<(usize, u64)> {
+    let rest = text.get(start..)?;
+    let digits = rest.strip_prefix("[Image #")?;
+    let close = digits.find(']')?;
+    let number = digits.get(..close)?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let id = number.parse().ok()?;
+    Some((start + "[Image #".len() + close + 1, id))
 }
 
 fn composer_content_height(text: &str, width: usize) -> usize {
@@ -464,13 +534,14 @@ fn draw_ui(frame: &mut Frame, state: &mut AppState, view: &mut ViewState) -> UiA
 
     frame.render_widget(Clear, frame_area);
 
+    let (composer_text, composer_cursor) = composer_display_text(state);
     let composer_width =
         usize::from(
             frame_area
                 .width
                 .saturating_sub(if frame_area.height >= 3 { 2 } else { 0 }),
         );
-    let composer_height = composer_content_height(state.composer_text(), composer_width);
+    let composer_height = composer_content_height(&composer_text, composer_width);
     let areas = ui_areas(frame_area, composer_height);
 
     view.sections
@@ -588,9 +659,9 @@ fn draw_ui(frame: &mut Frame, state: &mut AppState, view: &mut ViewState) -> UiA
     }
 
     let composer_scroll = composer_viewport_top(
-        state.composer_text(),
+        &composer_text,
         composer_width,
-        state.composer_cursor(),
+        composer_cursor,
         state.composer_scroll(),
     );
     state.set_composer_scroll(composer_scroll);
@@ -612,11 +683,26 @@ fn draw_ui(frame: &mut Frame, state: &mut AppState, view: &mut ViewState) -> UiA
     } else {
         Block::default()
     };
-    let composer = Paragraph::new(state.composer_text())
+    let composer = Paragraph::new(composer_text.as_str())
         .block(composer_block)
         .wrap(Wrap { trim: false })
         .scroll((state.composer_scroll() as u16, 0));
     frame.render_widget(composer, areas.composer);
+
+    if composer_focused {
+        let metrics = composer_line_metrics(&composer_text, composer_width, composer_cursor);
+        let inner = areas.composer.inner(Margin {
+            vertical: u16::from(areas.composer.height >= 3),
+            horizontal: u16::from(areas.composer.height >= 3),
+        });
+        let cursor_row = metrics.cursor_row.saturating_sub(state.composer_scroll());
+        if cursor_row < usize::from(inner.height) {
+            frame.set_cursor_position((
+                inner.x.saturating_add(metrics.cursor_column as u16),
+                inner.y.saturating_add(cursor_row as u16),
+            ));
+        }
+    }
 
     areas
 }
@@ -738,6 +824,12 @@ fn action_from_mouse_event(
         }
         _ => None,
     }
+}
+
+fn composer_action_from_mouse_event(event: MouseEvent, composer: Rect) -> Option<Action> {
+    (event.kind == MouseEventKind::Down(MouseButton::Left)
+        && composer.contains((event.column, event.row).into()))
+    .then_some(Action::FocusComposer)
 }
 
 fn pane_for_point(column: u16, row: u16, panes: &PaneAreas) -> Option<FocusedPane> {
@@ -896,12 +988,14 @@ mod tests {
                 mouse_capture_enabled: true,
                 cursor_hidden: true,
                 bracketed_paste_enabled: true,
+                keyboard_enhancement_enabled: true,
             }),
             vec![
                 CleanupStep::ShowCursor,
                 CleanupStep::DisableMouseCapture,
                 CleanupStep::LeaveAlternateScreen,
                 CleanupStep::DisableBracketedPaste,
+                CleanupStep::PopKeyboardEnhancement,
                 CleanupStep::DisableRawMode,
             ]
         );
@@ -1013,6 +1107,7 @@ mod tests {
                 alternate_screen_entered: true,
                 mouse_capture_enabled: true,
                 cursor_hidden: true,
+                keyboard_enhancement_enabled: false,
                 bracketed_paste_enabled: true,
             }),
             vec![
@@ -1278,5 +1373,82 @@ mod tests {
 
         assert!(border_row.contains("└") || border_row.contains("┘") || border_row.contains("─"));
         assert!(composer_row.contains("Composer"));
+    }
+
+    #[test]
+    fn click_on_composer_focuses_composer() {
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 18,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert_eq!(
+            composer_action_from_mouse_event(event, Rect::new(0, 17, 20, 3)),
+            Some(Action::FocusComposer)
+        );
+    }
+
+    #[test]
+    fn composer_renders_image_dimensions_in_attachment_label() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new(vec![]);
+        let mut view = ViewState::default();
+        state.apply(Action::InsertImage {
+            width: 1059,
+            height: 200,
+            rgba: vec![0; 4],
+        });
+
+        terminal
+            .draw(|frame| {
+                let _ = draw_ui(frame, &mut state, &mut view);
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("[Image #0, 1059x200]"));
+    }
+
+    #[test]
+    fn focused_composer_places_visible_cursor_at_draft_position() {
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new(vec![]);
+        let mut view = ViewState::default();
+        state.focused_pane = FocusedPane::Composer;
+        state.apply(Action::InsertText("hi".into()));
+        state.apply(Action::MoveCursorLeft);
+
+        terminal
+            .draw(|frame| {
+                let _ = draw_ui(frame, &mut state, &mut view);
+            })
+            .unwrap();
+
+        assert_eq!(terminal.get_cursor_position().unwrap(), (2, 8).into());
+    }
+
+    #[test]
+    fn restoration_plan_pops_keyboard_enhancement_before_raw_mode() {
+        assert_eq!(
+            restoration_plan(SetupState {
+                raw_mode_enabled: true,
+                keyboard_enhancement_enabled: true,
+                ..SetupState::default()
+            }),
+            vec![
+                CleanupStep::PopKeyboardEnhancement,
+                CleanupStep::DisableRawMode,
+            ]
+        );
     }
 }

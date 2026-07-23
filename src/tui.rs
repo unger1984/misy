@@ -1,10 +1,12 @@
 use std::io;
 
+use arboard::Clipboard;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        MouseButton, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -28,13 +30,14 @@ struct SetupState {
     alternate_screen_entered: bool,
     mouse_capture_enabled: bool,
     cursor_hidden: bool,
+    bracketed_paste_enabled: bool,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanupStep {
     ShowCursor,
     DisableMouseCapture,
     LeaveAlternateScreen,
+    DisableBracketedPaste,
     DisableRawMode,
 }
 
@@ -56,10 +59,23 @@ struct ComposerLineMetrics {
     cursor_row: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClipboardImage {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClipboardError {
+    Unavailable(String),
+}
+
 #[derive(Debug, Default)]
 struct ViewState {
     sections: ListState,
     messages: ListState,
+    notification: Option<String>,
 }
 
 pub fn run_app() -> io::Result<()> {
@@ -78,6 +94,11 @@ pub fn run_app() -> io::Result<()> {
         return Err(merge_cleanup_error(error, restore_terminal(setup)));
     }
     setup.mouse_capture_enabled = true;
+
+    if let Err(error) = execute!(stdout, EnableBracketedPaste) {
+        return Err(merge_cleanup_error(error, restore_terminal(setup)));
+    }
+    setup.bracketed_paste_enabled = true;
 
     if let Err(error) = execute!(stdout, Hide) {
         return Err(merge_cleanup_error(error, restore_terminal(setup)));
@@ -104,25 +125,8 @@ pub fn run_app() -> io::Result<()> {
                 last_ui_areas = draw_ui(frame, &mut state, &mut view);
             })?;
 
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = action_from_key_event(key) {
-                        state.apply(action);
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    if let Some(action) = action_from_mouse_event(
-                        mouse,
-                        &last_ui_areas.panes,
-                        view.sections.offset(),
-                        view.messages.offset(),
-                        &state,
-                    ) {
-                        state.apply(action);
-                    }
-                }
-                _ => {}
-            }
+            let event = event::read()?;
+            handle_terminal_event(event, &mut state, &mut view, &last_ui_areas);
         }
         Ok(())
     })();
@@ -150,7 +154,7 @@ fn merge_cleanup_error(primary: io::Error, cleanup: io::Result<()>) -> io::Error
 }
 
 fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
-    let mut steps = Vec::with_capacity(4);
+    let mut steps = Vec::with_capacity(5);
     if state.cursor_hidden {
         steps.push(CleanupStep::ShowCursor);
     }
@@ -159,6 +163,9 @@ fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
     }
     if state.alternate_screen_entered {
         steps.push(CleanupStep::LeaveAlternateScreen);
+    }
+    if state.bracketed_paste_enabled {
+        steps.push(CleanupStep::DisableBracketedPaste);
     }
     if state.raw_mode_enabled {
         steps.push(CleanupStep::DisableRawMode);
@@ -175,6 +182,7 @@ fn restore_terminal(state: SetupState) -> io::Result<()> {
             CleanupStep::ShowCursor => execute!(stdout, Show),
             CleanupStep::DisableMouseCapture => execute!(stdout, DisableMouseCapture),
             CleanupStep::LeaveAlternateScreen => execute!(stdout, LeaveAlternateScreen),
+            CleanupStep::DisableBracketedPaste => execute!(stdout, DisableBracketedPaste),
             CleanupStep::DisableRawMode => disable_raw_mode(),
         };
 
@@ -186,6 +194,168 @@ fn restore_terminal(state: SetupState) -> io::Result<()> {
     }
 
     first_error.map_or(Ok(()), Err)
+}
+
+#[cfg(target_os = "linux")]
+// TODO(linux): implement OSC 5522 image paste
+fn platform_clipboard_image_hint() {}
+
+#[cfg(target_os = "windows")]
+// TODO(windows): implement OSC 5522 image paste
+fn platform_clipboard_image_hint() {}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn platform_clipboard_image_hint() {}
+
+fn clipboard_error(error: arboard::Error) -> ClipboardError {
+    ClipboardError::Unavailable(error.to_string())
+}
+
+fn clipboard_image() -> Result<Option<ClipboardImage>, ClipboardError> {
+    platform_clipboard_image_hint();
+    let mut clipboard = Clipboard::new().map_err(clipboard_error)?;
+    match clipboard.get_image() {
+        Ok(image) => Ok(Some(ClipboardImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.bytes.into_owned(),
+        })),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(error) => Err(clipboard_error(error)),
+    }
+}
+
+fn clipboard_text() -> Result<Option<String>, ClipboardError> {
+    let mut clipboard = Clipboard::new().map_err(clipboard_error)?;
+    match clipboard.get_text() {
+        Ok(text) => Ok(Some(text)),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(error) => Err(clipboard_error(error)),
+    }
+}
+
+fn paste_action(
+    image_result: Result<Option<ClipboardImage>, ClipboardError>,
+    text_result: Result<Option<String>, ClipboardError>,
+) -> Result<Option<Action>, ClipboardError> {
+    if let Some(image) = image_result? {
+        return Ok(Some(Action::InsertImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.rgba,
+        }));
+    }
+
+    if let Some(text) = text_result? {
+        return Ok(Some(Action::InsertText(text)));
+    }
+
+    Ok(None)
+}
+
+fn handle_clipboard_paste(state: &mut AppState, view: &mut ViewState) {
+    let paste_result = match clipboard_image() {
+        Ok(Some(image)) => paste_action(Ok(Some(image)), Ok(None)),
+        Ok(None) => paste_action(Ok(None), clipboard_text()),
+        Err(error) => Err(error),
+    };
+
+    match paste_result {
+        Ok(Some(action)) => {
+            state.apply(action);
+            view.notification = None;
+        }
+        Ok(None) => {
+            view.notification = None;
+        }
+        Err(error) => {
+            // TODO(task-3): route clipboard notifications through a shared status area when TUI gets one.
+            view.notification = Some(format!(
+                "Clipboard paste failed: {}",
+                match error {
+                    ClipboardError::Unavailable(message) => message,
+                }
+            ));
+        }
+    }
+}
+
+fn composer_action_from_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Some(Action::Quit),
+        KeyCode::Tab => Some(Action::CycleFocus),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(Action::InsertLineBreak)
+        }
+        KeyCode::Enter => Some(Action::SubmitComposer),
+        KeyCode::Char(ch)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(Action::InsertText(ch.to_string()))
+        }
+        KeyCode::Left => Some(Action::MoveCursorLeft),
+        KeyCode::Right => Some(Action::MoveCursorRight),
+        KeyCode::Backspace => Some(Action::Backspace),
+        KeyCode::Delete => Some(Action::Delete),
+        KeyCode::PageUp => Some(Action::ScrollComposerUp),
+        KeyCode::PageDown => Some(Action::ScrollComposerDown),
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::ScrollComposerUp)
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::ScrollComposerDown)
+        }
+        KeyCode::Up | KeyCode::Down => None,
+        _ => None,
+    }
+}
+
+fn handle_terminal_event(
+    event: Event,
+    state: &mut AppState,
+    view: &mut ViewState,
+    last_ui_areas: &UiAreas,
+) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if state.focused_pane == FocusedPane::Composer
+                && key.code == KeyCode::Char('v')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                handle_clipboard_paste(state, view);
+                return;
+            }
+
+            let action = if state.focused_pane == FocusedPane::Composer {
+                composer_action_from_key(key)
+            } else {
+                action_from_key_event(key)
+            };
+
+            if let Some(action) = action {
+                state.apply(action);
+            }
+        }
+        Event::Paste(text) => {
+            if state.focused_pane == FocusedPane::Composer {
+                state.apply(Action::InsertText(text));
+                view.notification = None;
+            }
+        }
+        Event::Mouse(mouse) => {
+            if let Some(action) = action_from_mouse_event(
+                mouse,
+                &last_ui_areas.panes,
+                view.sections.offset(),
+                view.messages.offset(),
+                state,
+            ) {
+                state.apply(action);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn pane_areas(area: Rect) -> PaneAreas {
@@ -421,9 +591,17 @@ fn draw_ui(frame: &mut Frame, state: &mut AppState, view: &mut ViewState) -> UiA
     state.set_composer_scroll(composer_scroll);
 
     let composer_focused = state.focused_pane == FocusedPane::Composer;
+    let composer_title = match view.notification.as_deref() {
+        Some(notification) => format!(
+            "{} — {}",
+            pane_title("Composer", composer_focused),
+            notification
+        ),
+        None => pane_title("Composer", composer_focused),
+    };
     let composer_block = if areas.composer.height >= 3 {
         Block::default()
-            .title(pane_title("Composer", composer_focused))
+            .title(composer_title)
             .borders(Borders::ALL)
             .border_style(focus_style(composer_focused))
     } else {
@@ -625,6 +803,17 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE);
         assert_eq!(action_from_key_event(key), Some(Action::Activate));
     }
+    #[test]
+    fn composer_key_events_map_enter_and_shift_enter_to_distinct_actions() {
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::NONE)),
+            Some(Action::SubmitComposer)
+        );
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::SHIFT)),
+            Some(Action::InsertLineBreak)
+        );
+    }
 
     #[test]
     fn pane_areas_split_the_frame_into_two_columns() {
@@ -694,11 +883,13 @@ mod tests {
                 alternate_screen_entered: true,
                 mouse_capture_enabled: true,
                 cursor_hidden: true,
+                bracketed_paste_enabled: true,
             }),
             vec![
                 CleanupStep::ShowCursor,
                 CleanupStep::DisableMouseCapture,
                 CleanupStep::LeaveAlternateScreen,
+                CleanupStep::DisableBracketedPaste,
                 CleanupStep::DisableRawMode,
             ]
         );
@@ -734,6 +925,89 @@ mod tests {
             vec![
                 CleanupStep::DisableMouseCapture,
                 CleanupStep::LeaveAlternateScreen,
+                CleanupStep::DisableRawMode,
+            ]
+        );
+    }
+    #[test]
+    fn paste_action_prefers_clipboard_image_over_text() {
+        let image = ClipboardImage {
+            width: 2,
+            height: 1,
+            rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+
+        assert_eq!(
+            paste_action(Ok(Some(image.clone())), Ok(Some("ignored".into()))),
+            Ok(Some(Action::InsertImage {
+                width: image.width,
+                height: image.height,
+                rgba: image.rgba,
+            }))
+        );
+    }
+
+    #[test]
+    fn paste_action_uses_clipboard_text_when_image_is_absent() {
+        assert_eq!(
+            paste_action(Ok(None), Ok(Some("hello".into()))),
+            Ok(Some(Action::InsertText("hello".into())))
+        );
+    }
+
+    #[test]
+    fn paste_action_returns_error_without_text_fallback_or_clear_action() {
+        let error = ClipboardError::Unavailable("image read failed".into());
+
+        assert_eq!(
+            paste_action(Err(error.clone()), Ok(Some("hello".into()))),
+            Err(error)
+        );
+    }
+
+    #[test]
+    fn paste_event_inserts_text_only_when_composer_is_focused() {
+        let mut focused_state = AppState::new(fixture_sections());
+        focused_state.focused_pane = FocusedPane::Composer;
+        let mut focused_view = ViewState::default();
+
+        handle_terminal_event(
+            Event::Paste("hello".into()),
+            &mut focused_state,
+            &mut focused_view,
+            &UiAreas::default(),
+        );
+
+        assert_eq!(focused_state.composer_text(), "hello");
+
+        let mut unfocused_state = AppState::new(fixture_sections());
+        let mut unfocused_view = ViewState::default();
+
+        handle_terminal_event(
+            Event::Paste("ignored".into()),
+            &mut unfocused_state,
+            &mut unfocused_view,
+            &UiAreas::default(),
+        );
+
+        assert_eq!(unfocused_state.composer_text(), "");
+    }
+
+    #[test]
+    fn bracketed_paste_restoration_disables_bracketed_paste_before_raw_mode() {
+        assert_eq!(
+            restoration_plan(SetupState {
+                raw_mode_enabled: true,
+                alternate_screen_entered: true,
+                mouse_capture_enabled: true,
+                cursor_hidden: true,
+                bracketed_paste_enabled: true,
+            }),
+            vec![
+                CleanupStep::ShowCursor,
+                CleanupStep::DisableMouseCapture,
+                CleanupStep::LeaveAlternateScreen,
+                CleanupStep::DisableBracketedPaste,
                 CleanupStep::DisableRawMode,
             ]
         );

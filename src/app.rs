@@ -2,6 +2,7 @@
 pub enum FocusedPane {
     Sections,
     Messages,
+    Composer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +11,25 @@ pub struct Section {
     pub messages: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub id: u64,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerState {
+    text: String,
+    cursor: usize,
+    scroll: usize,
+    attachments: Vec<ImageAttachment>,
+    next_attachment_id: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Quit,
     MoveUp,
@@ -23,6 +42,20 @@ pub enum Action {
     Activate,
     SelectSection(usize),
     SelectMessage(usize),
+    InsertText(String),
+    InsertLineBreak,
+    Backspace,
+    Delete,
+    MoveCursorLeft,
+    MoveCursorRight,
+    ScrollComposerUp,
+    ScrollComposerDown,
+    InsertImage {
+        width: usize,
+        height: usize,
+        rgba: Vec<u8>,
+    },
+    SubmitComposer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +71,7 @@ pub struct AppState {
     pub selected_message: usize,
     pub focused_pane: FocusedPane,
     pub running: bool,
+    composer: ComposerState,
 }
 
 pub fn fixture_sections() -> Vec<Section> {
@@ -75,6 +109,13 @@ impl AppState {
             selected_message: 0,
             focused_pane: FocusedPane::Sections,
             running: true,
+            composer: ComposerState {
+                text: String::new(),
+                cursor: 0,
+                scroll: 0,
+                attachments: Vec::new(),
+                next_attachment_id: 0,
+            },
         }
     }
 
@@ -86,6 +127,31 @@ impl AppState {
         self.selected_section()
             .map(|section| section.messages.as_slice())
             .unwrap_or(&[])
+    }
+
+    #[allow(dead_code)]
+    pub fn composer_text(&self) -> &str {
+        &self.composer.text
+    }
+
+    #[allow(dead_code)]
+    pub fn composer_cursor(&self) -> usize {
+        self.composer.cursor
+    }
+
+    #[allow(dead_code)]
+    pub fn composer_scroll(&self) -> usize {
+        self.composer.scroll
+    }
+
+    #[allow(dead_code)]
+    pub fn set_composer_scroll(&mut self, scroll: usize) {
+        self.composer.scroll = scroll;
+    }
+
+    #[allow(dead_code)]
+    pub fn attachments(&self) -> &[ImageAttachment] {
+        &self.composer.attachments
     }
 
     pub fn apply(&mut self, action: Action) -> Outcome {
@@ -121,7 +187,8 @@ impl AppState {
             Action::CycleFocus => {
                 self.focused_pane = match self.focused_pane {
                     FocusedPane::Sections => FocusedPane::Messages,
-                    FocusedPane::Messages => FocusedPane::Sections,
+                    FocusedPane::Messages => FocusedPane::Composer,
+                    FocusedPane::Composer => FocusedPane::Sections,
                 };
                 Outcome::Continue
             }
@@ -137,6 +204,65 @@ impl AppState {
             }
             Action::SelectMessage(index) => {
                 self.select_message(index);
+                Outcome::Continue
+            }
+            Action::InsertText(text) => {
+                self.insert_text_at_cursor(&text);
+                Outcome::Continue
+            }
+            Action::InsertLineBreak => {
+                self.insert_text_at_cursor("\n");
+                Outcome::Continue
+            }
+            Action::Backspace => {
+                self.backspace_composer();
+                Outcome::Continue
+            }
+            Action::Delete => {
+                self.delete_composer();
+                Outcome::Continue
+            }
+            Action::MoveCursorLeft => {
+                self.composer.cursor =
+                    previous_scalar_boundary(&self.composer.text, self.composer.cursor);
+                Outcome::Continue
+            }
+            Action::MoveCursorRight => {
+                self.composer.cursor =
+                    next_scalar_boundary(&self.composer.text, self.composer.cursor);
+                Outcome::Continue
+            }
+            Action::ScrollComposerUp => {
+                self.composer.scroll = self.composer.scroll.saturating_sub(1);
+                Outcome::Continue
+            }
+            Action::ScrollComposerDown => {
+                self.composer.scroll = self.composer.scroll.saturating_add(1);
+                Outcome::Continue
+            }
+            Action::InsertImage {
+                width,
+                height,
+                rgba,
+            } => {
+                let id = self.composer.next_attachment_id;
+                self.composer.next_attachment_id =
+                    self.composer.next_attachment_id.saturating_add(1);
+                self.composer.attachments.push(ImageAttachment {
+                    id,
+                    width,
+                    height,
+                    rgba,
+                });
+                let token = image_token(id);
+                self.insert_text_at_cursor(&token);
+                Outcome::Continue
+            }
+            Action::SubmitComposer => {
+                self.composer.text.clear();
+                self.composer.cursor = 0;
+                self.composer.scroll = 0;
+                self.composer.attachments.clear();
                 Outcome::Continue
             }
         }
@@ -182,6 +308,7 @@ impl AppState {
             FocusedPane::Messages => {
                 self.selected_message = self.selected_message.saturating_sub(1);
             }
+            FocusedPane::Composer => {}
         }
     }
 
@@ -208,8 +335,109 @@ impl AppState {
                         self.selected_message.min(last).saturating_add(1).min(last);
                 }
             }
+            FocusedPane::Composer => {}
         }
     }
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        self.composer.text.insert_str(self.composer.cursor, text);
+        self.composer.cursor += text.len();
+    }
+
+    fn backspace_composer(&mut self) {
+        if let Some((start, end, id)) =
+            image_token_ending_at(&self.composer.text, self.composer.cursor)
+        {
+            self.composer.text.replace_range(start..end, "");
+            self.composer.cursor = start;
+            self.composer
+                .attachments
+                .retain(|attachment| attachment.id != id);
+            return;
+        }
+
+        let start = previous_scalar_boundary(&self.composer.text, self.composer.cursor);
+        if start == self.composer.cursor {
+            return;
+        }
+
+        self.composer
+            .text
+            .replace_range(start..self.composer.cursor, "");
+        self.composer.cursor = start;
+    }
+
+    fn delete_composer(&mut self) {
+        if let Some((start, end, id)) =
+            image_token_starting_at(&self.composer.text, self.composer.cursor)
+        {
+            self.composer.text.replace_range(start..end, "");
+            self.composer
+                .attachments
+                .retain(|attachment| attachment.id != id);
+            return;
+        }
+
+        let end = next_scalar_boundary(&self.composer.text, self.composer.cursor);
+        if end == self.composer.cursor {
+            return;
+        }
+
+        self.composer
+            .text
+            .replace_range(self.composer.cursor..end, "");
+    }
+}
+
+fn previous_scalar_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+
+    text[..cursor]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_scalar_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+
+    let mut chars = text[cursor..].chars();
+    let Some(ch) = chars.next() else {
+        return text.len();
+    };
+    cursor + ch.len_utf8()
+}
+
+fn image_token(id: u64) -> String {
+    format!("[Image #{id}]")
+}
+
+fn image_token_ending_at(text: &str, cursor: usize) -> Option<(usize, usize, u64)> {
+    let prefix = &text[..cursor];
+    let start = prefix.rfind("[Image #")?;
+    parse_image_token_at(text, start).filter(|(_, end, _)| *end == cursor)
+}
+
+fn image_token_starting_at(text: &str, cursor: usize) -> Option<(usize, usize, u64)> {
+    parse_image_token_at(text, cursor)
+}
+
+fn parse_image_token_at(text: &str, start: usize) -> Option<(usize, usize, u64)> {
+    let rest = text.get(start..)?;
+    let digits = rest.strip_prefix("[Image #")?;
+    let close = digits.find(']')?;
+    let number = digits.get(..close)?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let end = start + "[Image #".len() + close + 1;
+    let id = number.parse::<u64>().ok()?;
+    Some((start, end, id))
 }
 
 #[cfg(test)]
@@ -284,6 +512,90 @@ mod tests {
         assert_eq!(state.focused_pane, FocusedPane::Messages);
         assert_eq!(state.apply(Action::Activate), Outcome::Continue);
         assert_eq!(state.focused_pane, FocusedPane::Messages);
+    }
+
+    #[test]
+    fn composer_submit_clears_multiline_draft_scroll_and_attachments() {
+        let mut state = AppState::new(fixture_sections());
+        let sections_before = state.sections.clone();
+
+        state.apply(Action::InsertText("hello\nworld".into()));
+        state.apply(Action::InsertImage {
+            width: 2,
+            height: 1,
+            rgba: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        });
+        state.set_composer_scroll(3);
+
+        state.apply(Action::SubmitComposer);
+
+        assert_eq!(state.composer_text(), "");
+        assert_eq!(state.composer_cursor(), 0);
+        assert_eq!(state.composer_scroll(), 0);
+        assert!(state.attachments().is_empty());
+        assert_eq!(state.sections, sections_before);
+    }
+
+    #[test]
+    fn composer_backspace_removes_image_token_and_attachment_atomically() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![9, 8, 7, 6],
+        });
+        assert_eq!(state.composer_text(), "[Image #0]");
+
+        state.apply(Action::Backspace);
+
+        assert_eq!(state.composer_text(), "");
+        assert_eq!(state.composer_cursor(), 0);
+        assert!(state.attachments().is_empty());
+    }
+
+    #[test]
+    fn composer_backspace_keeps_first_attachment_id_after_second_token_is_removed() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 0],
+        });
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 1, 1, 1],
+        });
+
+        state.apply(Action::Backspace);
+
+        assert_eq!(state.composer_text(), "[Image #0]");
+        assert_eq!(state.attachments().len(), 1);
+        assert_eq!(state.attachments()[0].id, 0);
+    }
+
+    #[test]
+    fn composer_utf8_cursor_left_then_backspace_removes_single_scalar() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertText("é🙂".into()));
+        state.apply(Action::MoveCursorLeft);
+        state.apply(Action::Backspace);
+
+        assert_eq!(state.composer_text(), "🙂");
+        assert_eq!(state.composer_cursor(), 0);
+    }
+
+    #[test]
+    fn composer_scroll_actions_clamp_at_zero_for_empty_draft() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::ScrollComposerDown);
+        state.apply(Action::ScrollComposerUp);
+
+        assert_eq!(state.composer_scroll(), 0);
     }
 
     #[test]

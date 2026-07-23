@@ -15,8 +15,8 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
@@ -42,6 +42,18 @@ enum CleanupStep {
 struct PaneAreas {
     sections: Rect,
     messages: Rect,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UiAreas {
+    panes: PaneAreas,
+    composer: Rect,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ComposerLineMetrics {
+    total_rows: usize,
+    cursor_row: usize,
 }
 
 #[derive(Debug, Default)]
@@ -84,12 +96,12 @@ pub fn run_app() -> io::Result<()> {
 
     let mut state = AppState::new(fixture_sections());
     let mut view = ViewState::default();
-    let mut last_panes = PaneAreas::default();
+    let mut last_ui_areas = UiAreas::default();
 
     let runtime_result = (|| -> io::Result<()> {
         while state.running {
             terminal.draw(|frame| {
-                last_panes = draw_ui(frame, &state, &mut view);
+                last_ui_areas = draw_ui(frame, &mut state, &mut view);
             })?;
 
             match event::read()? {
@@ -101,7 +113,7 @@ pub fn run_app() -> io::Result<()> {
                 Event::Mouse(mouse) => {
                     if let Some(action) = action_from_mouse_event(
                         mouse,
-                        &last_panes,
+                        &last_ui_areas.panes,
                         view.sections.offset(),
                         view.messages.offset(),
                         &state,
@@ -182,122 +194,248 @@ fn pane_areas(area: Rect) -> PaneAreas {
     PaneAreas { sections, messages }
 }
 
-fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAreas {
+fn ui_areas(area: Rect, composer_content_rows: usize) -> UiAreas {
+    if area.height == 0 {
+        return UiAreas::default();
+    }
+
+    if area.height < 3 {
+        return UiAreas {
+            panes: PaneAreas::default(),
+            composer: area,
+        };
+    }
+
+    let composer_height = composer_content_rows.clamp(1, 10).saturating_add(2);
+    let composer_height = composer_height.min(usize::from(area.height)) as u16;
+    let upper_height = area.height.saturating_sub(composer_height);
+    let upper = Rect::new(area.x, area.y, area.width, upper_height);
+
+    UiAreas {
+        panes: pane_areas(upper),
+        composer: Rect::new(
+            area.x,
+            area.y.saturating_add(upper_height),
+            area.width,
+            composer_height,
+        ),
+    }
+}
+
+fn composer_line_metrics(text: &str, width: usize, cursor: usize) -> ComposerLineMetrics {
+    let width = width.max(1);
+    let cursor = cursor.min(text.len());
+    let mut total_rows = 0usize;
+    let mut cursor_row = 0usize;
+    let mut current_width = 0usize;
+
+    for (idx, ch) in text.char_indices() {
+        if idx == cursor {
+            cursor_row = total_rows;
+        }
+
+        if ch == '\n' {
+            total_rows += 1;
+            current_width = 0;
+            continue;
+        }
+
+        if current_width == width {
+            total_rows += 1;
+            current_width = 0;
+        }
+
+        current_width += 1;
+    }
+
+    if cursor == text.len() {
+        cursor_row = total_rows;
+    }
+
+    ComposerLineMetrics {
+        total_rows: total_rows.saturating_add(1),
+        cursor_row,
+    }
+}
+
+fn composer_content_height(text: &str, width: usize) -> usize {
+    composer_line_metrics(text, width, text.len())
+        .total_rows
+        .clamp(1, 10)
+}
+
+fn composer_cursor_row(text: &str, width: usize, cursor: usize) -> usize {
+    composer_line_metrics(text, width, cursor).cursor_row
+}
+
+fn composer_viewport_top(text: &str, width: usize, cursor: usize, current_scroll: usize) -> usize {
+    let cursor_row = composer_cursor_row(text, width, cursor);
+    let viewport_height = 10;
+
+    if cursor_row < current_scroll {
+        cursor_row
+    } else if cursor_row >= current_scroll.saturating_add(viewport_height) {
+        cursor_row.saturating_add(1).saturating_sub(viewport_height)
+    } else {
+        current_scroll
+    }
+}
+
+fn draw_ui(frame: &mut Frame, state: &mut AppState, view: &mut ViewState) -> UiAreas {
     let frame_area = frame.area();
+    if frame_area.height == 0 {
+        return UiAreas::default();
+    }
+
     frame.render_widget(Clear, frame_area);
-    let panes = pane_areas(frame_area);
+
+    let composer_width =
+        usize::from(
+            frame_area
+                .width
+                .saturating_sub(if frame_area.height >= 3 { 2 } else { 0 }),
+        );
+    let composer_height = composer_content_height(state.composer_text(), composer_width);
+    let areas = ui_areas(frame_area, composer_height);
 
     view.sections
         .select((!state.sections.is_empty()).then_some(state.selected_section));
     view.messages
         .select((!state.current_messages().is_empty()).then_some(state.selected_message));
 
-    let section_content_width = usize::from(panes.sections.width.saturating_sub(2));
-    let section_viewport_height = usize::from(panes.sections.height.saturating_sub(2));
-    let section_items: Vec<ListItem> = pad_items_to_viewport(
-        if state.sections.is_empty() {
-            vec![ListItem::new(padded_cell(
-                "No sections",
-                section_content_width,
-            ))]
-        } else {
-            state
-                .sections
-                .iter()
-                .map(|section| {
-                    ListItem::new(padded_cell(section.title.as_str(), section_content_width))
-                })
-                .collect()
-        },
-        section_viewport_height,
-        section_content_width,
-    );
+    if areas.panes.sections.height > 0 {
+        let section_content_width = usize::from(areas.panes.sections.width.saturating_sub(2));
+        let section_viewport_height = usize::from(areas.panes.sections.height.saturating_sub(2));
+        let section_items: Vec<ListItem> = pad_items_to_viewport(
+            if state.sections.is_empty() {
+                vec![ListItem::new(padded_cell(
+                    "No sections",
+                    section_content_width,
+                ))]
+            } else {
+                state
+                    .sections
+                    .iter()
+                    .map(|section| {
+                        ListItem::new(padded_cell(section.title.as_str(), section_content_width))
+                    })
+                    .collect()
+            },
+            section_viewport_height,
+            section_content_width,
+        );
 
-    let sections_block = Block::default()
-        .title(pane_title(
-            "Sections",
-            state.focused_pane == FocusedPane::Sections,
-        ))
-        .borders(Borders::ALL)
-        .border_style(focus_style(state.focused_pane == FocusedPane::Sections));
+        let sections_block = Block::default()
+            .title(pane_title(
+                "Sections",
+                state.focused_pane == FocusedPane::Sections,
+            ))
+            .borders(Borders::ALL)
+            .border_style(focus_style(state.focused_pane == FocusedPane::Sections));
 
-    frame.render_widget(
-        Clear,
-        panes.sections.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }),
-    );
-    frame.render_stateful_widget(
-        List::new(section_items)
-            .block(sections_block)
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-        panes.sections,
-        &mut view.sections,
-    );
+        frame.render_widget(
+            Clear,
+            areas.panes.sections.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+        );
+        frame.render_stateful_widget(
+            List::new(section_items)
+                .block(sections_block)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            areas.panes.sections,
+            &mut view.sections,
+        );
 
-    render_scrollbar(
-        frame,
-        panes.sections,
-        state.sections.len(),
-        scrollbar_position(
-            (!state.sections.is_empty()).then_some(state.selected_section),
-            view.sections.offset(),
-        ),
-    );
+        render_scrollbar(
+            frame,
+            areas.panes.sections,
+            state.sections.len(),
+            scrollbar_position(
+                (!state.sections.is_empty()).then_some(state.selected_section),
+                view.sections.offset(),
+            ),
+        );
 
-    let message_content_width = usize::from(panes.messages.width.saturating_sub(2));
-    let message_viewport_height = usize::from(panes.messages.height.saturating_sub(2));
-    let message_items: Vec<ListItem> = pad_items_to_viewport(
-        if state.current_messages().is_empty() {
-            vec![ListItem::new(padded_cell(
-                "No messages",
-                message_content_width,
-            ))]
-        } else {
-            state
-                .current_messages()
-                .iter()
-                .map(|message| ListItem::new(padded_cell(message.as_str(), message_content_width)))
-                .collect()
-        },
-        message_viewport_height,
-        message_content_width,
-    );
+        let message_content_width = usize::from(areas.panes.messages.width.saturating_sub(2));
+        let message_viewport_height = usize::from(areas.panes.messages.height.saturating_sub(2));
+        let message_items: Vec<ListItem> = pad_items_to_viewport(
+            if state.current_messages().is_empty() {
+                vec![ListItem::new(padded_cell(
+                    "No messages",
+                    message_content_width,
+                ))]
+            } else {
+                state
+                    .current_messages()
+                    .iter()
+                    .map(|message| {
+                        ListItem::new(padded_cell(message.as_str(), message_content_width))
+                    })
+                    .collect()
+            },
+            message_viewport_height,
+            message_content_width,
+        );
 
-    let messages_block = Block::default()
-        .title(pane_title(
-            "Messages",
-            state.focused_pane == FocusedPane::Messages,
-        ))
-        .borders(Borders::ALL)
-        .border_style(focus_style(state.focused_pane == FocusedPane::Messages));
-    frame.render_widget(
-        Clear,
-        panes.messages.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }),
-    );
-    frame.render_stateful_widget(
-        List::new(message_items)
-            .block(messages_block)
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-        panes.messages,
-        &mut view.messages,
-    );
+        let messages_block = Block::default()
+            .title(pane_title(
+                "Messages",
+                state.focused_pane == FocusedPane::Messages,
+            ))
+            .borders(Borders::ALL)
+            .border_style(focus_style(state.focused_pane == FocusedPane::Messages));
+        frame.render_widget(
+            Clear,
+            areas.panes.messages.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+        );
+        frame.render_stateful_widget(
+            List::new(message_items)
+                .block(messages_block)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            areas.panes.messages,
+            &mut view.messages,
+        );
 
-    render_scrollbar(
-        frame,
-        panes.messages,
-        state.current_messages().len(),
-        scrollbar_position(
-            (!state.current_messages().is_empty()).then_some(state.selected_message),
-            view.messages.offset(),
-        ),
-    );
+        render_scrollbar(
+            frame,
+            areas.panes.messages,
+            state.current_messages().len(),
+            scrollbar_position(
+                (!state.current_messages().is_empty()).then_some(state.selected_message),
+                view.messages.offset(),
+            ),
+        );
+    }
 
-    panes
+    let composer_scroll = composer_viewport_top(
+        state.composer_text(),
+        composer_width,
+        state.composer_cursor(),
+        state.composer_scroll(),
+    );
+    state.set_composer_scroll(composer_scroll);
+
+    let composer_focused = state.focused_pane == FocusedPane::Composer;
+    let composer_block = if areas.composer.height >= 3 {
+        Block::default()
+            .title(pane_title("Composer", composer_focused))
+            .borders(Borders::ALL)
+            .border_style(focus_style(composer_focused))
+    } else {
+        Block::default()
+    };
+    let composer = Paragraph::new(state.composer_text())
+        .block(composer_block)
+        .wrap(Wrap { trim: false })
+        .scroll((state.composer_scroll() as u16, 0));
+    frame.render_widget(composer, areas.composer);
+
+    areas
 }
 
 fn pad_items_to_viewport(
@@ -501,12 +639,12 @@ mod tests {
     fn empty_sections_render_placeholder() {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = AppState::new(vec![]);
+        let mut state = AppState::new(vec![]);
         let mut view = ViewState::default();
 
         terminal
             .draw(|frame| {
-                let _ = draw_ui(frame, &state, &mut view);
+                let _ = draw_ui(frame, &mut state, &mut view);
             })
             .unwrap();
 
@@ -525,7 +663,7 @@ mod tests {
     fn empty_messages_render_placeholder() {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = AppState::new(vec![Section {
+        let mut state = AppState::new(vec![Section {
             title: "Empty".into(),
             messages: vec![],
         }]);
@@ -533,7 +671,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                let _ = draw_ui(frame, &state, &mut view);
+                let _ = draw_ui(frame, &mut state, &mut view);
             })
             .unwrap();
 
@@ -746,5 +884,88 @@ mod tests {
             action_from_mouse_event(past_visible_window, &panes, 0, 99, &state),
             Some(Action::FocusRight)
         );
+    }
+    #[test]
+    fn composer_content_height_empty_text_is_one_row() {
+        assert_eq!(composer_content_height("", 20), 1);
+    }
+
+    #[test]
+    fn composer_content_height_caps_twelve_newline_lines_at_ten() {
+        assert_eq!(composer_content_height(&("x\n".repeat(11) + "x"), 20), 10);
+    }
+
+    #[test]
+    fn composer_ui_areas_for_eighty_by_twenty_with_five_rows_give_expected_heights() {
+        let areas = ui_areas(Rect::new(0, 0, 80, 20), 5);
+
+        assert_eq!(areas.composer, Rect::new(0, 13, 80, 7));
+        assert_eq!(areas.panes.sections.height, 13);
+        assert_eq!(areas.panes.messages.height, 13);
+    }
+
+    #[test]
+    fn composer_ui_areas_for_two_rows_use_full_frame_without_upper_panes() {
+        let areas = ui_areas(Rect::new(0, 0, 20, 2), 1);
+
+        assert_eq!(areas.composer, Rect::new(0, 0, 20, 2));
+        assert_eq!(areas.panes.sections.height, 0);
+        assert_eq!(areas.panes.messages.height, 0);
+    }
+
+    #[test]
+    fn composer_viewport_top_tracks_cursor_in_last_ten_visual_lines() {
+        let text = "x\n".repeat(11) + "x";
+        assert_eq!(composer_viewport_top(&text, 20, text.len(), 0), 2);
+    }
+
+    #[test]
+    fn composer_draw_syncs_scroll_and_submit_resets_it() {
+        let backend = TestBackend::new(20, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new(fixture_sections());
+        let mut view = ViewState::default();
+        let text = "x\n".repeat(11) + "x";
+
+        state.apply(Action::InsertText(text));
+
+        terminal
+            .draw(|frame| {
+                let _ = draw_ui(frame, &mut state, &mut view);
+            })
+            .unwrap();
+
+        assert_eq!(state.composer_scroll(), 2);
+
+        state.apply(Action::SubmitComposer);
+
+        assert_eq!(state.composer_scroll(), 0);
+    }
+
+    #[test]
+    fn composer_renders_below_upper_panes_after_five_lines() {
+        let backend = TestBackend::new(20, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new(fixture_sections());
+        let mut view = ViewState::default();
+
+        state.apply(Action::InsertText("a\nb\nc\nd\ne".into()));
+
+        terminal
+            .draw(|frame| {
+                let _ = draw_ui(frame, &mut state, &mut view);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let border_row = (0..20)
+            .map(|x| buffer[(x, 12)].symbol())
+            .collect::<String>();
+        let composer_row = (0..20)
+            .map(|x| buffer[(x, 13)].symbol())
+            .collect::<String>();
+
+        assert!(border_row.contains("└") || border_row.contains("┘") || border_row.contains("─"));
+        assert!(composer_row.contains("Composer"));
     }
 }

@@ -14,7 +14,6 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
     widgets::{
         Block, Borders, Clear, List, ListItem, ListState, Scrollbar, ScrollbarOrientation,
         ScrollbarState,
@@ -78,6 +77,10 @@ pub fn run_app() -> io::Result<()> {
         Ok(terminal) => terminal,
         Err(error) => return Err(merge_cleanup_error(error, restore_terminal(setup))),
     };
+
+    if let Err(error) = terminal.clear() {
+        return Err(merge_cleanup_error(error, restore_terminal(setup)));
+    }
 
     let mut state = AppState::new(fixture_sections());
     let mut view = ViewState::default();
@@ -189,15 +192,26 @@ fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAre
     view.messages
         .select((!state.current_messages().is_empty()).then_some(state.selected_message));
 
-    let section_items: Vec<ListItem> = if state.sections.is_empty() {
-        vec![ListItem::new("No sections")]
-    } else {
-        state
-            .sections
-            .iter()
-            .map(|section| ListItem::new(Line::from(section.title.as_str())))
-            .collect()
-    };
+    let section_content_width = usize::from(panes.sections.width.saturating_sub(2));
+    let section_viewport_height = usize::from(panes.sections.height.saturating_sub(2));
+    let section_items: Vec<ListItem> = pad_items_to_viewport(
+        if state.sections.is_empty() {
+            vec![ListItem::new(padded_cell(
+                "No sections",
+                section_content_width,
+            ))]
+        } else {
+            state
+                .sections
+                .iter()
+                .map(|section| {
+                    ListItem::new(padded_cell(section.title.as_str(), section_content_width))
+                })
+                .collect()
+        },
+        section_viewport_height,
+        section_content_width,
+    );
 
     let sections_block = Block::default()
         .title(pane_title(
@@ -207,6 +221,13 @@ fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAre
         .borders(Borders::ALL)
         .border_style(focus_style(state.focused_pane == FocusedPane::Sections));
 
+    frame.render_widget(
+        Clear,
+        panes.sections.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+    );
     frame.render_stateful_widget(
         List::new(section_items)
             .block(sections_block)
@@ -225,15 +246,24 @@ fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAre
         ),
     );
 
-    let message_items: Vec<ListItem> = if state.current_messages().is_empty() {
-        vec![ListItem::new("No messages")]
-    } else {
-        state
-            .current_messages()
-            .iter()
-            .map(|message| ListItem::new(Line::from(message.as_str())))
-            .collect()
-    };
+    let message_content_width = usize::from(panes.messages.width.saturating_sub(2));
+    let message_viewport_height = usize::from(panes.messages.height.saturating_sub(2));
+    let message_items: Vec<ListItem> = pad_items_to_viewport(
+        if state.current_messages().is_empty() {
+            vec![ListItem::new(padded_cell(
+                "No messages",
+                message_content_width,
+            ))]
+        } else {
+            state
+                .current_messages()
+                .iter()
+                .map(|message| ListItem::new(padded_cell(message.as_str(), message_content_width)))
+                .collect()
+        },
+        message_viewport_height,
+        message_content_width,
+    );
 
     let messages_block = Block::default()
         .title(pane_title(
@@ -242,7 +272,13 @@ fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAre
         ))
         .borders(Borders::ALL)
         .border_style(focus_style(state.focused_pane == FocusedPane::Messages));
-
+    frame.render_widget(
+        Clear,
+        panes.messages.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+    );
     frame.render_stateful_widget(
         List::new(message_items)
             .block(messages_block)
@@ -262,6 +298,26 @@ fn draw_ui(frame: &mut Frame, state: &AppState, view: &mut ViewState) -> PaneAre
     );
 
     panes
+}
+
+fn pad_items_to_viewport(
+    mut items: Vec<ListItem<'static>>,
+    viewport_height: usize,
+    width: usize,
+) -> Vec<ListItem<'static>> {
+    while items.len() < viewport_height {
+        items.push(ListItem::new(" ".repeat(width)));
+    }
+    items
+}
+
+fn padded_cell(text: &str, width: usize) -> String {
+    let mut cell = text.chars().take(width).collect::<String>();
+    let visible_len = cell.chars().count();
+    if visible_len < width {
+        cell.push_str(&" ".repeat(width - visible_len));
+    }
+    cell
 }
 
 fn pane_title(label: &str, focused: bool) -> String {

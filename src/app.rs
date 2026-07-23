@@ -62,7 +62,7 @@ pub fn fixture_sections() -> Vec<Section> {
         },
         Section {
             title: "Archive".into(),
-            messages: (1..=36).map(|n| format!("Archived message {n}")).collect(),
+            messages: (1..=132).map(|n| format!("Archived message {n}")).collect(),
         },
     ]
 }

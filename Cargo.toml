@@ -7,3 +7,4 @@ edition = "2024"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["bracketed-paste"] }
 arboard = "3.6.1"
+unicode-width = "0.2"

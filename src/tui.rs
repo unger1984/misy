@@ -21,6 +21,7 @@ use ratatui::{
         ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{Action, AppState, FocusedPane, fixture_sections};
 
@@ -282,7 +283,6 @@ fn handle_clipboard_paste(state: &mut AppState, view: &mut ViewState) {
 
 fn composer_action_from_key(key: KeyEvent) -> Option<Action> {
     match key.code {
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Some(Action::Quit),
         KeyCode::Tab => Some(Action::CycleFocus),
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
             Some(Action::InsertLineBreak)
@@ -410,12 +410,17 @@ fn composer_line_metrics(text: &str, width: usize, cursor: usize) -> ComposerLin
             continue;
         }
 
-        if current_width == width {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch_width == 0 {
+            continue;
+        }
+
+        if current_width > 0 && current_width.saturating_add(ch_width) > width {
             total_rows += 1;
             current_width = 0;
         }
 
-        current_width += 1;
+        current_width = current_width.saturating_add(ch_width.min(width));
     }
 
     if cursor == text.len() {
@@ -812,6 +817,13 @@ mod tests {
         assert_eq!(
             composer_action_from_key(KeyEvent::new(KeyCode::Enter, event::KeyModifiers::SHIFT)),
             Some(Action::InsertLineBreak)
+        );
+    }
+    #[test]
+    fn composer_key_events_insert_plain_q_instead_of_quitting() {
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(KeyCode::Char('q'), event::KeyModifiers::NONE)),
+            Some(Action::InsertText("q".into()))
         );
     }
 
@@ -1214,6 +1226,31 @@ mod tests {
         state.apply(Action::SubmitComposer);
 
         assert_eq!(state.composer_scroll(), 0);
+    }
+
+    #[test]
+    fn composer_unicode_wide_char_wrap_matches_terminal_cells() {
+        assert_eq!(composer_content_height("a好", 2), 2);
+        assert_eq!(composer_cursor_row("a好", 2, "a".len()), 0);
+        assert_eq!(composer_cursor_row("a好", 2, "a好".len()), 1);
+    }
+
+    #[test]
+    fn composer_unicode_combining_mark_does_not_add_width() {
+        let text = "a\u{0301}b";
+
+        assert_eq!(composer_content_height(text, 1), 2);
+        assert_eq!(composer_cursor_row(text, 1, "a".len()), 0);
+        assert_eq!(composer_cursor_row(text, 1, "a\u{0301}".len()), 0);
+        assert_eq!(composer_cursor_row(text, 1, text.len()), 1);
+    }
+
+    #[test]
+    fn composer_unicode_emoji_updates_viewport_by_display_width() {
+        let text = format!("{}a😀", "x\n".repeat(9));
+
+        assert_eq!(composer_content_height(&text, 2), 10);
+        assert_eq!(composer_viewport_top(&text, 2, text.len(), 0), 1);
     }
 
     #[test]

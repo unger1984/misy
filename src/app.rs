@@ -223,13 +223,15 @@ impl AppState {
                 Outcome::Continue
             }
             Action::MoveCursorLeft => {
-                self.composer.cursor =
-                    previous_scalar_boundary(&self.composer.text, self.composer.cursor);
+                let cursor = previous_scalar_boundary(&self.composer.text, self.composer.cursor);
+                self.composer.cursor = image_token_range_at(&self.composer.text, cursor)
+                    .map_or(cursor, |(start, _, _)| start);
                 Outcome::Continue
             }
             Action::MoveCursorRight => {
-                self.composer.cursor =
-                    next_scalar_boundary(&self.composer.text, self.composer.cursor);
+                let cursor = next_scalar_boundary(&self.composer.text, self.composer.cursor);
+                self.composer.cursor = image_token_range_at(&self.composer.text, cursor)
+                    .map_or(cursor, |(_, end, _)| end);
                 Outcome::Continue
             }
             Action::ScrollComposerUp => {
@@ -340,19 +342,20 @@ impl AppState {
     }
 
     fn insert_text_at_cursor(&mut self, text: &str) {
+        self.remove_image_token_at_cursor();
         self.composer.text.insert_str(self.composer.cursor, text);
         self.composer.cursor += text.len();
     }
 
     fn backspace_composer(&mut self) {
+        if self.remove_image_token_at_cursor() {
+            return;
+        }
+
         if let Some((start, end, id)) =
             image_token_ending_at(&self.composer.text, self.composer.cursor)
         {
-            self.composer.text.replace_range(start..end, "");
-            self.composer.cursor = start;
-            self.composer
-                .attachments
-                .retain(|attachment| attachment.id != id);
+            self.remove_image_token(start, end, id);
             return;
         }
 
@@ -368,13 +371,14 @@ impl AppState {
     }
 
     fn delete_composer(&mut self) {
+        if self.remove_image_token_at_cursor() {
+            return;
+        }
+
         if let Some((start, end, id)) =
             image_token_starting_at(&self.composer.text, self.composer.cursor)
         {
-            self.composer.text.replace_range(start..end, "");
-            self.composer
-                .attachments
-                .retain(|attachment| attachment.id != id);
+            self.remove_image_token(start, end, id);
             return;
         }
 
@@ -386,6 +390,24 @@ impl AppState {
         self.composer
             .text
             .replace_range(self.composer.cursor..end, "");
+    }
+
+    fn remove_image_token_at_cursor(&mut self) -> bool {
+        let Some((start, end, id)) =
+            image_token_range_at(&self.composer.text, self.composer.cursor)
+        else {
+            return false;
+        };
+        self.remove_image_token(start, end, id);
+        true
+    }
+
+    fn remove_image_token(&mut self, start: usize, end: usize, id: u64) {
+        self.composer.text.replace_range(start..end, "");
+        self.composer.cursor = start;
+        self.composer
+            .attachments
+            .retain(|attachment| attachment.id != id);
     }
 }
 
@@ -425,6 +447,12 @@ fn image_token_ending_at(text: &str, cursor: usize) -> Option<(usize, usize, u64
 
 fn image_token_starting_at(text: &str, cursor: usize) -> Option<(usize, usize, u64)> {
     parse_image_token_at(text, cursor)
+}
+
+fn image_token_range_at(text: &str, cursor: usize) -> Option<(usize, usize, u64)> {
+    let start = text[..cursor].rfind('[')?;
+    parse_image_token_at(text, start)
+        .filter(|(token_start, token_end, _)| *token_start < cursor && cursor < *token_end)
 }
 
 fn parse_image_token_at(text: &str, start: usize) -> Option<(usize, usize, u64)> {
@@ -574,6 +602,86 @@ mod tests {
         assert_eq!(state.composer_text(), "[Image #0]");
         assert_eq!(state.attachments().len(), 1);
         assert_eq!(state.attachments()[0].id, 0);
+    }
+
+    #[test]
+    fn composer_cursor_moves_skip_over_image_tokens() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertText("a".into()));
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![7, 7, 7, 7],
+        });
+        state.apply(Action::InsertText("b".into()));
+
+        state.composer.cursor = 1;
+        state.apply(Action::MoveCursorRight);
+        assert_eq!(state.composer_cursor(), 11);
+
+        state.apply(Action::MoveCursorLeft);
+        assert_eq!(state.composer_cursor(), 1);
+    }
+
+    #[test]
+    fn composer_insert_text_from_image_token_middle_removes_token_and_attachment() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertText("a".into()));
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![5, 5, 5, 5],
+        });
+        state.apply(Action::InsertText("b".into()));
+        state.composer.cursor = 4;
+
+        state.apply(Action::InsertText("x".into()));
+
+        assert_eq!(state.composer_text(), "axb");
+        assert_eq!(state.composer_cursor(), 2);
+        assert!(state.attachments().is_empty());
+    }
+
+    #[test]
+    fn composer_backspace_from_image_token_middle_removes_token_and_attachment() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertText("a".into()));
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![4, 4, 4, 4],
+        });
+        state.apply(Action::InsertText("b".into()));
+        state.composer.cursor = 4;
+
+        state.apply(Action::Backspace);
+
+        assert_eq!(state.composer_text(), "ab");
+        assert_eq!(state.composer_cursor(), 1);
+        assert!(state.attachments().is_empty());
+    }
+
+    #[test]
+    fn composer_delete_from_image_token_middle_removes_token_and_attachment() {
+        let mut state = AppState::new(fixture_sections());
+
+        state.apply(Action::InsertText("a".into()));
+        state.apply(Action::InsertImage {
+            width: 1,
+            height: 1,
+            rgba: vec![3, 3, 3, 3],
+        });
+        state.apply(Action::InsertText("b".into()));
+        state.composer.cursor = 4;
+
+        state.apply(Action::Delete);
+
+        assert_eq!(state.composer_text(), "ab");
+        assert_eq!(state.composer_cursor(), 1);
+        assert!(state.attachments().is_empty());
     }
 
     #[test]

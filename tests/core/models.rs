@@ -6,8 +6,12 @@ use super::*;
 fn core_selects_the_provider_declared_default_model() {
     let (_temporary, core, _) = test_core("explicit-default");
     let provider = ProviderId::new("fixture");
-    core.complete_auth(&provider, json!({"code": "opaque"}))
-        .expect("auth complete");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("auth complete");
 
     let selected = core
         .select_default_model(&provider)

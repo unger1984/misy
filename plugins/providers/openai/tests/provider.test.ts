@@ -3,6 +3,7 @@ import { OpenAiProvider } from "../src/provider";
 import type { Credentials } from "../src/types";
 
 type CapturedRequest = {
+	url: string;
 	pathname: string;
 	headers: Headers;
 	body: unknown;
@@ -27,6 +28,7 @@ function fakeServer(handler: (request: CapturedRequest) => Response | Promise<Re
 						? Object.fromEntries(await request.formData())
 						: undefined;
 			return await handler({
+				url: request.url,
 				pathname: new URL(request.url).pathname,
 				headers: request.headers,
 				body,
@@ -83,9 +85,77 @@ test("exchanges OAuth id_token identity and persists its authentication method",
 	});
 });
 
-test("uses the local catalog without a network request", () => {
-	const provider = new OpenAiProvider();
-	expect(provider.listModels().map((model) => model.id)).toEqual([
+test("discovers models with headers, ordering, reasoning, and contexts", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return Response.json({
+			models: [
+				{ slug: "zeta", display_name: "Zeta", priority: 2, context_window: 16_000 },
+				{ slug: "gpt-5.6-codex", priority: 1, default_reasoning_level: "medium" },
+				{ id: "alpha", priority: 1, supported_reasoning_levels: ["low"] },
+				{ slug: "hidden", visibility: "hidden", priority: 0 },
+				{ slug: "hide", visibility: "hide", priority: 0 },
+			],
+		});
+	});
+	const provider = new OpenAiProvider({
+		issuer: base,
+		codexBaseUrl: base,
+		clientVersion: "0.144.1",
+		originator: "test-originator",
+	});
+
+	const models = await provider.listModels(credentials());
+
+	expect(received?.pathname).toBe("/codex/models");
+	expect(new URL(received?.url ?? base).searchParams.get("client_version")).toBe("0.144.1");
+	expect(received?.headers.get("authorization")).toBe("Bearer access");
+	expect(received?.headers.get("chatgpt-account-id")).toBe("account-123");
+	expect(received?.headers.get("openai-beta")).toBe("responses=experimental");
+	expect(received?.headers.get("originator")).toBe("test-originator");
+	expect(received?.headers.get("version")).toBe("0.144.1");
+	expect(received?.headers.get("accept")).toBe("application/json");
+	expect(models).toEqual([
+		{ id: "alpha", display_name: "alpha", context_window: 272_000, reasoning: true },
+		{
+			id: "gpt-5.6-codex",
+			display_name: "gpt-5.6-codex",
+			context_window: 372_000,
+			reasoning: true,
+		},
+		{ id: "zeta", display_name: "Zeta", context_window: 16_000, reasoning: false },
+	]);
+});
+
+test("retries model discovery through the compatibility path", async () => {
+	const paths: string[] = [];
+	const base = fakeServer((request) => {
+		paths.push(request.pathname);
+		if (request.pathname === "/codex/models") return new Response("not found", { status: 404 });
+		return Response.json({ data: [{ id: "fallback-route", context_window: 48_000 }] });
+	});
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+
+	const models = await provider.listModels(credentials());
+
+	expect(paths).toEqual(["/codex/models", "/models"]);
+	expect(models).toEqual([
+		{
+			id: "fallback-route",
+			display_name: "fallback-route",
+			context_window: 48_000,
+			reasoning: false,
+		},
+	]);
+});
+
+test("returns bundled models when model discovery is unavailable", async () => {
+	const provider = new OpenAiProvider({ codexBaseUrl: "http://127.0.0.1:1" });
+
+	const models = await provider.listModels(credentials());
+
+	expect(models.map((model) => model.id)).toEqual([
 		"gpt-5.6-terra",
 		"gpt-5.6-sol",
 		"gpt-5.6-luna",
@@ -93,9 +163,6 @@ test("uses the local catalog without a network request", () => {
 		"gpt-5.4",
 		"gpt-5.4-mini",
 		"gpt-5.3-codex-spark",
-	]);
-	expect(provider.listModels().map((model) => model.context_window)).toEqual([
-		372_000, 372_000, 372_000, 272_000, 272_000, 272_000, 128_000,
 	]);
 });
 

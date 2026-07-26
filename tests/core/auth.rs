@@ -25,7 +25,7 @@ fn auth_start_validates_and_forwards_the_declared_method() {
 fn expiring_credentials_are_refreshed_and_persisted_before_chat() {
     let (_temporary, core, _) = test_core("refresh-before-chat");
     let provider = ProviderId::new("fixture");
-    core.complete_auth(&provider, json!({"code": "expired"}))
+    core.complete_auth(&provider, json!({"id": "expired"}), json!({}))
         .expect("store expiring credentials");
     core.select_model(fixture_model()).expect("select model");
     let events = core.subscribe_lossless();
@@ -41,6 +41,28 @@ fn expiring_credentials_are_refreshed_and_persisted_before_chat() {
         received.iter().any(
             |event| matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "refreshed")
         )
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn auth_complete_keeps_session_separate_from_completion() {
+    let (_temporary, core, _) = test_core("separate-auth-params");
+    let provider = ProviderId::new("fixture");
+
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"id": "not-the-session"}),
+    )
+    .expect("session is forwarded separately");
+    assert!(
+        core.complete_auth(
+            &provider,
+            json!({"id": "not-the-session"}),
+            json!({"id": "fixture-session"}),
+        )
+        .is_err()
     );
     core.shutdown().expect("shutdown");
 }

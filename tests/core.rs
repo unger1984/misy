@@ -31,7 +31,7 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
   "display_name": "{id} fixture",
   "version": "1.0.0",
   "kind": "provider",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "description": "Core fixture",
   "author": "Misy",
   "homepage": "https://example.test/plugin",
@@ -106,8 +106,12 @@ fn core_discovers_authenticates_lists_and_persists_the_selected_model() {
         core.start_auth(&provider).expect("auth start")["url"],
         "https://example.test/auth"
     );
-    core.complete_auth(&provider, json!({"code": "opaque"}))
-        .expect("auth complete");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("auth complete");
 
     assert_eq!(
         core.list_models(&provider).expect("models")[0].model,
@@ -132,7 +136,11 @@ fn core_persists_auth_credentials_without_exposing_them_to_callers() {
     let provider = ProviderId::new("fixture");
 
     let completed = core
-        .complete_auth(&provider, json!({"code": "opaque"}))
+        .complete_auth(
+            &provider,
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
         .expect("auth complete");
 
     assert!(completed.get("credentials").is_none());
@@ -159,8 +167,12 @@ fn credential_method_is_read_locally_without_starting_a_provider() {
     assert_eq!(core.credential_method(&provider).expect("method"), None);
     assert_eq!(core.running_provider_count(), 0);
 
-    core.complete_auth(&provider, json!({"code": "opaque"}))
-        .expect("authenticate");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
     core.shutdown().expect("shutdown");
 
     assert_eq!(
@@ -203,8 +215,12 @@ fn available_models_skips_unconfigured_providers_and_isolates_provider_failures(
         ProviderId::new("fixture"),
         ProviderId::new("failed-provider"),
     ] {
-        core.complete_auth(&provider, json!({"code": "opaque"}))
-            .expect("authenticate provider");
+        core.complete_auth(
+            &provider,
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
+        .expect("authenticate provider");
     }
     let available = core.available_models().expect("available models");
 
@@ -223,8 +239,12 @@ fn available_models_skips_unconfigured_providers_and_isolates_provider_failures(
 fn core_passes_stored_credentials_to_streaming_chat_requests() {
     let (_temporary, core, _) = test_core("chat-credentials");
     let provider = ProviderId::new("fixture");
-    core.complete_auth(&provider, json!({"code": "opaque"}))
-        .expect("authenticate");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
     core.select_model(fixture_model()).expect("select model");
     let events = core.subscribe();
     let submission = core
@@ -269,8 +289,12 @@ fn core_recursively_sanitizes_successful_auth_results_after_persisting_top_level
     for response in [
         core.auth_status(&provider).expect("status"),
         core.start_auth(&provider).expect("start"),
-        core.complete_auth(&provider, json!({"code":"nested"}))
-            .expect("complete"),
+        core.complete_auth(
+            &provider,
+            json!({"id":"fixture-session"}),
+            json!({"code":"nested"}),
+        )
+        .expect("complete"),
         core.refresh_auth(&provider).expect("refresh"),
     ] {
         assert!(
@@ -290,7 +314,7 @@ fn core_sanitizes_credentials_from_remote_auth_errors() {
     let (_temporary, core, _) = test_core("remote-auth-error");
     let provider = ProviderId::new("fixture");
     let error = core
-        .complete_auth(&provider, json!({"code":"remote-error"}))
+        .complete_auth(&provider, json!({"id":"remote-error"}), json!({}))
         .expect_err("remote auth failure");
     let misy::CoreError::Provider(misy::ProviderError::Remote { data, .. }) = error else {
         panic!("expected remote provider error");
@@ -427,12 +451,24 @@ fn concurrent_auth_mutations_do_not_lose_or_resurrect_credentials() {
     let complete_a = {
         let core = core.clone();
         let provider = first.clone();
-        std::thread::spawn(move || core.complete_auth(&provider, json!({"code":"a"})))
+        std::thread::spawn(move || {
+            core.complete_auth(
+                &provider,
+                json!({"id":"fixture-session"}),
+                json!({"code":"a"}),
+            )
+        })
     };
     let complete_b = {
         let core = core.clone();
         let provider = second.clone();
-        std::thread::spawn(move || core.complete_auth(&provider, json!({"code":"b"})))
+        std::thread::spawn(move || {
+            core.complete_auth(
+                &provider,
+                json!({"id":"fixture-session"}),
+                json!({"code":"b"}),
+            )
+        })
     };
     complete_a
         .join()
@@ -488,13 +524,19 @@ fn pending_auth_for_one_provider_does_not_block_logout_for_another() {
     .expect("core discovery");
     let first = ProviderId::new("fixture");
     let second = ProviderId::new("fixture-two");
-    core.complete_auth(&second, json!({"code":"b"}))
-        .expect("authenticate second provider");
+    core.complete_auth(
+        &second,
+        json!({"id":"fixture-session"}),
+        json!({"code":"b"}),
+    )
+    .expect("authenticate second provider");
 
     let pending = {
         let core = core.clone();
         let provider = first;
-        std::thread::spawn(move || core.complete_auth(&provider, json!({"id":"pending-a"})))
+        std::thread::spawn(move || {
+            core.complete_auth(&provider, json!({"id":"pending-a"}), json!({}))
+        })
     };
     std::thread::sleep(Duration::from_millis(100));
     let started = Instant::now();

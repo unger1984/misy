@@ -169,7 +169,7 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, log_file: &Path
   "display_name": "{id} fixture",
   "version": "1.0.0",
   "kind": "provider",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "description": "Language-neutral fixture",
   "author": "Misy",
   "homepage": "https://example.test/plugin",

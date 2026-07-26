@@ -29,10 +29,14 @@ export class OAuthClient {
 		});
 		const server = this.callback(state, resolve);
 		const id = token(18);
-		const stop = () => server.stop(true);
+		let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+		const stop = () => {
+			if (expiryTimer !== undefined) clearTimeout(expiryTimer);
+			server.stop(true);
+		};
 		const expiresAt = Date.now() + this.config.authTimeoutMs;
 		this.pending.set(id, { verifier, code, expiresAt, stop });
-		setTimeout(() => {
+		expiryTimer = setTimeout(() => {
 			const pending = this.pending.get(id);
 			if (pending) {
 				pending.stop();

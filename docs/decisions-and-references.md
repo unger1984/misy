@@ -23,7 +23,10 @@ Read this document before making a new architecture or user-interaction choice.
 
 ## Deferred Scope
 
-MCP, permissions, usage reporting, subagents, marketplace installation/update, persisted conversations, daemon/public IPC, desktop UI, API-key/device authentication, and a cross-process credential transaction policy are outside this MVP.
+MCP, permissions, usage reporting, subagents, marketplace installation/update, persisted
+conversations, daemon/public IPC, desktop UI, API-key authentication, generic prompt-based
+authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
+subscription device flow is supported through the version 2 provider protocol.
 
 ## Reference Policy
 

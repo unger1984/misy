@@ -2,14 +2,15 @@
 
 use super::{
     action::{UiAction, UiKey, UiMode},
-    browser::{BrowserHandoff, validate_authorization_url},
+    auth_flow::{AuthFlow, parse_auth_flow},
+    browser::BrowserHandoff,
     history::PromptHistoryStore,
     state::{ProviderAction, ProviderChoice, ProviderOperationKind, TranscriptRow, UiState},
 };
 use crate::{
     AvailableModels, CoreError, CoreEvent, Message, MisyCore, MisyPaths, ModelRef, ProviderId,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -37,25 +38,15 @@ pub enum TuiError {
     Core(CoreError),
     /// The operating system rejected a browser handoff.
     Browser(String),
-    /// `auth.start` omitted its authorization URL.
-    AuthStartMissingUrl,
-    /// `auth.start` omitted its opaque completion session.
-    AuthStartMissingSession,
-    /// A provider supplied an unsafe authorization URL.
-    InvalidAuthUrl(String),
+    /// A provider returned an invalid or unsupported `auth.start` response.
+    InvalidAuthStart(String),
 }
 
 impl fmt::Display for TuiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Core(error) => write!(formatter, "{error}"),
-            Self::Browser(error) | Self::InvalidAuthUrl(error) => formatter.write_str(error),
-            Self::AuthStartMissingUrl => {
-                formatter.write_str("provider auth.start response is missing a URL")
-            }
-            Self::AuthStartMissingSession => {
-                formatter.write_str("provider auth.start response is missing a session")
-            }
+            Self::Browser(error) | Self::InvalidAuthStart(error) => formatter.write_str(error),
         }
     }
 }
@@ -463,7 +454,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     fn start_auth(&mut self, provider: ProviderId, method: String) {
-        self.state.provider_operation = Some((provider.clone(), ProviderOperationKind::Start));
+        self.state
+            .set_provider_operation(provider.clone(), ProviderOperationKind::Start, None);
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
         thread::spawn(move || {
@@ -475,7 +467,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     fn logout(&mut self, provider: ProviderId) {
-        self.state.provider_operation = Some((provider.clone(), ProviderOperationKind::Logout));
+        self.state
+            .set_provider_operation(provider.clone(), ProviderOperationKind::Logout, None);
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
         thread::spawn(move || {
@@ -485,8 +478,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     fn select_model(&mut self, model: ModelRef) {
-        self.state.provider_operation =
-            Some((model.provider.clone(), ProviderOperationKind::SelectModel));
+        self.state.set_provider_operation(
+            model.provider.clone(),
+            ProviderOperationKind::SelectModel,
+            None,
+        );
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
         let provider = model.provider.clone();
@@ -584,34 +580,67 @@ impl<B: BrowserHandoff> TuiClient<B> {
         method: String,
         auth: &Value,
     ) -> Result<(), TuiError> {
-        let url = auth
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or(TuiError::AuthStartMissingUrl)?;
-        let session = auth
-            .get("session")
-            .cloned()
-            .ok_or(TuiError::AuthStartMissingSession)?;
-        validate_authorization_url(url).map_err(TuiError::InvalidAuthUrl)?;
+        match parse_auth_flow(auth).map_err(TuiError::InvalidAuthStart)? {
+            AuthFlow::Browser { url, session } => {
+                self.open_browser_auth(provider, method, &url, session, None)
+            }
+            AuthFlow::Device {
+                url,
+                user_code,
+                session,
+                ..
+            } => self.open_browser_auth(provider, method, &url, session, Some(user_code)),
+            AuthFlow::None => {
+                self.state
+                    .set_provider_authenticated(&provider, true, Some(method));
+                self.state.add_info(format!(
+                    "{} does not require authentication",
+                    self.provider_display_name(&provider)
+                ));
+                Ok(())
+            }
+            AuthFlow::Prompt { .. } => Err(TuiError::InvalidAuthStart(
+                "authentication method is not supported by this client yet".to_owned(),
+            )),
+        }
+    }
+
+    fn open_browser_auth(
+        &mut self,
+        provider: ProviderId,
+        method: String,
+        url: &str,
+        session: Value,
+        device_code: Option<String>,
+    ) -> Result<(), TuiError> {
         self.browser.open(url).map_err(TuiError::Browser)?;
-        self.state.provider_operation = Some((provider.clone(), ProviderOperationKind::Complete));
+        self.state.set_provider_operation(
+            provider.clone(),
+            ProviderOperationKind::Complete,
+            device_code.clone(),
+        );
+        let detail = device_code.map_or_else(String::new, |code| format!(" with code {code}"));
         self.state.add_info(format!(
-            "authorization opened for {}",
-            self.provider_names
-                .get(provider.as_str())
-                .map(String::as_str)
-                .unwrap_or(provider.as_str())
+            "authorization opened for {}{detail}",
+            self.provider_display_name(&provider)
         ));
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
         thread::spawn(move || {
             let result = core
-                .complete_auth(&provider, session)
+                .complete_auth(&provider, session, json!({}))
                 .map(|_| ())
                 .map_err(|error| error.to_string());
             let _ = sender.send(ProviderOperationResult::Complete(provider, method, result));
         });
         Ok(())
+    }
+
+    fn provider_display_name<'a>(&'a self, provider: &'a ProviderId) -> &'a str {
+        self.provider_names
+            .get(provider.as_str())
+            .map(String::as_str)
+            .unwrap_or(provider.as_str())
     }
 }
 

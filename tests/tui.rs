@@ -46,7 +46,7 @@ fn write_fixture_manifest(root: &Path, id: &str, display_name: &str, target: &Pa
   "display_name": "{display_name}",
   "version": "1.0.0",
   "kind": "provider",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "description": "TUI fixture",
   "author": "Misy",
   "homepage": "https://example.test/plugin",
@@ -120,13 +120,17 @@ fn buffer_lines(buffer: &Buffer, width: u16) -> Vec<String> {
 }
 
 fn authorize_first_provider(client: &mut TuiClient<RecordingBrowser>) {
+    start_first_provider_auth(client);
+    wait_for(client, |client| {
+        client.state().picker_labels() == ["Log out"]
+    });
+}
+
+fn start_first_provider_auth(client: &mut TuiClient<RecordingBrowser>) {
     client.handle_input("/provider").expect("providers");
     client.handle_key(UiKey::Enter).expect("provider settings");
     assert_eq!(client.state().picker_labels(), ["Authorize"]);
     client.handle_key(UiKey::Enter).expect("authorize");
-    wait_for(client, |client| {
-        client.state().picker_labels() == ["Log out"]
-    });
 }
 
 fn select_first_model(client: &mut TuiClient<RecordingBrowser>) {
@@ -262,6 +266,84 @@ fn provider_settings_show_declared_method_and_logout_updates_both_levels() {
 }
 
 #[test]
+fn browser_auth_opens_the_provider_url_and_completes() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-browser")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    authorize_first_provider(&mut client);
+
+    assert_eq!(client.browser().opened, ["https://example.test/auth"]);
+}
+
+#[test]
+fn device_auth_shows_the_code_and_opens_the_complete_url() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-device")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    start_first_provider_auth(&mut client);
+    wait_for(&mut client, |client| {
+        client
+            .state()
+            .picker_labels()
+            .iter()
+            .any(|label| label.contains("Code: WDJB-MJHT · waiting…"))
+    });
+
+    assert_eq!(
+        client.browser().opened,
+        ["https://example.test/device?user_code=WDJB-MJHT"]
+    );
+}
+
+#[test]
+fn no_auth_flow_marks_the_provider_authenticated_without_a_browser() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-none")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    start_first_provider_auth(&mut client);
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Log out"]
+    });
+
+    assert!(client.browser().opened.is_empty());
+}
+
+#[test]
+fn prompt_auth_reports_unsupported_input_without_authenticating() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-prompt")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    start_first_provider_auth(&mut client);
+    wait_for(&mut client, |client| {
+        client.state().transcript().iter().any(
+            |row| matches!(row, TranscriptRow::Error(message) if message.contains("not supported")),
+        )
+    });
+
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
+    assert!(client.browser().opened.is_empty());
+}
+
+#[test]
+fn unknown_auth_kind_reports_a_parse_error_without_panicking() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-unknown")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    start_first_provider_auth(&mut client);
+    wait_for(&mut client, |client| {
+        client.state().transcript().iter().any(|row| {
+            matches!(
+                row,
+                TranscriptRow::Error(message) if message.contains("unknown kind `future`")
+            )
+        })
+    });
+
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
+    assert!(client.browser().opened.is_empty());
+}
+
+#[test]
 fn provider_settings_cannot_abandon_an_auth_start_with_escape() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "slow-start")]);
     let mut client = TuiClient::new(core, RecordingBrowser::default());
@@ -324,8 +406,12 @@ fn model_picker_shows_partial_results_and_skips_unconfigured_provider() {
         ("unconfigured", "Unused AI", "unused-models"),
     ]);
     for provider in ["fixture", "failed-provider"] {
-        core.complete_auth(&ProviderId::new(provider), json!({"code": "opaque"}))
-            .expect("store credentials");
+        core.complete_auth(
+            &ProviderId::new(provider),
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
+        .expect("store credentials");
     }
     let mut client = TuiClient::new(core, RecordingBrowser::default());
     client.handle_input("/model").expect("models");
@@ -367,8 +453,12 @@ fn model_picker_filters_and_confirms_with_a_transcript_message() {
 #[test]
 fn model_selection_cannot_be_abandoned_while_it_is_persisting() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "slow-models")]);
-    core.complete_auth(&ProviderId::new("fixture"), json!({"code": "opaque"}))
-        .expect("store credentials");
+    core.complete_auth(
+        &ProviderId::new("fixture"),
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
     let mut client = TuiClient::new(core, RecordingBrowser::default());
     client.handle_input("/model").expect("models");
     wait_for(&mut client, |client| {
@@ -396,8 +486,12 @@ fn model_selection_cannot_be_abandoned_while_it_is_persisting() {
 #[test]
 fn cancelled_model_loading_ignores_its_late_error() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Broken AI", "slow-bad-models")]);
-    core.complete_auth(&ProviderId::new("fixture"), json!({"code": "opaque"}))
-        .expect("store credentials");
+    core.complete_auth(
+        &ProviderId::new("fixture"),
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
     let mut client = TuiClient::new(core, RecordingBrowser::default());
     client.handle_input("/model").expect("models");
     client.handle_key(UiKey::Escape).expect("cancel loading");

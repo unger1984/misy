@@ -4,6 +4,7 @@ export type Credentials = {
   access_token: string;
   refresh_token?: string;
   expires_at?: number;
+  chatgpt_account_id?: string;
   [key: string]: Json | undefined;
 };
 
@@ -13,6 +14,8 @@ export type ProviderConfig = {
   codexBaseUrl: string;
   scopes: string[];
   originator: string;
+  clientVersion: string;
+  authTimeoutMs: number;
 };
 
 export type AuthSession = { id: string; url: string; session: { id: string } };
@@ -38,6 +41,8 @@ const DEFAULT_CONFIG: ProviderConfig = {
   codexBaseUrl: process.env.MISY_CODEX_BASE_URL ?? "https://chatgpt.com/backend-api/codex",
   scopes: (process.env.MISY_CODEX_OAUTH_SCOPES ?? "openid profile email offline_access api.connectors.read api.connectors.invoke").split(" ").filter(Boolean),
   originator: process.env.MISY_CODEX_ORIGINATOR ?? "codex_cli_rs",
+  clientVersion: process.env.MISY_CODEX_CLIENT_VERSION ?? "0.142.5",
+  authTimeoutMs: positiveInteger(process.env.MISY_CODEX_AUTH_TIMEOUT_MS, 300_000),
 };
 
 /** Stateless API adapter; temporary OAuth callbacks are retained only in memory. */
@@ -84,7 +89,18 @@ export class CodexSubscriptionProvider {
     url.searchParams.set("codex_cli_simplified_flow", "true");
     url.searchParams.set("originator", this.config.originator);
     const id = randomUrlToken(18);
-    this.pending.set(id, { verifier, redirectUri, code, stop: () => server?.stop(true) });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      if (timeout) clearTimeout(timeout);
+      server?.stop(true);
+    };
+    this.pending.set(id, { verifier, redirectUri, code, stop });
+    timeout = setTimeout(() => {
+      if (!this.pending.has(id)) return;
+      resolveCode({ error: "OAuth session expired" });
+      stop();
+      this.pending.delete(id);
+    }, this.config.authTimeoutMs);
     return { id, url: url.toString(), session: { id } };
   }
 
@@ -132,10 +148,12 @@ export class CodexSubscriptionProvider {
   logout(): Record<string, never> { return {}; }
 
   async listModels(credentials: Credentials): Promise<Array<{ id: string; display_name: string; context_window: number }>> {
-    const response = await fetch(new URL("models", withSlash(this.config.codexBaseUrl)), {
-      headers: bearer(credentials),
+    const url = new URL("models", withSlash(this.config.codexBaseUrl));
+    url.searchParams.set("client_version", this.config.clientVersion);
+    const response = await fetch(url, {
+      headers: authHeaders(credentials),
     });
-    if (!response.ok) throw new Error(`Models request failed (${response.status})`);
+    if (!response.ok) throw new Error(await responseError("Models request failed", response));
     const payload = await response.json() as Record<string, unknown>;
     const values = Array.isArray(payload) ? payload : Array.isArray(payload.models) ? payload.models : payload.data;
     if (!Array.isArray(values)) throw new Error("Models response did not contain a models array");
@@ -156,7 +174,7 @@ export class CodexSubscriptionProvider {
       const response = await fetch(new URL("responses", withSlash(this.config.codexBaseUrl)), {
         method: "POST",
         signal,
-        headers: { ...bearer(request.credentials), accept: "text/event-stream", "content-type": "application/json" },
+        headers: { ...authHeaders(request.credentials), accept: "text/event-stream", "content-type": "application/json" },
         body: JSON.stringify({
           model: request.model_id,
           stream: true,
@@ -207,7 +225,12 @@ export class CodexSubscriptionProvider {
     if (!response.ok) throw new Error(`OAuth token request failed (${response.status})`);
     const token = await response.json() as Credentials & { expires_in?: number };
     if (!token.access_token) throw new Error("OAuth token response did not include an access token");
-    return { ...token, ...(typeof token.expires_in === "number" ? { expires_at: Date.now() + token.expires_in * 1000 } : {}) };
+    const accountId = token.chatgpt_account_id ?? accountIdFromIdToken(token.id_token);
+    return {
+      ...token,
+      ...(accountId ? { chatgpt_account_id: accountId } : {}),
+      ...(typeof token.expires_in === "number" ? { expires_at: Date.now() + token.expires_in * 1000 } : {}),
+    };
   }
 }
 
@@ -223,7 +246,49 @@ function bindCallbackServer(fetch: (request: Request) => Response): ReturnType<t
 function isAddressInUse(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
 }
-function bearer(credentials: Credentials) { return { authorization: `Bearer ${credentials.access_token}` }; }
+function authHeaders(credentials: Credentials): Record<string, string> {
+  const headers: Record<string, string> = { authorization: `Bearer ${credentials.access_token}` };
+  if (credentials.chatgpt_account_id && /^[\x20-\x7e]+$/.test(credentials.chatgpt_account_id)) {
+    headers["ChatGPT-Account-ID"] = credentials.chatgpt_account_id;
+  }
+  return headers;
+}
+function accountIdFromIdToken(idToken: Json | undefined): string | undefined {
+  if (typeof idToken !== "string") return undefined;
+  const payload = idToken.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const claims = asRecord(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
+    const openAiClaims = asRecord(claims?.["https://api.openai.com/auth"]);
+    const accountId = openAiClaims?.chatgpt_account_id;
+    return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+async function responseError(prefix: string, response: Response): Promise<string> {
+  try {
+    const payload = asRecord(JSON.parse(await response.text()));
+    const nested = asRecord(payload?.error);
+    const message = pickString(nested ?? payload ?? {}, ["message"]);
+    if (message) return `${prefix} (${response.status}): ${safeErrorDetail(message)}`;
+  } catch {
+    // Only structured JSON messages are surfaced; arbitrary bodies may contain secrets.
+  }
+  return `${prefix} (${response.status})`;
+}
+function safeErrorDetail(message: string): string {
+  return message
+    .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/g, "<redacted>")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .slice(0, 512);
+}
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 function randomUrlToken(bytes: number) { return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url"); }
 async function pkceChallenge(verifier: string) { return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url"); }
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }

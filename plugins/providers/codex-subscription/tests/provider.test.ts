@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { CodexSubscriptionProvider } from "../src/provider";
 
-type Request = { method: string; pathname: string; headers: Headers; body: unknown };
+type Request = { method: string; pathname: string; url: URL; headers: Headers; body: unknown };
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -16,6 +16,7 @@ function fakeServer(handler: (request: Request) => Response | Promise<Response>)
       handler({
         method: request.method,
         pathname: new URL(request.url).pathname,
+        url: new URL(request.url),
         headers: request.headers,
         body: request.method === "POST"
           ? request.headers.get("content-type")?.includes("application/json") ? await request.json() : Object.fromEntries(await request.formData())
@@ -26,12 +27,23 @@ function fakeServer(handler: (request: Request) => Response | Promise<Response>)
   return `http://127.0.0.1:${server.port}`;
 }
 
+function fakeJwt(payload: Record<string, unknown>) {
+  return ["e30", Buffer.from(JSON.stringify(payload)).toString("base64url"), "signature"].join(".");
+}
+
 test("exchanges a localhost PKCE callback for opaque credentials", async () => {
   let tokenBody: Record<string, string> | undefined;
   const issuer = fakeServer(({ pathname, body }) => {
     if (pathname === "/oauth/token") {
       tokenBody = body as Record<string, string>;
-      return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 3600 });
+      return Response.json({
+        access_token: "access",
+        refresh_token: "refresh",
+        id_token: fakeJwt({
+          "https://api.openai.com/auth": { chatgpt_account_id: "account-from-id-token" },
+        }),
+        expires_in: 3600,
+      });
     }
     return new Response("not found", { status: 404 });
   });
@@ -51,7 +63,11 @@ test("exchanges a localhost PKCE callback for opaque credentials", async () => {
   await fetch(`${callback}?code=browser-code&state=${authorization.searchParams.get("state")}`);
 
   const completed = await provider.completeAuth(started.session, {});
-  expect(completed.credentials).toMatchObject({ access_token: "access", refresh_token: "refresh" });
+  expect(completed.credentials).toMatchObject({
+    access_token: "access",
+    refresh_token: "refresh",
+    chatgpt_account_id: "account-from-id-token",
+  });
   expect(tokenBody).toMatchObject({
     grant_type: "authorization_code",
     code: "browser-code",
@@ -81,8 +97,8 @@ test("falls back to the registered callback port when 1455 is in use", async () 
 
 test("refreshes, lists dynamic models, and maps response streaming tool events", async () => {
   const received: Request[] = [];
-  const base = fakeServer(({ pathname, headers, body, method }) => {
-    received.push({ pathname, headers, body, method });
+  const base = fakeServer(({ pathname, url, headers, body, method }) => {
+    received.push({ pathname, url, headers, body, method });
     if (pathname === "/oauth/token") {
       return Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 60 });
     }
@@ -99,10 +115,13 @@ test("refreshes, lists dynamic models, and maps response streaming tool events",
     return new Response("not found", { status: 404 });
   });
   const provider = new CodexSubscriptionProvider({ issuer: base, clientId: "test-client", codexBaseUrl: base });
-  const credentials = { access_token: "old-access", refresh_token: "refresh" };
+  const credentials = { access_token: "old-access", refresh_token: "refresh", chatgpt_account_id: "account-123" };
 
   expect(await provider.refreshAuth(credentials)).toMatchObject({ credentials: { access_token: "new-access", refresh_token: "new-refresh" } });
   expect(await provider.listModels(credentials)).toEqual([{ id: "gpt-test", display_name: "Test", context_window: 128000 }]);
+  const modelsRequest = received.find((request) => request.pathname === "/models");
+  expect(modelsRequest?.url.searchParams.get("client_version")).toBe("0.142.5");
+  expect(modelsRequest?.headers.get("chatgpt-account-id")).toBe("account-123");
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   await provider.streamChat({
     model_id: "gpt-test",
@@ -122,6 +141,7 @@ test("refreshes, lists dynamic models, and maps response streaming tool events",
   ]);
   const responseRequest = received.find((request) => request.pathname === "/responses");
   expect(responseRequest?.headers.get("authorization")).toBe("Bearer old-access");
+  expect(responseRequest?.headers.get("chatgpt-account-id")).toBe("account-123");
   expect(responseRequest?.headers.get("accept")).toBe("text/event-stream");
   expect(responseRequest?.body).toMatchObject({
     model: "gpt-test",
@@ -132,6 +152,40 @@ test("refreshes, lists dynamic models, and maps response streaming tool events",
       { type: "function_call_output", call_id: "previous", output: "ok" },
     ]),
   });
+});
+
+test("includes a safe backend model error message", async () => {
+  const base = fakeServer(({ pathname }) => pathname === "/models"
+    ? Response.json({ error: { message: "account header is required" } }, { status: 400 })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({ issuer: base, clientId: "test-client", codexBaseUrl: base });
+
+  await expect(provider.listModels({ access_token: "access" }))
+    .rejects.toThrow("Models request failed (400): account header is required");
+});
+
+test("expires an abandoned OAuth session and reuses registered port 1455", async () => {
+  const issuer = fakeServer(({ pathname }) => pathname === "/oauth/token"
+    ? Response.json({ access_token: "access", refresh_token: "refresh" })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({
+    issuer,
+    clientId: "test-client",
+    codexBaseUrl: issuer,
+    authTimeoutMs: 20,
+  });
+
+  const abandoned = await provider.startAuth();
+  expect(new URL(abandoned.url).searchParams.get("redirect_uri"))
+    .toBe("http://localhost:1455/auth/callback");
+  await Bun.sleep(50);
+  await expect(provider.completeAuth(abandoned.session, { code: "cleanup-code" }))
+    .rejects.toThrow("OAuth session is missing or expired");
+
+  const retried = await provider.startAuth();
+  expect(new URL(retried.url).searchParams.get("redirect_uri"))
+    .toBe("http://localhost:1455/auth/callback");
+  await provider.completeAuth(retried.session, { code: "manual-code" });
 });
 
 test("preserves opaque credentials and the previous refresh token when refresh omits one", async () => {

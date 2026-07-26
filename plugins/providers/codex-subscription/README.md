@@ -41,8 +41,12 @@ network access:
 - `MISY_CODEX_CLIENT_ID`
 - `MISY_CODEX_OAUTH_SCOPES`
 - `MISY_CODEX_ORIGINATOR`
+- `MISY_CODEX_CLIENT_VERSION` (defaults to the compatible Codex release `0.142.5`)
+- `MISY_CODEX_AUTH_TIMEOUT_MS` (defaults to 5 minutes)
 
-The provider accepts current model lists from `GET /models` and streams
+OAuth callback listeners are stopped when authentication completes or times
+out, so an abandoned login does not retain a registered callback port. The
+provider accepts current model lists from `GET /models` and streams
 `POST /responses` with `Accept: text/event-stream`. Tool definitions become
 Responses functions; function calls and later function-call outputs are mapped
 to Misy tool calls/results.

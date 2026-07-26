@@ -159,3 +159,39 @@ Final Hydra remediation verification:
 - `bunx tsc --noEmit` — passed with no diagnostics.
 - `git diff --check` — passed.
 - Plugin-only change; no Rust/TUI files were touched.
+
+## Real subscription models and abandoned OAuth remediation
+
+The provider now follows the current local Codex reference for authenticated
+ChatGPT backend requests:
+
+- OAuth token responses are decoded only to read the unsigned JWT payload's
+  nested `https://api.openai.com/auth.chatgpt_account_id` claim. The derived
+  value remains part of the opaque credential object owned by Misy.
+- `GET /models` and `POST /responses` send `ChatGPT-Account-ID` when that
+  credential field is present.
+- `GET /models` always includes an injectable `client_version` query. Its
+  default, `0.142.5`, is the compatible release identified by the checked-in
+  Codex reference fixture.
+- Structured backend model errors expose only a bounded, control-character
+  stripped message with bearer/JWT/API-key patterns redacted.
+- Pending OAuth callback sessions expire after an injectable timeout (five
+  minutes by default), stop their listener, settle pending callback waiters,
+  and leave the registered port reusable.
+
+### Subscription remediation TDD evidence
+
+RED — `bun test tests/provider.test.ts`: **5 pass, 4 fail, 23 assertions**.
+The failures independently demonstrated the missing account claim/header and
+client version, the unhelpful models 400, and the OAuth session/listener leak.
+
+GREEN — `bun test tests/provider.test.ts`: **9 pass, 0 fail, 32 assertions**.
+The abandonment regression waits for expiry, verifies the expired session is
+rejected, then starts another login on port 1455 and completes it.
+
+Final subscription remediation verification:
+
+- `bun test` — **11 pass, 0 fail, 38 assertions**.
+- `bun run typecheck` — passed with no diagnostics.
+- Changes are confined to the provider package and this Task 4 report; no
+  Rust, TUI, or project documentation files were changed.

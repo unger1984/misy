@@ -12,7 +12,7 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::Rect,
     widgets::{Paragraph, Wrap},
 };
 use serde_json::Value;
@@ -586,14 +586,7 @@ pub fn run(core: MisyCore) -> Result<(), io::Error> {
 /// Renders the unboxed transcript, one separator, and one-line input.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
     const WORDMARK: &str = "███   ███  █████  █████  █   █\n████ ████    █    █       █ █\n██ ███ ██    █     ███     █\n██  █  ██    █        █    █\n██     ██  █████  █████    █\n                 MISY";
-    let areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
+    let area = frame.area();
     let provider = state
         .selected_model
         .as_ref()
@@ -616,17 +609,36 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
     } else {
         format!("{WORDMARK}\nagent: misy | provider: {provider} | model: {model}\n\n{transcript}")
     };
-    frame.render_widget(
-        Paragraph::new(content)
-            .wrap(Wrap { trim: false })
-            .scroll((u16::try_from(state.scroll_offset).unwrap_or(u16::MAX), 0)),
-        areas[0],
+    let transcript = Paragraph::new(content).wrap(Wrap { trim: false });
+    let rendered_lines = transcript.line_count(area.width);
+    let content_capacity = area.height.saturating_sub(2);
+    let content_height = u16::try_from(rendered_lines)
+        .unwrap_or(u16::MAX)
+        .min(content_capacity);
+    let maximum_scroll = rendered_lines.saturating_sub(usize::from(content_height));
+    let scroll = maximum_scroll.saturating_sub(state.scroll_offset.min(maximum_scroll));
+    let content_area = Rect::new(area.x, area.y, area.width, content_height);
+    let separator_area = Rect::new(
+        area.x,
+        area.y.saturating_add(content_height),
+        area.width,
+        u16::from(area.height > content_height),
+    );
+    let input_area = Rect::new(
+        area.x,
+        separator_area.y.saturating_add(separator_area.height),
+        area.width,
+        u16::from(area.height > content_height.saturating_add(separator_area.height)),
     );
     frame.render_widget(
-        Paragraph::new("─".repeat(usize::from(areas[1].width))),
-        areas[1],
+        transcript.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        content_area,
     );
-    frame.render_widget(Paragraph::new(state.input.as_str()), areas[2]);
+    frame.render_widget(
+        Paragraph::new("─".repeat(usize::from(separator_area.width))),
+        separator_area,
+    );
+    frame.render_widget(Paragraph::new(state.input.as_str()), input_area);
 }
 
 struct TerminalGuard<'a> {

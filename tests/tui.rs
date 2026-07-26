@@ -261,26 +261,42 @@ fn tui_client_keeps_burst_streams_and_their_terminal_event() {
 
 #[test]
 fn renderer_smoke_shows_startup_identity_status_separator_and_input() {
-    let state = UiState::default();
-    let backend = TestBackend::new(52, 12);
+    let mut state = UiState::default();
+    state.reduce(UiAction::AppendAssistantText("answer".to_owned()));
+    let backend = TestBackend::new(52, 16);
     let mut terminal = Terminal::new(backend).expect("test terminal");
 
     terminal
         .draw(|frame| render(frame, &state))
         .expect("render state");
 
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
+    let buffer = terminal.backend().buffer();
+    let rows = (0..16)
+        .map(|row| {
+            (0..52)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let rendered = rows.join("\n");
     assert!(rendered.contains("MISY"));
     assert!(rendered.contains("agent: misy"));
     assert!(rendered.contains("provider: none"));
     assert!(rendered.contains("model: none"));
-    assert!(rendered.contains("────────────────────"));
+    let answer_row = rows
+        .iter()
+        .position(|row| row.trim() == "answer")
+        .expect("transcript row");
+    let separator_row = rows
+        .iter()
+        .position(|row| row.starts_with("────────────────────"))
+        .expect("separator row");
+    assert_eq!(separator_row, answer_row + 1);
+    assert!(
+        rows[(separator_row + 1)..]
+            .iter()
+            .all(|row| row.trim().is_empty())
+    );
 }
 
 #[test]

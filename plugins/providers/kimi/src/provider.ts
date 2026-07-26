@@ -6,6 +6,7 @@ import { KimiHeaders } from "./headers";
 import { fetchWithTimeout } from "./http";
 import { DEFAULT_MODEL_ID, listModels } from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Model, Notify } from "./types";
+import { fetchUsage, UsageRequestError } from "./usage";
 
 /** Implements Misy protocol v2 against Kimi's subscription coding endpoints. */
 export class KimiProvider {
@@ -51,6 +52,18 @@ export class KimiProvider {
 	/** Lists live Kimi models, falling back to the bundled catalog if the endpoint is unavailable. */
 	async listModels(credentials: Credentials | undefined): Promise<Model[]> {
 		return await listModels(this.config, this.headers, credentials);
+	}
+
+	/** Returns normalized Kimi Coding subscription limits. */
+	async usage(credentials: Credentials, signal?: AbortSignal) {
+		let current = await refreshIfNeeded(this.oauth, credentials);
+		try {
+			return await fetchUsage(this.config, this.headers, current, signal);
+		} catch (cause) {
+			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
+			current = await this.oauth.refresh(current);
+			return await fetchUsage(this.config, this.headers, current, signal);
+		}
 	}
 
 	/** Stops pending authorization polls during plugin shutdown. */

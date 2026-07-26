@@ -64,6 +64,13 @@ async function handle(value: unknown): Promise<void> {
 				});
 				return;
 			}
+			case "usage.get":
+				send({
+					jsonrpc: "2.0",
+					id,
+					result: await provider.usage(required(credentials(params))),
+				});
+				return;
 			case "chat.start":
 				await chat(id, params);
 				return;

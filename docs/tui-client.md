@@ -48,6 +48,12 @@ authentication, session, and tool orchestration remain in the core.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
   without taking focus from it. `Enter` or `Tab` accepts a command, clears the composer, and opens
   the requested surface; `Esc` dismisses the popup without changing the draft.
+- `/usage` fetches the selected model provider's account limits in the background and appends a
+  normalized, display-safe usage report to the transcript. It takes no arguments. The report shows
+  provider-wide and per-limit notes, consumed and remaining amounts, exhausted limits, and known
+  reset timing. If no model is selected, the provider does not declare usage capability version 1,
+  authentication fails, the request times out, or the report is invalid, the TUI renders the error
+  without changing the selected model.
 - `/provider` opens an interactive provider list. `/model` opens one model list across configured
   providers. Both lists show a dim heading, an empty separator line, eight scrollable numbered
   rows, aligned dim second-column descriptions, and an accent-highlighted selection. Digits select
@@ -76,6 +82,8 @@ authentication, session, and tool orchestration remain in the core.
 - `Ctrl+C` always cancels active work, shuts down the core/provider host, restores the terminal,
   and exits.
 - Event processing is bounded per tick so continuous streaming cannot starve input handling.
+- Usage is a core operation, not a TUI-owned provider request: the TUI supplies no endpoint,
+  headers, credentials, or provider-specific parsing.
 
 ## Change Impact
 

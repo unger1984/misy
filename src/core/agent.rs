@@ -11,7 +11,7 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const MAX_MODEL_TURNS: usize = 64;
@@ -172,7 +172,8 @@ impl MisyCore {
         let _guard = provider_gate
             .lock()
             .expect("provider gate mutex must not be poisoned");
-        self.refresh_expiring_credentials(&model.provider)?;
+        self.refresh_expiring_credentials(&model.provider)
+            .map_err(|error| error.to_string())?;
         let (sender, receiver) = mpsc::channel();
         self.inner
             .routes
@@ -186,30 +187,6 @@ impl MisyCore {
             .expect("provider routes mutex must not be poisoned")
             .remove(model.provider.as_str());
         result
-    }
-
-    fn refresh_expiring_credentials(&self, provider: &ProviderId) -> Result<(), String> {
-        let credentials = self
-            .inner
-            .credential_store
-            .load(provider)
-            .map_err(|error| error.to_string())?;
-        let Some(expires_at) = credentials
-            .as_ref()
-            .and_then(|value| value.get("expires_at"))
-            .and_then(Value::as_u64)
-        else {
-            return Ok(());
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_millis();
-        if u128::from(expires_at) <= now.saturating_add(60_000) {
-            self.refresh_auth(provider)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
     }
 
     fn start_and_collect_turn(

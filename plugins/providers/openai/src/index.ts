@@ -63,6 +63,12 @@ async function handle(value: unknown): Promise<void> {
 				id,
 				result: modelsResult(await provider.listModels(required(credentials(params)))),
 			});
+		else if (method === "usage.get")
+			send({
+				jsonrpc: "2.0",
+				id,
+				result: await provider.usage(required(credentials(params))),
+			});
 		else if (method === "chat.start") await chat(id, params);
 		else send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
 	} catch (cause) {

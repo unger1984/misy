@@ -9,9 +9,10 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender, SyncSender, TrySendError},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError},
     },
     thread,
+    time::Duration,
 };
 
 /// A request already written to a provider. It can be cancelled while its response is pending.
@@ -137,6 +138,40 @@ impl ProviderHost {
         params: Value,
     ) -> Result<Value, ProviderError> {
         self.request_async(provider, method, params)?.wait()
+    }
+
+    /// Sends a request with a host-enforced deadline and reaps a provider that stops responding.
+    ///
+    /// # Errors
+    ///
+    /// Returns any request error, or [`ProviderError::Timeout`] after `timeout` elapses.
+    pub fn request_with_timeout(
+        &self,
+        provider: &ProviderId,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ProviderError> {
+        let process = self.process_for(provider)?;
+        let id = ProviderRequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let receiver = process.send_request(id, method, params)?;
+        match receiver.recv_timeout(timeout) {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(failure)) => Err(failure.into_error(provider, id)),
+            Err(RecvTimeoutError::Disconnected) => Err(ProviderError::Transport {
+                provider: provider.as_str().to_owned(),
+                message: "response channel closed unexpectedly".to_owned(),
+            }),
+            Err(RecvTimeoutError::Timeout) => {
+                process.fail(&PendingFailure::Transport(format!(
+                    "provider request `{method}` timed out"
+                )));
+                Err(ProviderError::Timeout {
+                    provider: provider.as_str().to_owned(),
+                    method: method.to_owned(),
+                })
+            }
+        }
     }
 
     /// Sends a JSON-RPC notification without allocating a response slot.

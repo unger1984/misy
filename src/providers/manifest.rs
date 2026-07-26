@@ -24,6 +24,9 @@ pub struct ProviderManifest {
     pub protocol_version: u32,
     /// User-facing summary of the provider and authentication method.
     pub description: String,
+    /// Independently versioned optional contracts implemented by this provider.
+    #[serde(default)]
+    pub capabilities: BTreeMap<String, ProviderCapability>,
     /// Package author.
     pub author: String,
     /// Package homepage URL.
@@ -38,6 +41,22 @@ pub struct ProviderManifest {
     pub args: Vec<String>,
     /// Authentication mechanisms this provider supports.
     pub auth_methods: Vec<ProviderAuthMethod>,
+}
+
+impl ProviderManifest {
+    /// Reports whether the provider declares exactly this capability revision.
+    pub fn supports_capability(&self, id: &str, version: u32) -> bool {
+        self.capabilities
+            .get(id)
+            .is_some_and(|capability| capability.version == version)
+    }
+}
+
+/// One optional provider contract negotiated independently from the base protocol.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ProviderCapability {
+    /// Capability contract revision implemented by the provider.
+    pub version: u32,
 }
 
 /// One authentication mechanism a provider package can offer to a client.
@@ -188,6 +207,16 @@ fn validate_manifest(
         return Err(ProviderDiscoveryError::UnsupportedProtocol {
             id: manifest.id.as_str().to_owned(),
             found: manifest.protocol_version,
+        });
+    }
+    if manifest
+        .capabilities
+        .iter()
+        .any(|(id, capability)| id.trim().is_empty() || capability.version == 0)
+    {
+        return Err(ProviderDiscoveryError::InvalidManifestValue {
+            path: path.to_owned(),
+            message: "capabilities must have non-empty IDs and positive versions".to_owned(),
         });
     }
     if manifest.auth_methods.is_empty()

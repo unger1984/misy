@@ -44,8 +44,39 @@ fn discovery_reads_self_contained_provider_packages() {
     let catalog = ProviderCatalog::discover(&bundled, &installed).expect("valid packages");
 
     assert_eq!(catalog.len(), 2);
-    assert!(catalog.get("bundled-provider").is_some());
+    assert_eq!(
+        catalog
+            .get("bundled-provider")
+            .expect("bundled provider")
+            .manifest()
+            .capabilities,
+        Default::default()
+    );
     assert!(catalog.get("installed-provider").is_some());
+}
+
+#[test]
+fn discovery_reads_versioned_optional_capabilities() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    write_manifest(&bundled, "usage-provider", PROVIDER_PROTOCOL_VERSION);
+    let manifest = bundled.join("usage-provider/misy-plugin.json");
+    let contents = fs::read_to_string(&manifest).expect("manifest");
+    fs::write(
+        &manifest,
+        contents.replace(
+            "  \"description\": \"A fixture provider\",\n",
+            "  \"description\": \"A fixture provider\",\n  \"capabilities\": {\"usage\": {\"version\": 1}},\n",
+        ),
+    )
+    .expect("usage capability");
+
+    let catalog = ProviderCatalog::discover(&bundled, &installed).expect("valid capability");
+    let package = catalog.get("usage-provider").expect("usage provider");
+
+    assert!(package.manifest().supports_capability("usage", 1));
+    assert!(!package.manifest().supports_capability("usage", 2));
 }
 
 #[test]
@@ -304,6 +335,35 @@ fn host_rejects_malformed_and_eof_provider_output_without_poisoning_restarts() {
     assert_eq!(
         host.request(&provider, "models.list", json!({}))
             .expect("provider restart after EOF"),
+        json!({ "models": [] })
+    );
+    host.shutdown().expect("shutdown");
+}
+
+#[test]
+fn bounded_request_reaps_an_unresponsive_provider_and_allows_restart() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let provider = ProviderId::new("fixture");
+
+    assert!(matches!(
+        host.request_with_timeout(&provider, "test.hang", json!({}), Duration::from_millis(20)),
+        Err(ProviderError::Timeout { .. })
+    ));
+    assert_eq!(
+        host.request(&provider, "models.list", json!({}))
+            .expect("provider restart after timeout"),
         json!({ "models": [] })
     );
     host.shutdown().expect("shutdown");

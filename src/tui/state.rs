@@ -256,6 +256,7 @@ impl UiState {
             | UiAction::ShowProviders
             | UiAction::StartAuth(_)
             | UiAction::ShowModels
+            | UiAction::ShowUsage
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
         }

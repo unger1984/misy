@@ -6,6 +6,7 @@
 - [Package Boundary](#package-boundary)
 - [Discovery and Lifecycle](#discovery-and-lifecycle)
 - [Protocol Version 2](#protocol-version-2)
+- [Optional Capabilities](#optional-capabilities)
 - [Responsibilities](#responsibilities)
 - [Change Impact](#change-impact)
 - [Sources of Truth](#sources-of-truth)
@@ -30,6 +31,8 @@ implementation choice for `openai`, not a global host dependency.
 - Every manifest declares a stable `id`, a user-facing `display_name`, and one or more
   `auth_methods` with stable IDs and user-facing names. Credentials persist the selected method ID.
 - Duplicate IDs and incompatible protocol versions are rejected.
+- A manifest may declare independently versioned optional capabilities in `capabilities`. Omitted
+  `capabilities` means no optional capabilities, preserving compatibility with existing manifests.
 - A provider starts lazily when selected or used, remains alive while in use, and is
   terminated/reaped during failure or shutdown.
 - Provider stdout is reserved for protocol messages; diagnostics use stderr.
@@ -73,12 +76,82 @@ notification carries the numeric `request_id` of its `chat.start`; cancellation 
 `models.list` returns `models` and may include a provider-local `default_model` ID. The core uses
 that declared default when it is present and falls back to the first model for older providers.
 
+## Optional Capabilities
+
+The base protocol remains version 2. Optional contracts are negotiated through the manifest rather
+than by changing the v2 required-method set. A provider supports a capability only when it declares
+the exact version, for example:
+
+```json
+{
+  "capabilities": {
+    "usage": { "version": 1 }
+  }
+}
+```
+
+Unknown capability IDs are permitted for forward compatibility. A missing `capabilities` object,
+or a manifest without `usage` version 1, does not implement usage and must not receive `usage.get`.
+
+### Usage capability version 1
+
+When a manifest declares `capabilities.usage.version` as `1`, `usage.get` is required for that
+provider. The core sends the selected model snapshot and opaque credentials:
+
+```json
+{
+  "provider_id": "provider-id",
+  "model_id": "provider-model-id",
+  "credentials": { "...": "opaque provider credentials" }
+}
+```
+
+The provider owns the remote endpoint, headers, timeout for its HTTP request, and parsing of the
+provider-specific response. It returns a normalized report, never raw upstream payloads:
+
+```json
+{
+  "fetched_at": 1795000000000,
+  "limits": [
+    {
+      "id": "primary",
+      "label": "Primary limit",
+      "amount": {
+        "used": 42,
+        "limit": 100,
+        "remaining": 58,
+        "unit": "percent"
+      },
+      "window": { "duration_ms": 10800000, "resets_at": 1795010800000 },
+      "status": "ok",
+      "notes": []
+    }
+  ],
+  "notes": []
+}
+```
+
+`fetched_at` is Unix epoch milliseconds. `limits` may be empty. Each limit has a unique,
+display-safe `id`, a display-safe `label`, an `amount`, and optional `window`, `status`, and
+display-safe `notes`. An amount requires `used` or `remaining`; populated quantities are finite,
+non-negative numbers, and a populated `limit` is positive. Supported units are `percent`,
+`tokens`, `requests`, `usd`, `minutes`, `bytes`, and `unknown`; statuses are `ok`, `warning`,
+`exhausted`, and `unknown`. The core rejects unknown fields and malformed, duplicate, oversized,
+or unsafe reports.
+
+Before calling the provider, the core verifies the manifest declaration, uses the snapshotted
+selected `ModelRef`, refreshes credentials when needed, injects opaque credentials, and enforces a
+30-second JSON-RPC deadline. The core reports unavailable capabilities, authentication failures,
+timeouts, transport failures, and invalid normalized reports without exposing credentials or
+provider error details.
+
 ## Responsibilities
 
 - Rust stores opaque provider credentials, redacts them from public results/errors, and supplies
   them when needed.
 - A provider implements its own authentication, refresh, account status, model discovery, request
-  mapping, and stream parsing.
+  mapping, stream parsing, and (when declared) usage endpoint/header selection and response
+  normalization.
 - A provider never reads another client's credential files and never executes Misy's local tools.
 - Local tools are advertised and executed by the Rust core; normalized results are returned to the
   provider loop.

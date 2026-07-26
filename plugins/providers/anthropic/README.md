@@ -12,6 +12,11 @@ Misy owns stored credentials. This plugin never reads or writes Misy credential 
 network request has a deadline; provider diagnostics never use stdout, which remains reserved for
 JSON-RPC messages.
 
+The manifest declares optional `usage` capability version 1. Its required `usage.get` method
+calls Claude's OAuth usage endpoint with this provider's subscription headers and normalizes the
+available rolling limits into Misy's usage report. The core injects opaque credentials and
+validates that report; this package owns the endpoint, headers, and upstream response parsing.
+
 ## Development
 
 ```sh

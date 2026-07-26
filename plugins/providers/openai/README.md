@@ -10,6 +10,11 @@ the opaque credentials returned by `auth.complete`, including `type: "oauth"`.
 The `chatgpt-account-id` extracted from the OAuth `id_token` is sent on every
 ChatGPT-backed Responses request.
 
+The manifest declares optional `usage` capability version 1. Its required `usage.get` method
+uses the ChatGPT `/wham/usage` endpoint with this provider's OAuth headers and normalizes account
+windows into Misy's usage report. The core injects opaque credentials and validates that report;
+this package owns the endpoint, headers, and upstream response parsing.
+
 ## Installation
 
 Misy discovers bundled packages in `plugins/providers/` and installed packages

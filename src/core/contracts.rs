@@ -148,6 +148,19 @@ pub enum CoreError {
     Provider(ProviderError),
     /// A provider returned malformed model metadata.
     InvalidModels(String),
+    /// A provider returned a malformed normalized usage report.
+    InvalidUsage(String),
+    /// A provider does not advertise the requested optional capability revision.
+    UnsupportedCapability {
+        /// Provider whose manifest was checked.
+        provider: ProviderId,
+        /// Optional capability identifier.
+        capability: String,
+        /// Capability revision required by the caller.
+        version: u32,
+    },
+    /// Account-scoped usage was requested without stored provider credentials.
+    ProviderNotAuthenticated(ProviderId),
     /// A client requested an authentication method the provider did not declare.
     UnsupportedAuthMethod {
         /// Provider whose manifest was checked.
@@ -173,6 +186,21 @@ impl fmt::Display for CoreError {
             Self::Discovery(error) => write!(formatter, "provider discovery error: {error}"),
             Self::Provider(error) => write!(formatter, "provider error: {error}"),
             Self::InvalidModels(message) => write!(formatter, "invalid models response: {message}"),
+            Self::InvalidUsage(message) => write!(formatter, "invalid usage response: {message}"),
+            Self::UnsupportedCapability {
+                provider,
+                capability,
+                version,
+            } => write!(
+                formatter,
+                "provider `{}` does not support capability `{capability}` version {version}",
+                provider.as_str()
+            ),
+            Self::ProviderNotAuthenticated(provider) => write!(
+                formatter,
+                "provider `{}` is not authenticated",
+                provider.as_str()
+            ),
             Self::UnsupportedAuthMethod { provider, method } => write!(
                 formatter,
                 "provider `{}` does not support authentication method `{method}`",

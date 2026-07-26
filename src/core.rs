@@ -12,12 +12,14 @@ use std::{
         mpsc::{self, Receiver, Sender, SyncSender},
     },
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 mod agent;
 mod contracts;
 mod events;
 mod models;
+mod usage;
 use contracts::strip_credentials;
 // These established names are the public core-client contract.
 #[allow(clippy::module_name_repetitions)]
@@ -354,6 +356,10 @@ impl MisyCore {
         let _operation = operation
             .lock()
             .expect("provider auth operation mutex must not be poisoned");
+        self.refresh_auth_locked(provider)
+    }
+
+    fn refresh_auth_locked(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         let mut result = self.provider_request(provider, "auth.refresh", json!({}))?;
         let _credentials = self
             .inner
@@ -363,6 +369,7 @@ impl MisyCore {
         self.store_returned_credentials(provider, &mut result)?;
         Ok(self.sanitize_auth_response(result))
     }
+
     /// Logs out a provider and removes its stored opaque credentials.
     ///
     /// # Errors
@@ -606,6 +613,36 @@ impl MisyCore {
             params["credentials"] = credentials;
         }
         Ok(self.inner.host.request(provider, method, params)?)
+    }
+
+    pub(super) fn refresh_expiring_credentials(
+        &self,
+        provider: &ProviderId,
+    ) -> Result<(), CoreError> {
+        let operation = self.auth_operation(provider);
+        let _operation = operation
+            .lock()
+            .expect("provider auth operation mutex must not be poisoned");
+        self.refresh_expiring_credentials_locked(provider)
+    }
+
+    fn refresh_expiring_credentials_locked(&self, provider: &ProviderId) -> Result<(), CoreError> {
+        let credentials = self.inner.credential_store.load(provider)?;
+        let Some(expires_at) = credentials
+            .as_ref()
+            .and_then(|value| value.get("expires_at"))
+            .and_then(Value::as_u64)
+        else {
+            return Ok(());
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| CoreError::InvalidUsage(error.to_string()))?
+            .as_millis();
+        if u128::from(expires_at) <= now.saturating_add(60_000) {
+            self.refresh_auth_locked(provider)?;
+        }
+        Ok(())
     }
     fn auth_operation(&self, provider: &ProviderId) -> Arc<Mutex<()>> {
         let mut operations = self

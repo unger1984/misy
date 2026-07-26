@@ -166,6 +166,52 @@ test("returns bundled models when model discovery is unavailable", async () => {
 	]);
 });
 
+test("normalizes ChatGPT subscription usage", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return Response.json({
+			rate_limit: {
+				primary_window: {
+					used_percent: 42,
+					limit_window_seconds: 18_000,
+					reset_at: 1_795_018_000,
+				},
+			},
+		});
+	});
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials(),
+	);
+
+	expect(received?.pathname).toBe("/wham/usage");
+	expect(received?.headers.get("chatgpt-account-id")).toBe("account-123");
+	expect(report.limits[0]).toMatchObject({
+		id: "primary",
+		amount: { used: 42, limit: 100, remaining: 58, unit: "percent" },
+		window: { duration_ms: 18_000_000, resets_at: 1_795_018_000_000 },
+	});
+});
+
+test("refreshes once after a usage 401", async () => {
+	let usageCalls = 0;
+	let authorization = "";
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		usageCalls += 1;
+		authorization = request.headers.get("authorization") ?? "";
+		return usageCalls === 1
+			? new Response("unauthorized", { status: 401 })
+			: Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+	});
+	await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(credentials());
+
+	expect(usageCalls).toBe(2);
+	expect(authorization).toBe("Bearer fresh");
+});
+
 test("sends account identity and complete subscription request fields", async () => {
 	let received: CapturedRequest | undefined;
 	const base = fakeServer((request) => {

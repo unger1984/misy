@@ -146,6 +146,44 @@ test("refreshes with the Anthropic OAuth fingerprint and explains invalid_grant"
 	await expect(provider.refreshAuth(credentials())).rejects.toThrow("sign in to Claude again");
 });
 
+test("normalizes Claude subscription usage", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return Response.json({
+			five_hour: { utilization: 37.5, resets_at: "2026-11-16T12:00:00Z" },
+			seven_day: { utilization: 71 },
+		});
+	});
+	const report = await new AnthropicProvider({ apiBaseUrl: base }).usage(credentials());
+
+	expect(received?.path).toBe("/api/oauth/usage");
+	expect(received?.headers.get("authorization")).toBe("Bearer access");
+	expect(report.limits.map((limit) => limit.id)).toEqual(["five-hour", "seven-day"]);
+	expect(report.limits[0]).toMatchObject({
+		amount: { used: 37.5, limit: 100, remaining: 62.5, unit: "percent" },
+	});
+});
+
+test("refreshes once after a Claude usage 401", async () => {
+	let usageCalls = 0;
+	let authorization = "";
+	const base = fakeServer((request) => {
+		if (request.path === "/v1/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		usageCalls += 1;
+		authorization = request.headers.get("authorization") ?? "";
+		return usageCalls === 1
+			? new Response("unauthorized", { status: 401 })
+			: Response.json({ five_hour: { utilization: 10 } });
+	});
+	await new AnthropicProvider({ apiBaseUrl: base }).usage(credentials());
+
+	expect(usageCalls).toBe(2);
+	expect(authorization).toBe("Bearer fresh");
+});
+
 test("discovers model contexts and uses the bundled fallback", async () => {
 	const base = fakeServer((request) => {
 		if (request.path === "/v1/models") {

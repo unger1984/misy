@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { createMessagesRequest, notifyMessageEvents } from "./messages-wire";
 import { defaultModel, listModels, type Model } from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
+import { fetchUsage, UsageRequestError } from "./usage";
 
 const CLAUDE_CODE_BETAS =
 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14," +
@@ -60,6 +61,18 @@ export class AnthropicProvider {
 		const models = await listModels(this.config, credentials);
 		const selected = defaultModel(models);
 		return selected === undefined ? { models } : { models, default_model: selected };
+	}
+
+	/** Returns normalized Claude subscription limits. */
+	async usage(credentials: Credentials, signal?: AbortSignal) {
+		let current = await refreshIfNeeded(this.oauth, credentials);
+		try {
+			return await fetchUsage(this.config, current, signal);
+		} catch (cause) {
+			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
+			current = await this.oauth.refresh(current);
+			return await fetchUsage(this.config, current, signal);
+		}
 	}
 
 	/** Streams Messages events, refreshing before expiry and retrying exactly once after a 401. */

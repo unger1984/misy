@@ -23,6 +23,8 @@
 - Upgraded the provider contract to protocol version 2 with browser, device, prompt, and no-auth
   flows, plus separate authentication session and completion payloads.
 - Added dynamic model discovery with bundled fallbacks for OpenAI, Anthropic, and Kimi.
+- Added the `/usage` command for viewing normalized account limits from the provider of the
+  currently selected model.
 - Added `-c <path>` and `--config=<path>` options for selecting the Misy configuration directory.
 
 ### Improved

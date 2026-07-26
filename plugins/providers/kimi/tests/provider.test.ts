@@ -74,6 +74,75 @@ test("falls back to bundled models when Kimi's catalog endpoint is unavailable",
 	]);
 });
 
+test("normalizes Kimi Coding subscription usage", async () => {
+	let captured: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		captured = request;
+		// Mirrors the live /usages payload: quantities are strings, limits carry no name,
+		// and resetTime is an ISO timestamp with sub-millisecond precision.
+		return Response.json({
+			usage: {
+				limit: "100",
+				used: "33",
+				remaining: "67",
+				resetTime: "2026-03-08T09:20:45.248979Z",
+			},
+			limits: [
+				{
+					window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" },
+					detail: {
+						limit: "100",
+						used: "2",
+						remaining: "98",
+						resetTime: "2026-03-07T15:20:45.248979Z",
+					},
+				},
+			],
+		});
+	});
+	const report = await provider(base).usage(credentials());
+
+	expect(captured?.path).toBe("/usages");
+	expect(captured?.headers.get("authorization")).toBe("Bearer access");
+	expect(report.limits).toHaveLength(2);
+	expect(report.limits[0]).toMatchObject({
+		label: "Total quota",
+		amount: { used: 33, limit: 100, remaining: 67 },
+		window: { resets_at: Date.parse("2026-03-08T09:20:45.248979Z") },
+	});
+	expect(report.limits[1]).toMatchObject({
+		label: "5h limit",
+		amount: { used: 2, limit: 100, remaining: 98 },
+		window: {
+			duration_ms: 18_000_000,
+			resets_at: Date.parse("2026-03-07T15:20:45.248979Z"),
+		},
+	});
+});
+
+test("refreshes once after a Kimi usage 401", async () => {
+	let usageCalls = 0;
+	let authorization = "";
+	const base = fakeServer((request) => {
+		if (request.path === "/api/oauth/token") {
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "rotated",
+				expires_in: 3_600,
+			});
+		}
+		usageCalls += 1;
+		authorization = request.headers.get("authorization") ?? "";
+		return usageCalls === 1
+			? new Response("unauthorized", { status: 401 })
+			: Response.json({ usage: { used: 1, limit: 10 } });
+	});
+	await provider(base).usage(credentials());
+
+	expect(usageCalls).toBe(2);
+	expect(authorization).toBe("Bearer fresh");
+});
+
 test("streams text and fragmented tools through Kimi's OpenAI request", async () => {
 	let captured: CapturedRequest | undefined;
 	const base = fakeServer((request) => {

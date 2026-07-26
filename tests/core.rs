@@ -33,6 +33,7 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
   "kind": "provider",
   "protocol_version": 2,
   "description": "Core fixture",
+  "capabilities": {{"usage": {{"version": 1}}}},
   "author": "Misy",
   "homepage": "https://example.test/plugin",
   "repository": "https://example.test/repository",
@@ -156,6 +157,39 @@ fn core_persists_auth_credentials_without_exposing_them_to_callers() {
             .expect("refreshed credentials")
             .contains("refreshed-opaque")
     );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn usage_routes_to_the_models_provider_and_rejects_raw_provider_payloads() {
+    let (_temporary, core, _) = test_core("usage");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
+
+    let report = core.usage(&fixture_model()).expect("usage report");
+
+    assert_eq!(report.limits[0].id, "five-hour");
+    assert_eq!(report.limits[0].amount.used, Some(42.0));
+    core.shutdown().expect("shutdown");
+
+    let (_temporary, core, _) = test_core("bad-usage");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
+    let error = core
+        .usage(&fixture_model())
+        .expect_err("raw usage payload must be rejected")
+        .to_string();
+    assert!(error.contains("unknown field `raw`"));
+    assert!(!error.contains("must-not-escape"));
     core.shutdown().expect("shutdown");
 }
 

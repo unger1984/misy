@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { listModels, type Model } from "./model-catalog";
 import { createResponsesRequest, notifyResponseEvents } from "./responses-wire";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
+import { fetchUsage, UsageRequestError } from "./usage";
 
 /** Implements Misy protocol v2 against the ChatGPT OAuth Responses backend. */
 export class OpenAiProvider {
@@ -52,6 +53,18 @@ export class OpenAiProvider {
 	/** Lists account-scoped ChatGPT Codex models, falling back to the bundled catalog on failure. */
 	async listModels(credentials: Credentials): Promise<Model[]> {
 		return await listModels(this.config, credentials);
+	}
+
+	/** Returns normalized ChatGPT subscription limits. */
+	async usage(credentials: Credentials, signal?: AbortSignal) {
+		let current = await refreshIfNeeded(this.oauth, credentials);
+		try {
+			return await fetchUsage(this.config, current, signal);
+		} catch (cause) {
+			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
+			current = await this.oauth.refresh(current);
+			return await fetchUsage(this.config, current, signal);
+		}
 	}
 
 	/** Streams a Responses request, refreshing once before expiry or after one 401 retry. */

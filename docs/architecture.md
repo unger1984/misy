@@ -25,7 +25,10 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The Rust core owns normalized state, configuration, credentials, the in-memory conversation, agent/tool iteration, cancellation, provider supervision, and public events.
+- The Rust core owns normalized state, configuration, credentials, the in-memory conversation,
+  agent/tool iteration, cancellation, provider supervision, and public events. It also owns
+  capability negotiation, credential injection, deadlines, and validation for
+  provider-normalized account-limit reports.
 - The TUI and future desktop or third-party programs are clients of the core. They do not duplicate orchestration state.
 - Rust owns local tool definitions and execution. Provider plugins only translate between Misy's normalized contract and a remote provider protocol.
 - One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
@@ -39,6 +42,11 @@ flowchart LR
 5. Provider stream events become normalized `CoreEvent` values.
 6. Tool calls execute locally in Rust; results return to the same provider/model loop.
 7. Cancel and shutdown propagate through the core to provider processes.
+8. Optional provider capabilities are negotiated from the discovered manifest before a request.
+   For usage capability version 1, the core snapshots the selected `ModelRef`, refreshes and
+   injects its opaque credentials, bounds `usage.get` to 30 seconds, and strictly validates the
+   normalized result. The provider retains ownership of remote endpoint selection, headers, and
+   provider-specific response parsing.
 
 ## Fixed Constraints
 

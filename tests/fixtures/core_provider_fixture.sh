@@ -135,6 +135,31 @@ models_list() {
   esac
 }
 
+usage_get() {
+  case "$line" in
+    *'"credentials"'*) ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":' "$id"
+      printf '%s\n' '{"code":401,"message":"missing usage credentials"}}'
+      return
+      ;;
+  esac
+  case "$target" in
+    *bad-usage*)
+      reply \
+        '{"fetched_at":1795000000000,"limits":[],' \
+        '"raw":{"access_token":"must-not-escape"}}'
+      ;;
+    *)
+      reply \
+        '{"fetched_at":1795000000000,"limits":[' \
+        '{"id":"five-hour","label":"5 hour limit","amount":' \
+        '{"used":42,"limit":100,"remaining":58,"unit":"percent"},' \
+        '"window":{"duration_ms":18000000,"resets_at":1795018000000}}]}'
+      ;;
+  esac
+}
+
 chat_start() {
   case "$line" in
     *'"provider_id":"fixture"'*|*'"provider_id":"fixture-two"'*) ;;
@@ -292,6 +317,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"auth.logout"'*) reply '{}' ;;
     *'"method":"models.list"'*) models_list ;;
+    *'"method":"usage.get"'*) usage_get ;;
     *'"method":"chat.start"'*) chat_start ;;
   esac
 done

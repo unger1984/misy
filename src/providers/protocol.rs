@@ -30,6 +30,15 @@ use std::{error::Error, fmt};
 /// The JSON-RPC protocol revision implemented by this host.
 pub const PROVIDER_PROTOCOL_VERSION: u32 = 2;
 
+/// Optional account-limit reporting capability identifier.
+pub const USAGE_CAPABILITY: &str = "usage";
+
+/// Usage capability contract revision supported by this host.
+pub const USAGE_CAPABILITY_VERSION: u32 = 1;
+
+/// JSON-RPC method required from providers advertising usage capability version 1.
+pub const USAGE_METHOD: &str = "usage.get";
+
 /// Methods every version 2 provider package must implement.
 pub const PROVIDER_METHODS: &[&str] = &[
     "auth.status",
@@ -109,6 +118,13 @@ pub enum ProviderError {
     },
     /// The request was cancelled before its response arrived.
     Cancelled(ProviderRequestId),
+    /// A bounded provider request did not complete before its deadline.
+    Timeout {
+        /// Provider that exceeded the deadline.
+        provider: String,
+        /// Method whose response did not arrive.
+        method: String,
+    },
     /// The host has been shut down and accepts no new work.
     Shutdown,
 }
@@ -145,6 +161,12 @@ impl fmt::Display for ProviderError {
                 "provider `{provider}` returned JSON-RPC error {code}: {message}"
             ),
             Self::Cancelled(id) => write!(formatter, "provider request {} was cancelled", id.get()),
+            Self::Timeout { provider, method } => {
+                write!(
+                    formatter,
+                    "provider `{provider}` request `{method}` timed out"
+                )
+            }
             Self::Shutdown => formatter.write_str("provider host has shut down"),
         }
     }

@@ -48,6 +48,7 @@ fn write_fixture_manifest(root: &Path, id: &str, display_name: &str, target: &Pa
   "kind": "provider",
   "protocol_version": 2,
   "description": "TUI fixture",
+  "capabilities": {{"usage": {{"version": 1}}}},
   "author": "Misy",
   "homepage": "https://example.test/plugin",
   "repository": "https://example.test/repository",
@@ -146,6 +147,7 @@ fn select_first_model(client: &mut TuiClient<RecordingBrowser>) {
 #[test]
 fn input_mapping_and_reducer_keep_state_explicit() {
     assert_eq!(map_input("/provider"), Ok(UiAction::ShowProviders));
+    assert_eq!(map_input("/usage"), Ok(UiAction::ShowUsage));
     assert!(map_input("/model fixture/model").is_err());
     assert_eq!(
         misy::tui::map_key(UiMode::Input, UiKey::PageUp),
@@ -203,7 +205,7 @@ fn bracketed_paste_is_atomic_multiline_input_at_the_cursor() {
 fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     let (_temporary, mut client, _) = test_client();
     client.insert_text("/");
-    assert_eq!(client.state().command_popup_rows().len(), 2);
+    assert_eq!(client.state().command_popup_rows().len(), 3);
     let cursor = client.state().composer_cursor();
     client.handle_key(UiKey::Down).expect("select next command");
     client
@@ -522,6 +524,37 @@ fn composer_input_is_preserved_while_stream_events_arrive() {
             .sum::<usize>(),
         4_096
     );
+}
+
+#[test]
+fn usage_command_reports_limits_for_the_selected_models_provider() {
+    let (_temporary, core) = core_with_providers(&[
+        ("fixture", "First AI", "first-usage.txt"),
+        ("fixture-two", "Second AI", "second-usage.txt"),
+    ]);
+    let selected = ModelRef::new(
+        ProviderId::new("fixture-two"),
+        ModelId::new("fixture-model"),
+    );
+    core.complete_auth(
+        &selected.provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate selected provider");
+    core.select_model(selected).expect("select second provider");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    client.handle_input("/usage").expect("request usage");
+    wait_for(&mut client, |client| {
+        client.state().transcript().iter().any(
+            |row| matches!(row, TranscriptRow::Info(message) if message == "Usage · Second AI"),
+        )
+    });
+
+    assert!(client.state().transcript().iter().any(
+        |row| matches!(row, TranscriptRow::Info(message) if message.contains("5 hour limit: 42% used"))
+    ));
 }
 
 #[test]

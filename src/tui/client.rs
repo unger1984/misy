@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
     AvailableModels, CoreError, CoreEvent, Message, MisyCore, MisyPaths, ModelRef, ProviderId,
+    UsageReport,
 };
 use serde_json::{Value, json};
 use std::{
@@ -72,6 +73,7 @@ enum ProviderOperationResult {
     Logout(ProviderId, Result<(), String>),
     Models(Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
+    Usage(ModelRef, Result<UsageReport, String>),
 }
 
 /// Thin interactive client that translates input into headless core operations.
@@ -371,6 +373,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         match action {
             UiAction::ShowProviders => self.show_providers()?,
             UiAction::ShowModels => self.show_models(),
+            UiAction::ShowUsage => self.show_usage()?,
             UiAction::SubmitPrompt(prompt) => {
                 let submission = self.core.submit(Message::user(prompt.clone()))?;
                 self.state
@@ -423,6 +426,25 @@ impl<B: BrowserHandoff> TuiClient<B> {
             let result = core.available_models().map_err(|error| error.to_string());
             let _ = sender.send(ProviderOperationResult::Models(result));
         });
+    }
+
+    fn show_usage(&mut self) -> Result<(), TuiError> {
+        let model = self
+            .core
+            .selected_model()
+            .ok_or(CoreError::NoModelSelected)?;
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        thread::spawn({
+            let requested_model = model;
+            move || {
+                let result = core
+                    .usage(&requested_model)
+                    .map_err(|error| error.to_string());
+                let _ = sender.send(ProviderOperationResult::Usage(requested_model, result));
+            }
+        });
+        Ok(())
     }
 
     fn confirm_view(&mut self) -> Result<TuiControl, TuiError> {
@@ -571,6 +593,15 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     Err(error) => self.state.add_error(error),
                 }
             }
+            ProviderOperationResult::Usage(model, result) => match result {
+                Ok(report) => {
+                    let provider = self.provider_display_name(&model.provider).to_owned();
+                    for line in super::usage::format_usage_report(&provider, &report) {
+                        self.state.add_info(line);
+                    }
+                }
+                Err(error) => self.state.add_error(error),
+            },
         }
     }
 

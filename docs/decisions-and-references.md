@@ -23,14 +23,14 @@ Read this document before making a new architecture or user-interaction choice.
 
 ## Deferred Scope
 
-MCP, permissions, usage reporting, subagents, marketplace installation/update, persisted
+MCP, permissions, subagents, marketplace installation/update, persisted
 conversations, daemon/public IPC, desktop UI, API-key authentication, generic prompt-based
 authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.
 
 ## Reference Policy
 
-`.references/openai-codex/` and `.references/oh-my-pi/` are equal local reference implementations. They are idea and implementation sources, not architectural authorities over Misy.
+`.references/openai-codex/` and `.references/oh-my-pi/` are equal local reference implementations. They are idea and implementation sources, not architectural authorities over Misy. `.references/kimi-cli/` is the upstream Kimi CLI, consulted for Kimi provider wire formats and behavior.
 
 When a comparable implementation or UX question appears:
 

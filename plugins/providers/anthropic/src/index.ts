@@ -53,6 +53,7 @@ async function dispatch(
 	if (method === "auth.refresh") return await provider.refreshAuth(requiredCredentials(params));
 	if (method === "auth.logout") return provider.logout();
 	if (method === "models.list") return await provider.listModels(requiredCredentials(params));
+	if (method === "usage.get") return await provider.usage(requiredCredentials(params));
 	if (method === "chat.start") {
 		await chat(id, params);
 		return undefined;

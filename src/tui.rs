@@ -15,6 +15,7 @@ mod startup_header;
 mod state;
 mod style;
 mod terminal;
+mod usage;
 
 pub use action::{UiAction, UiKey, UiMode, map_input, map_key};
 pub use browser::{

@@ -13,6 +13,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::Rect,
+    text::Line,
     widgets::{Paragraph, Wrap},
 };
 use serde_json::Value;
@@ -161,6 +162,8 @@ pub enum UiAction {
     AppendToolResult { id: String, is_error: bool },
     ScrollUp,
     ScrollDown,
+    HistoryPrevious,
+    HistoryNext,
     PickerUp,
     PickerDown,
     PickerConfirm,
@@ -172,6 +175,8 @@ pub enum UiAction {
 pub enum UiKey {
     Up,
     Down,
+    PageUp,
+    PageDown,
     Enter,
     Escape,
 }
@@ -188,14 +193,17 @@ pub enum UiMode {
 pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     if mode == UiMode::Input {
         return match key {
-            UiKey::Up => UiAction::ScrollUp,
-            UiKey::Down => UiAction::ScrollDown,
+            UiKey::Up => UiAction::HistoryPrevious,
+            UiKey::Down => UiAction::HistoryNext,
+            UiKey::PageUp => UiAction::ScrollUp,
+            UiKey::PageDown => UiAction::ScrollDown,
             UiKey::Enter | UiKey::Escape => UiAction::Noop,
         };
     }
     match key {
         UiKey::Up => UiAction::PickerUp,
         UiKey::Down => UiAction::PickerDown,
+        UiKey::PageUp | UiKey::PageDown => UiAction::Noop,
         UiKey::Enter => UiAction::PickerConfirm,
         UiKey::Escape => UiAction::PickerBack,
     }
@@ -266,6 +274,9 @@ pub struct UiState {
     detail_provider: Option<ProviderId>,
     model_choices: Vec<ModelInfo>,
     auth_pending: Option<ProviderId>,
+    input_history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Option<String>,
 }
 
 impl UiState {
@@ -339,6 +350,14 @@ impl UiState {
         }
     }
 
+    pub fn composer_input(&self) -> &str {
+        &self.input
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.input_history.len()
+    }
+
     /// Applies a local, side-effect-free state transition.
     pub fn reduce(&mut self, action: UiAction) {
         match action {
@@ -355,6 +374,8 @@ impl UiState {
             }
             UiAction::ScrollUp => self.scroll_offset = self.scroll_offset.saturating_add(1),
             UiAction::ScrollDown => self.scroll_offset = self.scroll_offset.saturating_sub(1),
+            UiAction::HistoryPrevious => self.recall_previous_input(),
+            UiAction::HistoryNext => self.recall_next_input(),
             UiAction::PickerUp => self.move_highlight_up(),
             UiAction::PickerDown => self.move_highlight_down(),
             UiAction::PickerBack => self.back_from_picker(),
@@ -440,7 +461,7 @@ impl UiState {
 
     fn composer_text(&self) -> String {
         if self.mode == UiMode::Input {
-            return self.input.clone();
+            return format!("› {}", self.input);
         }
         let labels = self.picker_labels();
         let rows = labels
@@ -480,20 +501,68 @@ impl UiState {
                 format!("{provider}  {status}\n{rows}\nEsc back")
             }
             UiMode::ModelList => format!("Select model  ↑↓ Enter  Esc\n{rows}"),
-            UiMode::Input => self.input.clone(),
+            UiMode::Input => format!("› {}", self.input),
         }
     }
 
     fn push_input(&mut self, character: char) {
+        self.detach_history_navigation();
         self.input.push(character);
     }
 
     fn pop_input(&mut self) {
+        self.detach_history_navigation();
         self.input.pop();
     }
 
-    fn take_input(&mut self) -> String {
-        std::mem::take(&mut self.input)
+    fn take_submitted_input(&mut self) -> String {
+        const MAX_HISTORY_ENTRIES: usize = 100;
+        let input = std::mem::take(&mut self.input);
+        self.history_index = None;
+        self.history_draft = None;
+        if !input.trim().is_empty()
+            && self.input_history.last().map(String::as_str) != Some(input.as_str())
+        {
+            self.input_history.push(input.clone());
+            if self.input_history.len() > MAX_HISTORY_ENTRIES {
+                self.input_history.remove(0);
+            }
+        }
+        input
+    }
+
+    fn detach_history_navigation(&mut self) {
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
+    fn recall_previous_input(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        let index = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = Some(self.input.clone());
+                self.input_history.len() - 1
+            }
+        };
+        self.history_index = Some(index);
+        self.input.clone_from(&self.input_history[index]);
+    }
+
+    fn recall_next_input(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.input_history.len() {
+            let next = index + 1;
+            self.history_index = Some(next);
+            self.input.clone_from(&self.input_history[next]);
+        } else {
+            self.input = self.history_draft.take().unwrap_or_default();
+            self.history_index = None;
+        }
     }
 
     fn add_error(&mut self, error: impl fmt::Display) {
@@ -669,6 +738,28 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.core.running_provider_count()
     }
 
+    pub fn insert_text(&mut self, text: &str) {
+        if self.state.mode == UiMode::Input {
+            for character in text.chars() {
+                self.state.push_input(character);
+            }
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.state.mode == UiMode::Input {
+            self.state.pop_input();
+        }
+    }
+
+    pub fn submit_composer(&mut self) -> Result<TuiControl, TuiError> {
+        if self.state.mode != UiMode::Input {
+            return Ok(TuiControl::Continue);
+        }
+        let input = self.state.take_submitted_input();
+        self.handle_input(&input)
+    }
+
     /// Parses and executes a line after the caller has collected it from the input widget.
     pub fn handle_input(&mut self, input: &str) -> Result<TuiControl, TuiError> {
         match map_input(input) {
@@ -805,6 +896,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             | UiAction::AppendToolResult { .. }
             | UiAction::ScrollUp
             | UiAction::ScrollDown
+            | UiAction::HistoryPrevious
+            | UiAction::HistoryNext
             | UiAction::PickerUp
             | UiAction::PickerDown
             | UiAction::PickerBack => {
@@ -898,13 +991,25 @@ pub fn run(core: MisyCore) -> Result<(), io::Error> {
                 } else {
                     match key.code {
                         KeyCode::Enter => {
-                            let input = client.state.take_input();
-                            let _ = client.handle_input(&input);
+                            let _ = client.submit_composer();
                         }
-                        KeyCode::Backspace => client.state.pop_input(),
-                        KeyCode::Char(character) => client.state.push_input(character),
-                        KeyCode::Up => client.state.reduce(UiAction::ScrollUp),
-                        KeyCode::Down => client.state.reduce(UiAction::ScrollDown),
+                        KeyCode::Backspace => client.backspace(),
+                        KeyCode::Char(character) => {
+                            let mut encoded = [0; 4];
+                            client.insert_text(character.encode_utf8(&mut encoded));
+                        }
+                        KeyCode::Up => {
+                            let _ = client.handle_key(UiKey::Up);
+                        }
+                        KeyCode::Down => {
+                            let _ = client.handle_key(UiKey::Down);
+                        }
+                        KeyCode::PageUp => {
+                            let _ = client.handle_key(UiKey::PageUp);
+                        }
+                        KeyCode::PageDown => {
+                            let _ = client.handle_key(UiKey::PageDown);
+                        }
                         _ => {}
                     }
                 }
@@ -981,6 +1086,14 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
         separator_area,
     );
     frame.render_widget(composer, input_area);
+    if state.mode == UiMode::Input && input_area.height > 0 && input_area.width > 0 {
+        let cursor_offset = 2usize.saturating_add(Line::from(state.input.as_str()).width());
+        let cursor_x = input_area
+            .x
+            .saturating_add(u16::try_from(cursor_offset).unwrap_or(u16::MAX))
+            .min(input_area.right().saturating_sub(1));
+        frame.set_cursor_position((cursor_x, input_area.y));
+    }
 }
 
 struct TerminalGuard<'a> {

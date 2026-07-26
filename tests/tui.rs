@@ -83,6 +83,18 @@ fn input_mapping_and_reducer_keep_rendering_state_explicit() {
             ModelId::new("fixture-model"),
         ))
     );
+    assert_eq!(
+        misy::tui::map_key(UiMode::Input, UiKey::Up),
+        UiAction::HistoryPrevious
+    );
+    assert_eq!(
+        misy::tui::map_key(UiMode::Input, UiKey::PageUp),
+        UiAction::ScrollUp
+    );
+    assert_eq!(
+        misy::tui::map_key(UiMode::ProviderList, UiKey::Up),
+        UiAction::PickerUp
+    );
 
     let mut state = UiState::default();
     state.reduce(UiAction::AppendAssistantText("hello".to_owned()));
@@ -297,11 +309,52 @@ fn renderer_smoke_shows_startup_identity_status_separator_and_input() {
         .position(|row| row.starts_with("────────────────────"))
         .expect("separator row");
     assert_eq!(separator_row, answer_row + 1);
+    assert!(rows[separator_row + 1].starts_with("› "));
+    terminal
+        .backend_mut()
+        .assert_cursor_position((2, u16::try_from(separator_row + 1).unwrap()));
     assert!(
-        rows[(separator_row + 1)..]
+        rows[(separator_row + 2)..]
             .iter()
             .all(|row| row.trim().is_empty())
     );
+}
+
+#[test]
+fn composer_history_navigates_and_restores_the_original_draft() {
+    let (_temporary, mut client, _) = test_client();
+
+    client.insert_text("/first");
+    client.submit_composer().expect("submit first command");
+    client.insert_text("/second");
+    client.submit_composer().expect("submit second command");
+    client.insert_text("draft");
+
+    client.handle_key(UiKey::Up).expect("older input");
+    assert_eq!(client.state().composer_input(), "/second");
+    client.handle_key(UiKey::Up).expect("oldest input");
+    assert_eq!(client.state().composer_input(), "/first");
+    client.handle_key(UiKey::Down).expect("newer input");
+    assert_eq!(client.state().composer_input(), "/second");
+    client.handle_key(UiKey::Down).expect("restore draft");
+    assert_eq!(client.state().composer_input(), "draft");
+
+    client.handle_key(UiKey::Up).expect("recall editable input");
+    client.insert_text("!");
+    assert_eq!(client.state().composer_input(), "/second!");
+}
+
+#[test]
+fn composer_history_is_bounded_and_skips_consecutive_duplicates() {
+    let (_temporary, mut client, _) = test_client();
+    for index in 0..105 {
+        client.insert_text(&format!("/command-{index}"));
+        client.submit_composer().expect("submit command");
+    }
+    client.insert_text("/command-104");
+    client.submit_composer().expect("submit duplicate");
+
+    assert_eq!(client.state().history_len(), 100);
 }
 
 #[test]

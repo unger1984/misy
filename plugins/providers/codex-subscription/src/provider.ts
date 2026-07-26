@@ -62,7 +62,6 @@ export class CodexSubscriptionProvider {
         const callback = new URL(request.url);
         if (callback.pathname !== "/callback") return new Response("Not found", { status: 404 });
         if (callback.searchParams.get("state") !== state) {
-          resolveCode({ error: "OAuth callback state did not match" });
           return new Response("OAuth state did not match", { status: 400 });
         }
         const authorizationCode = callback.searchParams.get("code");
@@ -115,7 +114,14 @@ export class CodexSubscriptionProvider {
 
   async refreshAuth(credentials: Credentials): Promise<{ credentials: Credentials }> {
     if (!credentials.refresh_token) throw new Error("Credentials do not contain a refresh token");
-    return { credentials: await this.token({ grant_type: "refresh_token", refresh_token: credentials.refresh_token }) };
+    const refreshed = await this.token({ grant_type: "refresh_token", refresh_token: credentials.refresh_token });
+    return {
+      credentials: {
+        ...credentials,
+        ...refreshed,
+        refresh_token: refreshed.refresh_token ?? credentials.refresh_token,
+      },
+    };
   }
 
   authStatus(credentials: Credentials | undefined): { authenticated: boolean; expires_at?: number } {
@@ -250,12 +256,16 @@ async function* sse(stream: ReadableStream<Uint8Array>): AsyncGenerator<{ event:
     while (true) {
       const { value, done } = await reader.read();
       pending += decoder.decode(value, { stream: !done });
-      let separator: number;
-      while ((separator = pending.indexOf("\n\n")) >= 0) {
-        const block = pending.slice(0, separator);
-        pending = pending.slice(separator + 2);
-        const event = block.match(/^event:\s*(.+)$/m)?.[1] ?? "message";
-        const data = block.match(/^data:\s*(.*)$/m)?.[1] ?? "";
+      let separator: RegExpExecArray | null;
+      while ((separator = /\r\n\r\n|\n\n|\r\r/.exec(pending)) !== null) {
+        const block = pending.slice(0, separator.index);
+        pending = pending.slice(separator.index + separator[0].length);
+        const lines = block.split(/\r\n|\n|\r/);
+        const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trimStart() ?? "message";
+        const data = lines
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
         if (data !== "[DONE]") yield { event, data };
       }
       if (done) break;

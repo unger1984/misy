@@ -82,7 +82,7 @@ test("refreshes, lists dynamic models, and maps response streaming tool events",
   const provider = new CodexSubscriptionProvider({ issuer: base, clientId: "test-client", codexBaseUrl: base });
   const credentials = { access_token: "old-access", refresh_token: "refresh" };
 
-  expect(await provider.refreshAuth(credentials)).toMatchObject({ credentials: { access_token: "new-access" } });
+  expect(await provider.refreshAuth(credentials)).toMatchObject({ credentials: { access_token: "new-access", refresh_token: "new-refresh" } });
   expect(await provider.listModels(credentials)).toEqual([{ id: "gpt-test", display_name: "Test", context_window: 128000 }]);
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   await provider.streamChat({
@@ -115,17 +115,71 @@ test("refreshes, lists dynamic models, and maps response streaming tool events",
   });
 });
 
-test("rejects a mismatched OAuth callback state and reports a failed stream", async () => {
+test("preserves opaque credentials and the previous refresh token when refresh omits one", async () => {
+  const issuer = fakeServer(({ pathname }) => pathname === "/oauth/token"
+    ? Response.json({ access_token: "new-access", expires_in: 60, server_field: "new" })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({ issuer, clientId: "test-client", codexBaseUrl: issuer });
+
+  const result = await provider.refreshAuth({
+    access_token: "old-access",
+    refresh_token: "keep-refresh",
+    account_id: "account",
+    server_field: "old",
+  });
+
+  expect(result.credentials).toMatchObject({
+    access_token: "new-access",
+    refresh_token: "keep-refresh",
+    account_id: "account",
+    server_field: "new",
+  });
+});
+
+test("parses CRLF Responses events for text, tool calls, and completion", async () => {
+  const base = fakeServer(({ pathname }) => pathname === "/responses"
+    ? new Response([
+      'event: response.output_text.delta\r\n', 'data: {"delta":"CRLF"}\r\n\r\n',
+      'event: response.output_item.done\r\n', 'data: {"item":{"type":"function_call","call_id":"call-crlf","name":"read_file","arguments":"{\\"path\\":\\"crlf\\"}"}}\r\n\r\n',
+      'event: response.completed\r\n', 'data: {"response":{"id":"resp-crlf"}}\r\n\r\n',
+    ].join(""), { headers: { "content-type": "text/event-stream" } })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({ issuer: base, clientId: "test-client", codexBaseUrl: base });
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+
+  await provider.streamChat({ model_id: "x", messages: [], tools: [], credentials: { access_token: "access" } }, 77,
+    (method, params) => events.push({ method, params }));
+
+  expect(events).toEqual([
+    { method: "text_delta", params: { request_id: 77, delta: "CRLF" } },
+    { method: "tool_call", params: { request_id: 77, id: "call-crlf", name: "read_file", arguments: { path: "crlf" } } },
+    { method: "completed", params: { request_id: 77, metadata: { response: { id: "resp-crlf" } } } },
+  ]);
+});
+
+test("keeps OAuth pending after a mismatched state and accepts a later valid callback", async () => {
+  const issuer = fakeServer(({ pathname }) => pathname === "/oauth/token"
+    ? Response.json({ access_token: "access", refresh_token: "refresh" })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({ issuer, clientId: "test-client", codexBaseUrl: issuer });
+  const started = await provider.startAuth();
+  const authorization = new URL(started.url);
+  const callback = authorization.searchParams.get("redirect_uri")!;
+  const invalid = await fetch(`${callback}?code=nope&state=wrong`);
+  expect(invalid.status).toBe(400);
+  const valid = await fetch(`${callback}?code=browser-code&state=${authorization.searchParams.get("state")}`);
+  expect(valid.status).toBe(200);
+
+  await expect(provider.completeAuth(started.session, {})).resolves.toMatchObject({
+    credentials: { access_token: "access", refresh_token: "refresh" },
+  });
+});
+
+test("reports a failed Responses request", async () => {
   const base = fakeServer(({ pathname }) => pathname === "/responses"
     ? new Response("unauthorized", { status: 401 })
     : new Response("not found", { status: 404 }));
   const provider = new CodexSubscriptionProvider({ issuer: base, clientId: "test-client", codexBaseUrl: base });
-  const started = await provider.startAuth();
-  const callback = new URL(started.url).searchParams.get("redirect_uri")!;
-  const response = await fetch(`${callback}?code=nope&state=wrong`);
-  expect(response.status).toBe(400);
-  await expect(provider.completeAuth(started.session, {})).rejects.toThrow("OAuth callback state did not match");
-
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   await expect(provider.streamChat({ model_id: "x", messages: [], tools: [], credentials: { access_token: "bad" } }, 9, (method, params) => events.push({ method, params }))).rejects.toThrow("Responses request failed (401)");
   expect(events).toEqual([{ method: "failed", params: { request_id: 9, message: "Responses request failed (401)" } }]);

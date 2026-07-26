@@ -87,3 +87,40 @@ as final gates because concurrent, unrelated TUI work has an existing formatting
 diff in `tests/tui.rs` and currently imports private `tui::render`. Those files
 were not touched or altered. The Task 4-specific Rust test target and library
 lint are green.
+
+## Architecture review remediation
+
+The follow-up fixes all three Important findings from the Task 4 architecture
+review:
+
+- Refresh responses are merged over the prior opaque credential object. An
+  omitted `refresh_token` preserves the previous refresh token, while a supplied
+  replacement still rotates it.
+- The SSE parser accepts LF, CRLF, and CR event/line separators, including
+  multiple `data:` lines.
+- A callback with the wrong OAuth state returns HTTP 400 without resolving or
+  poisoning the pending login. The same loopback server/session can then accept
+  the valid browser callback.
+
+### Remediation TDD evidence
+
+RED — `bun test tests/provider.test.ts`:
+
+- `preserves opaque credentials and the previous refresh token when refresh
+  omits one` failed because `refresh_token` and `account_id` were absent.
+- `parses CRLF Responses events for text, tool calls, and completion` failed
+  because only the fallback `completed` notification was emitted.
+- `keeps OAuth pending after a mismatched state and accepts a later valid
+  callback` failed because `completeAuth` rejected after the valid callback.
+- Result: **3 pass, 3 fail, 23 assertions**.
+
+GREEN — `bun test tests/provider.test.ts` after the minimal fixes:
+**6 pass, 0 fail, 23 assertions**.
+
+Final remediation verification:
+
+- `bun test` — **8 pass, 0 fail, 29 assertions**.
+- `bunx tsc --noEmit` — passed with no diagnostics.
+- `git diff --check` — passed.
+- No Rust files changed in this remediation wave, so the previously green
+  Rust credential-handoff regression was not rerun.

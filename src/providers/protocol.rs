@@ -1,11 +1,36 @@
+//! Versioned JSON-RPC contract shared by the provider host and provider packages.
+//!
+//! `auth.start` returns a discriminated union selected by `kind`:
+//!
+//! ```text
+//! { "kind": "browser", "url": "https://…", "session": {…} }
+//! { "kind": "device", "url": "https://…", "user_code": "WDJB-MJHT",
+//!   "expires_at": 1795000000000, "session": {…} }
+//! { "kind": "prompt", "fields": [
+//!   { "id": "api_key", "label": "API key", "secret": true }
+//! ], "session": {…} }
+//! { "kind": "none" }
+//! ```
+//!
+//! `kind` is required and unknown values are rejected by clients. `url` is required for browser
+//! and device flows. A device URL is `verification_uri_complete` when available and otherwise
+//! `verification_uri`; `user_code` is also required. `expires_at` is an optional Unix epoch time
+//! in milliseconds. Prompt flows require a non-empty `fields` array, and `secret` fields must be
+//! masked by supporting clients. `session` is an opaque authentication-attempt marker required
+//! for every flow except `none`.
+//!
+//! `auth.complete` receives separate `session` and `completion` fields. Browser and device flows
+//! use an empty completion object. Adding an optional result field is backward compatible. Adding
+//! or renaming a required field, method, or event requires a protocol version change.
+
 use crate::ProviderId;
 use serde_json::Value;
 use std::{error::Error, fmt};
 
 /// The JSON-RPC protocol revision implemented by this host.
-pub const PROVIDER_PROTOCOL_VERSION: u32 = 1;
+pub const PROVIDER_PROTOCOL_VERSION: u32 = 2;
 
-/// Methods every v1 provider package must implement.
+/// Methods every version 2 provider package must implement.
 pub const PROVIDER_METHODS: &[&str] = &[
     "auth.status",
     "auth.start",

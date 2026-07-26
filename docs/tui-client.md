@@ -58,9 +58,14 @@ authentication, session, and tool orchestration remain in the core.
 
 - Opening the provider list does not start every plugin; local manifest/credential state is used
   until a concrete provider action requires the process.
-- Browser authorization URLs are validated and passed directly to the OS opener without a shell.
-- OAuth completion keeps the opaque provider session and completes through the core without pasted
-  credential JSON.
+- Provider authentication follows the `auth.start` kind. `browser` validates and opens the URL,
+  then waits for provider completion. `device` does the same while showing the user code in the
+  provider operation row. `none` immediately marks the provider authenticated without opening a
+  browser. `prompt` reports that field input is not supported by this client yet.
+- Browser and device authorization URLs are limited to validated HTTP(S) addresses and are passed
+  directly to the OS opener without a shell. Unknown authentication kinds are reported as errors.
+- Authentication completion keeps the opaque provider session separate from the empty browser or
+  device completion object and passes both through the core without pasted credential JSON.
 - `Ctrl+C` always cancels active work, shuts down the core/provider host, restores the terminal,
   and exits.
 - Event processing is bounded per tick so continuous streaming cannot starve input handling.

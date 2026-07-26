@@ -7,6 +7,7 @@ export type ProviderConfig = {
 	codexBaseUrl: string;
 	scopes: readonly string[];
 	originator: string;
+	clientVersion: string;
 	authTimeoutMs: number;
 	requestTimeoutMs: number;
 };
@@ -23,6 +24,7 @@ export const DEFAULT_CONFIG: ProviderConfig = {
 		.split(" ")
 		.filter(Boolean),
 	originator: process.env["MISY_OPENAI_ORIGINATOR"] ?? "codex_cli_rs",
+	clientVersion: process.env["MISY_OPENAI_CLIENT_VERSION"] ?? "0.144.1",
 	authTimeoutMs: positiveInteger(process.env["MISY_OPENAI_AUTH_TIMEOUT_MS"], 300_000),
 	requestTimeoutMs: positiveInteger(process.env["MISY_OPENAI_REQUEST_TIMEOUT_MS"], 30_000),
 };

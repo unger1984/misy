@@ -3,7 +3,7 @@
 	"display_name": "OpenAI",
 	"version": "0.1.0",
 	"kind": "provider",
-	"protocol_version": 1,
+	"protocol_version": 2,
 	"description": "OpenAI models via ChatGPT subscription (browser OAuth)",
 	"auth_methods": [{ "id": "oauth", "display_name": "ChatGPT subscription" }],
 	"author": "Misy",

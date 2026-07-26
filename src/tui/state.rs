@@ -4,6 +4,7 @@ use super::{
     action::{UiAction, UiMode},
     composer::Composer,
     list::{ListRow, ListView},
+    presentation::{list_presentation, operation_label, provider_settings},
 };
 use crate::{
     AvailableModels, CoreEvent, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId, ToolResult,
@@ -102,18 +103,6 @@ pub(super) enum ProviderOperationKind {
     SelectModel,
 }
 
-impl ProviderOperationKind {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Start => "Opening browser…",
-            Self::Complete => "Waiting for browser…",
-            Self::Logout => "Logging out…",
-            Self::Models => "Loading models…",
-            Self::SelectModel => "Selecting model…",
-        }
-    }
-}
-
 /// State rendered by Ratatui. Rendering depends only on this value.
 #[derive(Default)]
 pub struct UiState {
@@ -127,6 +116,7 @@ pub struct UiState {
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
     pub(super) provider_operation: Option<(ProviderId, ProviderOperationKind)>,
+    provider_device_code: Option<String>,
 }
 
 impl UiState {
@@ -175,7 +165,10 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.labels(),
             Some(ActiveView::ProviderSettings { actions, .. }) => {
                 if let Some((_, operation)) = self.provider_operation {
-                    vec![operation.label().to_owned()]
+                    vec![operation_label(
+                        operation,
+                        self.provider_device_code.as_deref(),
+                    )]
                 } else {
                     actions.labels()
                 }
@@ -286,7 +279,11 @@ impl UiState {
     }
 
     pub(super) fn open_loading_models(&mut self) {
-        self.provider_operation = Some((ProviderId::new("models"), ProviderOperationKind::Models));
+        self.set_provider_operation(
+            ProviderId::new("models"),
+            ProviderOperationKind::Models,
+            None,
+        );
         self.view = Some(ActiveView::Models(ListView::new(
             "Select model",
             vec![ListRow::informational("Loading models…")],
@@ -307,6 +304,7 @@ impl UiState {
             return;
         }
         self.provider_operation = None;
+        self.provider_device_code = None;
         let mut rows = available
             .models
             .into_iter()
@@ -367,10 +365,21 @@ impl UiState {
     ) -> bool {
         if self.provider_operation.as_ref() == Some(&(provider.clone(), kind)) {
             self.provider_operation = None;
+            self.provider_device_code = None;
             true
         } else {
             false
         }
+    }
+
+    pub(super) fn set_provider_operation(
+        &mut self,
+        provider: ProviderId,
+        kind: ProviderOperationKind,
+        device_code: Option<String>,
+    ) {
+        self.provider_operation = Some((provider, kind));
+        self.provider_device_code = device_code;
     }
 
     pub(super) fn apply_core_event(&mut self, event: CoreEvent) {
@@ -412,12 +421,16 @@ impl UiState {
             Some(ActiveView::Providers(view)) => Some(list_presentation(
                 view,
                 visible_rows,
-                self.provider_operation.as_ref().map(|(_, kind)| *kind),
+                self.provider_operation
+                    .as_ref()
+                    .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
             Some(ActiveView::Models(view)) => Some(list_presentation(
                 view,
                 visible_rows,
-                self.provider_operation.as_ref().map(|(_, kind)| *kind),
+                self.provider_operation
+                    .as_ref()
+                    .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
             Some(ActiveView::ProviderSettings {
                 display_name,
@@ -432,10 +445,9 @@ impl UiState {
                 Some(ModalPresentation {
                     title: format!("{display_name} — {status}"),
                     rows: actions.visible_rows(visible_rows),
-                    operation: self
-                        .provider_operation
-                        .as_ref()
-                        .map(|(_, kind)| kind.label().to_owned()),
+                    operation: self.provider_operation.as_ref().map(|(_, kind)| {
+                        operation_label(*kind, self.provider_device_code.as_deref())
+                    }),
                     back_hint: true,
                 })
             }
@@ -609,6 +621,7 @@ impl UiState {
             Some(ActiveView::Providers(_) | ActiveView::Models(_)) => {
                 self.view = None;
                 self.provider_operation = None;
+                self.provider_device_code = None;
             }
             None => {}
         }
@@ -650,43 +663,5 @@ fn spinner_frame(ticks: u128) -> &'static str {
         7 => "⠧",
         8 => "⠇",
         _ => "⠏",
-    }
-}
-
-fn list_presentation<T>(
-    view: &ListView<T>,
-    visible_rows: usize,
-    operation: Option<ProviderOperationKind>,
-) -> ModalPresentation {
-    ModalPresentation {
-        title: view.title().to_owned(),
-        rows: view.visible_rows(visible_rows),
-        operation: operation.map(|kind| kind.label().to_owned()),
-        back_hint: false,
-    }
-}
-
-fn provider_settings(provider: ProviderChoice) -> ActiveView {
-    let credential_method = provider.credential_method.clone();
-    let rows = if provider.authenticated {
-        vec![ListRow::selectable(ProviderAction::Logout, "Log out", None)]
-    } else {
-        provider
-            .auth_methods
-            .iter()
-            .map(|method| {
-                ListRow::selectable(
-                    ProviderAction::Authorize(method.id.clone()),
-                    "Authorize",
-                    Some(method.display_name.clone()),
-                )
-            })
-            .collect()
-    };
-    ActiveView::ProviderSettings {
-        provider: provider.id,
-        display_name: provider.display_name,
-        credential_method,
-        actions: ListView::new("Provider settings", rows),
     }
 }

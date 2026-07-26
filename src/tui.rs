@@ -1,11 +1,13 @@
 //! Deterministic terminal client for the headless Misy core.
 
 mod action;
+mod auth_flow;
 mod browser;
 mod client;
 mod composer;
 mod history;
 mod list;
+mod presentation;
 mod render;
 mod state;
 mod style;

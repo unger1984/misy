@@ -1,7 +1,6 @@
 use crate::{
-    Config, ConfigStore, CredentialStore, Message, MisyPaths, ModelId, ModelInfo, ModelRef,
-    ProviderCatalog, ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolDispatcher,
-    ToolRegistry,
+    Config, ConfigStore, CredentialStore, Message, MisyPaths, ModelInfo, ModelRef, ProviderCatalog,
+    ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolDispatcher, ToolRegistry,
 };
 use serde_json::{Value, json};
 use std::{
@@ -18,6 +17,7 @@ use std::{
 mod agent;
 mod contracts;
 mod events;
+mod models;
 use contracts::strip_credentials;
 // These established names are the public core-client contract.
 #[allow(clippy::module_name_repetitions)]
@@ -25,6 +25,7 @@ pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
 };
 use events::LosslessSubscribers;
+use models::{parse_models, select_catalog_default};
 
 /// Public, headless agent runtime. TUI and desktop clients consume only this contract.
 // The established public runtime name is the crate's primary client contract.
@@ -309,12 +310,12 @@ impl MisyCore {
     ///
     /// Panics if an internal authentication or credential-operation mutex is poisoned by an
     /// earlier core-thread panic.
-    // Consuming the JSON completion preserves the established public API and avoids cloning an
-    // opaque, potentially large provider payload merely to construct the JSON-RPC request.
+    // Consuming opaque provider payloads avoids cloning potentially large authentication state.
     #[allow(clippy::needless_pass_by_value)]
     pub fn complete_auth(
         &self,
         provider: &ProviderId,
+        session: Value,
         completion: Value,
     ) -> Result<Value, CoreError> {
         let operation = self.auth_operation(provider);
@@ -324,7 +325,7 @@ impl MisyCore {
         let mut result = self.provider_request(
             provider,
             "auth.complete",
-            json!({ "completion": completion }),
+            json!({ "session": session, "completion": completion }),
         )?;
         let _credentials = self
             .inner
@@ -635,64 +636,4 @@ impl MisyCore {
     fn sanitize_auth_response(&self, response: Value) -> Value {
         strip_credentials(response)
     }
-}
-
-fn parse_models(provider: &ProviderId, response: &Value) -> Result<Vec<ModelInfo>, CoreError> {
-    let values = response
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CoreError::InvalidModels("missing models array".to_owned()))?;
-    values
-        .iter()
-        .map(|value| {
-            let id = value
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| CoreError::InvalidModels("model is missing string id".to_owned()))?;
-            let display_name = value
-                .get("display_name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CoreError::InvalidModels("model is missing string display_name".to_owned())
-                })?;
-            let context_window = value
-                .get("context_window")
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| {
-                    CoreError::InvalidModels("model is missing u32 context_window".to_owned())
-                })?;
-            Ok(ModelInfo::new(
-                ModelRef::new(provider.clone(), ModelId::new(id)),
-                display_name,
-                context_window,
-            ))
-        })
-        .collect()
-}
-
-fn select_catalog_default(
-    provider: &ProviderId,
-    response: &Value,
-    models: &[ModelInfo],
-) -> Result<ModelRef, CoreError> {
-    let Some(default_id) = response.get("default_model") else {
-        return models
-            .first()
-            .map(|model| model.model.clone())
-            .ok_or_else(|| CoreError::InvalidModels("provider returned no models".to_owned()));
-    };
-    let default_id = default_id.as_str().ok_or_else(|| {
-        CoreError::InvalidModels("default_model must be a string when present".to_owned())
-    })?;
-    models
-        .iter()
-        .find(|model| model.model.model.as_str() == default_id)
-        .map(|model| model.model.clone())
-        .ok_or_else(|| {
-            CoreError::InvalidModels(format!(
-                "provider `{}` default_model `{default_id}` is not in its model catalog",
-                provider.as_str()
-            ))
-        })
 }

@@ -6,7 +6,7 @@ import { listModels, type Model } from "./model-catalog";
 import { createResponsesRequest, notifyResponseEvents } from "./responses-wire";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
 
-/** Implements Misy protocol v1 against the ChatGPT OAuth Responses backend. */
+/** Implements Misy protocol v2 against the ChatGPT OAuth Responses backend. */
 export class OpenAiProvider {
 	private readonly oauth: OAuthClient;
 	private readonly config: ProviderConfig;
@@ -49,9 +49,9 @@ export class OpenAiProvider {
 		return {};
 	}
 
-	/** Returns the bundled catalog without making an HTTP request. */
-	listModels(): Model[] {
-		return listModels();
+	/** Lists account-scoped ChatGPT Codex models, falling back to the bundled catalog on failure. */
+	async listModels(credentials: Credentials): Promise<Model[]> {
+		return await listModels(this.config, credentials);
 	}
 
 	/** Streams a Responses request, refreshing once before expiry or after one 401 retry. */

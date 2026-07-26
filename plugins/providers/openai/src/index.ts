@@ -39,12 +39,16 @@ async function handle(value: unknown): Promise<void> {
 		else if (method === "auth.start") {
 			const authMethod = typeof params["method"] === "string" ? params["method"] : "oauth";
 			const start = await provider.startAuth(authMethod);
-			send({ jsonrpc: "2.0", id, result: { url: start.url, session: start.session } });
+			send({
+				jsonrpc: "2.0",
+				id,
+				result: { kind: "browser", url: start.url, session: start.session },
+			});
 		} else if (method === "auth.complete")
 			send({
 				jsonrpc: "2.0",
 				id,
-				result: await provider.completeAuth(params["completion"], record(params["completion"])),
+				result: await provider.completeAuth(params["session"], record(params["completion"])),
 			});
 		else if (method === "auth.refresh")
 			send({
@@ -57,7 +61,7 @@ async function handle(value: unknown): Promise<void> {
 			send({
 				jsonrpc: "2.0",
 				id,
-				result: { models: provider.listModels(), default_model: DEFAULT_MODEL_ID },
+				result: modelsResult(await provider.listModels(required(credentials(params)))),
 			});
 		else if (method === "chat.start") await chat(id, params);
 		else send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
@@ -71,6 +75,12 @@ async function handle(value: unknown): Promise<void> {
 			},
 		});
 	}
+}
+function modelsResult(models: readonly { id: string }[]): Record<string, unknown> {
+	const defaultModel = models.some((model) => model.id === DEFAULT_MODEL_ID)
+		? DEFAULT_MODEL_ID
+		: models[0]?.id;
+	return defaultModel ? { models, default_model: defaultModel } : { models };
 }
 async function chat(id: unknown, params: Record<string, unknown>): Promise<void> {
 	if (

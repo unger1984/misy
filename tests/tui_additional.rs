@@ -193,6 +193,49 @@ fn renderer_shows_and_removes_the_single_line_busy_indicator() {
 }
 
 #[test]
+fn escape_closes_model_picker_without_interrupting_the_active_queue() {
+    let (_temporary, mut client, _) = test_client();
+    select_first_model(&mut client);
+    client
+        .handle_input("block-session")
+        .expect("start first prompt");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_some()
+    });
+    client
+        .handle_input("session-two")
+        .expect("queue second prompt");
+    client.handle_input("/model").expect("open model picker");
+
+    assert_eq!(client.state().mode(), misy::tui::UiMode::ModelList);
+    client
+        .handle_key(UiKey::Escape)
+        .expect("close model picker");
+
+    assert_eq!(client.state().mode(), misy::tui::UiMode::Input);
+    assert!(client.state().active_submission().is_some());
+    let queued = buffer_lines(&render_buffer(client.state(), 72, 16), 72);
+    assert!(queued.iter().any(|line| line.contains("↳ session-two")));
+    assert!(
+        !client
+            .state()
+            .transcript()
+            .iter()
+            .any(|row| matches!(row, TranscriptRow::Info(text) if text == "submission cancelled"))
+    );
+
+    client
+        .handle_key(UiKey::Escape)
+        .expect("cancel active prompt");
+    client
+        .handle_key(UiKey::Escape)
+        .expect("clear queued prompt");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+    });
+}
+
+#[test]
 fn queued_prompts_render_separately_and_run_in_fifo_order() {
     let (_temporary, mut client, _) = test_client();
     select_first_model(&mut client);

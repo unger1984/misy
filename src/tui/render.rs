@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use std::time::Instant;
 
@@ -58,6 +58,9 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     }
     render_composer(frame, areas[3], state);
     render_surface(frame, areas[4], &popup_rows, modal.as_ref());
+    if let Some(modal) = modal.as_ref().filter(|modal| !modal.tabs.is_empty()) {
+        render_model_popup(frame, area, modal);
+    }
     render_footer(frame, areas[5], state);
     render_cursor(frame, areas[3], state);
     areas[3]
@@ -78,7 +81,7 @@ fn surface_height(popup_rows: &[CommandPopupRow], modal: Option<&ModalPresentati
     if !popup_rows.is_empty() {
         return POPUP_TOP_SPACE.saturating_add(u16::try_from(popup_rows.len()).unwrap_or(u16::MAX));
     }
-    let Some(modal) = modal else {
+    let Some(modal) = modal.filter(|modal| modal.tabs.is_empty()) else {
         return 0;
     };
     let row_count = if modal.operation.is_some() {
@@ -236,6 +239,9 @@ fn render_surface(
     let Some(modal) = modal else {
         return;
     };
+    if !modal.tabs.is_empty() {
+        return;
+    }
     let mut lines = vec![
         Line::styled(format!("  {}", modal.title), style::muted()),
         Line::raw(""),
@@ -261,6 +267,106 @@ fn render_surface(
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
+fn render_model_popup(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentation) {
+    let Some(popup) = model_popup_area(area) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(style::accent());
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!(" {}", modal.title), style::accent())),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(tabs_line(&modal.tabs, inner.width)),
+        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+    );
+    let separator_area = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "─".repeat(usize::from(inner.width)),
+            style::muted(),
+        )),
+        separator_area,
+    );
+    let help_area = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    frame.render_widget(Paragraph::new(model_help_line(inner.width)), help_area);
+    let content_height = inner.height.saturating_sub(4);
+    let content = Rect::new(
+        inner.x,
+        inner.y.saturating_add(3),
+        inner.width,
+        content_height,
+    );
+    if modal.loading {
+        let ticks = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() / 100);
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", super::state::spinner_frame(ticks)),
+                style::accent(),
+            ),
+            Span::styled("Loading models…", style::muted()),
+        ]);
+        frame.render_widget(Paragraph::new(line), content);
+        return;
+    }
+    let label_width = modal_label_width(&modal.rows, content.width);
+    let lines = modal
+        .rows
+        .iter()
+        .map(|row| model_list_line(row, content.width, label_width))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+}
+fn model_popup_area(area: Rect) -> Option<Rect> {
+    let compact = area.width < 14 || area.height < 9;
+    let margin = u16::from(!compact);
+    let width = area.width.saturating_sub(margin.saturating_mul(2));
+    if width < 4 || area.height < 7 {
+        return None;
+    }
+    let height = area.height.saturating_sub(margin.saturating_mul(2)).min(14);
+    Some(Rect::new(
+        area.x
+            .saturating_add((area.width.saturating_sub(width)) / 2),
+        area.y
+            .saturating_add((area.height.saturating_sub(height)) / 2),
+        width,
+        height,
+    ))
+}
+fn tabs_line(tabs: &[(String, bool)], width: u16) -> Line<'static> {
+    let spans = tabs
+        .iter()
+        .flat_map(|(label, active)| {
+            let tab_style = if *active {
+                style::model_tab_active()
+            } else {
+                style::muted()
+            };
+            [
+                Span::styled(format!(" {label} "), tab_style),
+                Span::raw(" "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    padded_line(spans, width, Style::default())
+}
+fn model_help_line(width: u16) -> Line<'static> {
+    let hint = if width < 48 {
+        "esc"
+    } else {
+        " ↑↓ select  ←→ section  enter apply  esc close"
+    };
+    Line::styled(hint, style::muted())
+}
 fn popup_line(row: &CommandPopupRow, width: u16) -> Line<'static> {
     let selected = if row.selected {
         style::selected()
@@ -309,6 +415,35 @@ fn list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'stat
         ));
     }
     padded_line(spans, width, selected)
+}
+
+fn model_list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'static> {
+    let marker = if row.selected { "› " } else { "  " };
+    let current = if row.current { "✓ " } else { "  " };
+    let description = row.description.as_deref().unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(
+            marker,
+            if row.selected {
+                style::accent()
+            } else {
+                Style::default()
+            },
+        ),
+        Span::styled(
+            current,
+            if row.current {
+                style::accent()
+            } else {
+                Style::default()
+            },
+        ),
+        Span::raw(format!("{:<label_width$}", row.label)),
+    ];
+    if !description.is_empty() {
+        spans.push(Span::styled(format!("  {description}"), style::muted()));
+    }
+    padded_line(spans, width, Style::default())
 }
 
 fn modal_label_width(rows: &[ListRowDisplay], width: u16) -> usize {

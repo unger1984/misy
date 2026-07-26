@@ -115,6 +115,27 @@ auth_complete() {
 
 models_list() {
   case "$target" in
+    *async-gated-models*)
+      touch "$target.started"
+      (
+        while [ ! -f "$target.release" ]; do sleep 0.01; done
+        reply \
+          '{"models":[' \
+          '{"id":"fixture-model","display_name":"Fixture","context_window":4096},' \
+          '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}'
+      ) &
+      return
+      ;;
+    *gated-models*)
+      models_list_calls=$((models_list_calls + 1))
+      if [ "$models_list_calls" -eq 1 ]; then
+        touch "$target.first-started"
+        while [ ! -f "$target.first-release" ]; do sleep 0.01; done
+      else
+        touch "$target.second-started"
+        while [ ! -f "$target.second-release" ]; do sleep 0.01; done
+      fi
+      ;;
     *slow-models*|*slow-bad-models*) sleep 1 ;;
   esac
   case "$target" in

@@ -43,6 +43,10 @@ pub enum UiAction {
     PickerUp,
     /// Move list selection downward.
     PickerDown,
+    /// Move the model picker to its previous provider tab.
+    PickerTabLeft,
+    /// Move the model picker to its next provider tab.
+    PickerTabRight,
     /// Accept the selected list row.
     PickerConfirm,
     /// Dismiss the current bottom-pane surface.
@@ -112,6 +116,8 @@ pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     match key {
         UiKey::Up => UiAction::PickerUp,
         UiKey::Down => UiAction::PickerDown,
+        UiKey::Left if mode == UiMode::ModelList => UiAction::PickerTabLeft,
+        UiKey::Right if mode == UiMode::ModelList => UiAction::PickerTabRight,
         UiKey::Enter => UiAction::PickerConfirm,
         UiKey::Escape => UiAction::PickerBack,
         UiKey::SelectIndex(_) => UiAction::Noop,

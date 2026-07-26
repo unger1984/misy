@@ -59,12 +59,17 @@ authentication, session, and tool orchestration remain in the core.
   without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
-- `/provider` opens an interactive provider list. `/model` opens one model list across configured
-  providers. Both lists show a dim heading, an empty separator line, eight scrollable numbered
-  rows, aligned dim second-column descriptions, and an accent-highlighted selection. Digits select
-  visible numbered entries directly. The selected model has a checkmark; provider authentication
-  is a second-column status. Providers without credentials are not queried, and a failure from one
-  configured provider is shown without hiding models returned by others.
+- `/provider` opens an interactive provider list in the lower panel. `/model` immediately opens a
+  centered model popup from the core-owned catalog cache while refreshing the catalog in the
+  background. An empty cache shows an animated loading indicator. The popup has an `All` tab and
+  one tab for every provider represented by models or an error; `Left` and `Right` switch tabs and
+  `Up` and `Down` move within the filtered model list. The text filter is retained across tabs, and
+  a background refresh preserves the active tab and selected model when they still exist. Lists
+  show eight scrollable numbered rows, aligned dim second-column descriptions, and an
+  accent-highlighted selection. Digits select visible numbered entries directly. The selected
+  model has a checkmark; provider authentication is a second-column status. Providers without
+  credentials are not queried, and a failure from one configured provider is shown without hiding
+  models returned by others.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.

@@ -8,11 +8,24 @@ use misy::{
 };
 use ratatui::style::Color;
 use serde_json::json;
-use std::{fs, thread, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 use support::tui::{
     RecordingBrowser, authorize_first_provider, buffer_lines, core_with_providers, render_buffer,
     select_first_model, start_first_provider_auth, test_client, wait_for,
 };
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "fixture did not create {}", path.display());
+}
 
 #[test]
 fn input_mapping_and_reducer_keep_state_explicit() {
@@ -320,6 +333,187 @@ fn model_picker_shows_partial_results_and_skips_unconfigured_provider() {
             .any(|label| label.contains("Broken AI — error"))
     );
     assert_eq!(client.running_provider_count(), 2);
+    client.handle_ctrl_c();
+}
+
+#[test]
+fn model_picker_opens_from_cached_models_before_the_refresh_arrives() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "good-models")]);
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
+    core.available_models().expect("populate model cache");
+
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/model").expect("open cached models");
+
+    assert_eq!(
+        client.state().picker_labels(),
+        ["fixture-model", "fixture-model-b"]
+    );
+    assert_eq!(
+        client.state().picker_tabs(),
+        [("All".to_owned(), true), ("Fixture AI".to_owned(), false)]
+    );
+    client.handle_ctrl_c();
+}
+
+#[test]
+fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
+    let (_temporary, core) = core_with_providers(&[
+        ("fixture", "First AI", "good-models"),
+        ("fixture-two", "Second AI", "good-models"),
+    ]);
+    for provider in [ProviderId::new("fixture"), ProviderId::new("fixture-two")] {
+        core.complete_auth(
+            &provider,
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
+        .expect("store credentials");
+    }
+    core.available_models().expect("populate model cache");
+
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/model").expect("open models");
+    assert_eq!(client.state().picker_labels().len(), 4);
+    client.insert_text("fixture-model-b");
+    client.handle_key(UiKey::Right).expect("first provider tab");
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(
+        client.state().picker_tabs()[1],
+        ("First AI".to_owned(), true)
+    );
+    client
+        .handle_key(UiKey::Right)
+        .expect("second provider tab");
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    client.handle_key(UiKey::Left).expect("first provider tab");
+    assert_eq!(
+        client.state().picker_tabs()[1],
+        ("First AI".to_owned(), true)
+    );
+    thread::sleep(Duration::from_millis(50));
+    client.pump_events();
+    assert_eq!(
+        client.state().picker_tabs()[1],
+        ("First AI".to_owned(), true)
+    );
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    client
+        .handle_key(UiKey::Enter)
+        .expect("confirm refreshed selection");
+    wait_for(&mut client, |client| client.state().mode() == UiMode::Input);
+    assert_eq!(
+        client.state().selected_model().map(|model| model.provider),
+        Some(ProviderId::new("fixture"))
+    );
+    client.handle_ctrl_c();
+}
+
+#[test]
+fn empty_cached_model_picker_renders_a_spinner_then_the_refreshed_models() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "slow-models")]);
+    core.complete_auth(
+        &ProviderId::new("fixture"),
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/model").expect("open models");
+
+    let lines = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
+    assert!(lines.iter().any(|line| line.contains("Loading models…")));
+    assert!(lines.iter().any(|line| line.contains("Select model")));
+    wait_for(&mut client, |client| {
+        client.state().picker_labels().len() == 2
+    });
+    assert!(
+        client
+            .state()
+            .picker_labels()
+            .iter()
+            .any(|label| label.contains("fixture-model"))
+    );
+    client.handle_ctrl_c();
+}
+
+#[test]
+fn model_picker_uses_the_herdr_style_popup_without_clipping_on_narrow_terminals() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "good-models")]);
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
+    core.available_models().expect("populate model cache");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/model").expect("open cached models");
+
+    let buffer = render_buffer(client.state(), 72, 18);
+    let lines = buffer_lines(&buffer, 72);
+    assert!(lines.iter().any(|line| line.contains("Select model")));
+    assert!(lines.iter().any(|line| line.contains("─")));
+    assert!(lines.iter().any(|line| line.contains("↑↓ select")));
+    assert!(lines.iter().any(|line| line.contains("›")));
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "A" && cell.bg == Color::Blue)
+    );
+
+    let narrow = render_buffer(client.state(), 12, 8);
+    assert_eq!(narrow.area.width, 12);
+    assert_eq!(narrow.area.height, 8);
+    let narrow_lines = buffer_lines(&narrow, 12);
+    assert!(narrow_lines.iter().any(|line| line.contains("Select")));
+    assert!(narrow_lines.iter().any(|line| line.contains("›")));
+    assert!(narrow_lines.iter().any(|line| line.contains("esc")));
+    client.handle_ctrl_c();
+}
+
+#[test]
+fn reopened_model_picker_ignores_the_first_refresh_generation() {
+    let (temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "gated-models")]);
+    core.complete_auth(
+        &ProviderId::new("fixture"),
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("store credentials");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    client.handle_input("/model").expect("start first refresh");
+    let target = temporary.path().join("gated-models");
+    wait_for_path(&target.with_extension("first-started"));
+    client.handle_key(UiKey::Escape).expect("close picker");
+    client.handle_input("/model").expect("start second refresh");
+    fs::write(
+        target.with_extension("first-release"),
+        "release first refresh",
+    )
+    .expect("release first refresh");
+    wait_for_path(&target.with_extension("second-started"));
+    client.pump_events();
+
+    assert_eq!(client.state().mode(), UiMode::ModelList);
+    assert_eq!(client.state().picker_labels(), ["Loading models…"]);
+    fs::write(
+        target.with_extension("second-release"),
+        "release second refresh",
+    )
+    .expect("release second refresh");
+    wait_for(&mut client, |client| {
+        client.state().picker_labels().len() == 2
+    });
     client.handle_ctrl_c();
 }
 

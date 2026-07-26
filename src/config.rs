@@ -52,6 +52,11 @@ impl MisyPaths {
         self.root.join("credentials.json")
     }
 
+    /// Returns the persisted provider model-catalog cache path.
+    pub fn models_file(&self) -> PathBuf {
+        self.root.join("models.json")
+    }
+
     /// Returns the directory containing user-installed provider packages.
     pub fn provider_plugins_dir(&self) -> PathBuf {
         self.root.join("plugins").join("providers")

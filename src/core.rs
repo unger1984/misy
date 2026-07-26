@@ -15,6 +15,8 @@ use std::{
 };
 
 mod agent;
+mod authentication;
+mod cache;
 mod contracts;
 mod events;
 mod models;
@@ -27,7 +29,7 @@ pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
 };
 use events::LosslessSubscribers;
-use models::{parse_models, select_catalog_default};
+use models::select_catalog_default;
 use queue::SubmissionQueue;
 
 /// Public, headless agent runtime. TUI and desktop clients consume only this contract.
@@ -43,6 +45,7 @@ struct CoreInner {
     host: Arc<ProviderHost>,
     config_store: ConfigStore,
     credential_store: CredentialStore,
+    model_cache: crate::ModelCatalogStore,
     selected_model: Mutex<Option<ModelRef>>,
     history: Mutex<Vec<HistoryEntry>>,
     dispatcher: ToolDispatcher,
@@ -53,15 +56,41 @@ struct CoreInner {
     active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
     auth_operations: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     credential_operations: Mutex<()>,
+    credential_epochs: Mutex<BTreeMap<String, CredentialEpoch>>,
     model_operations: Mutex<()>,
     submission_queue: Mutex<SubmissionQueue>,
     next_submission: AtomicU64,
     is_shutdown: AtomicBool,
 }
 
+#[derive(Clone, Copy)]
+struct CredentialEpoch {
+    value: u64,
+    present: bool,
+}
+
 struct ActiveSubmission {
     cancelled: AtomicBool,
     request: Mutex<Option<(ProviderId, ProviderRequestId)>>,
+}
+
+fn credential_epochs(
+    catalog: &ProviderCatalog,
+    credential_store: &CredentialStore,
+) -> BTreeMap<String, CredentialEpoch> {
+    catalog
+        .packages()
+        .map(|package| {
+            let provider = package.manifest().id.clone();
+            // A cache guard must never make startup fail because credentials will be checked
+            // again by the operation that actually needs them.
+            let present = credential_store.load(&provider).ok().flatten().is_some();
+            (
+                provider.as_str().to_owned(),
+                CredentialEpoch { value: 0, present },
+            )
+        })
+        .collect()
 }
 
 impl MisyCore {
@@ -87,12 +116,15 @@ impl MisyCore {
     pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
+        let credential_store = CredentialStore::new(paths.clone());
+        let credential_epochs = credential_epochs(&catalog, &credential_store);
         let host = Arc::new(ProviderHost::new(catalog.clone()));
         let inner = Arc::new(CoreInner {
             catalog,
             host: Arc::clone(&host),
             config_store,
-            credential_store: CredentialStore::new(paths),
+            credential_store,
+            model_cache: crate::ModelCatalogStore::new(paths),
             selected_model: Mutex::new(config.default_model),
             history: Mutex::new(Vec::new()),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
@@ -103,6 +135,7 @@ impl MisyCore {
             active: Mutex::new(BTreeMap::new()),
             auth_operations: Mutex::new(BTreeMap::new()),
             credential_operations: Mutex::new(()),
+            credential_epochs: Mutex::new(credential_epochs),
             model_operations: Mutex::new(()),
             submission_queue: Mutex::new(SubmissionQueue::default()),
             next_submission: AtomicU64::new(1),
@@ -303,109 +336,13 @@ impl MisyCore {
             json!({ "method": method }),
         )?))
     }
-    /// Completes a provider-owned authentication flow and persists returned credentials.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when provider completion or private credential persistence fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
-    /// earlier core-thread panic.
-    // Consuming opaque provider payloads avoids cloning potentially large authentication state.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn complete_auth(
-        &self,
-        provider: &ProviderId,
-        session: Value,
-        completion: Value,
-    ) -> Result<Value, CoreError> {
-        let operation = self.auth_operation(provider);
-        let _operation = operation
-            .lock()
-            .expect("provider auth operation mutex must not be poisoned");
-        let mut result = self.provider_request(
-            provider,
-            "auth.complete",
-            json!({ "session": session, "completion": completion }),
-        )?;
-        let _credentials = self
-            .inner
-            .credential_operations
-            .lock()
-            .expect("credential operation mutex must not be poisoned");
-        self.store_returned_credentials(provider, &mut result)?;
-        self.emit(&CoreEvent::AuthenticationChanged {
-            provider: provider.clone(),
-            authenticated: true,
-        });
-        Ok(self.sanitize_auth_response(result))
-    }
-    /// Refreshes provider credentials and persists the provider's returned replacement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when provider refresh or private credential persistence fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
-    /// earlier core-thread panic.
-    pub fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        let operation = self.auth_operation(provider);
-        let _operation = operation
-            .lock()
-            .expect("provider auth operation mutex must not be poisoned");
-        self.refresh_auth_locked(provider)
-    }
-
-    fn refresh_auth_locked(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        let mut result = self.provider_request(provider, "auth.refresh", json!({}))?;
-        let _credentials = self
-            .inner
-            .credential_operations
-            .lock()
-            .expect("credential operation mutex must not be poisoned");
-        self.store_returned_credentials(provider, &mut result)?;
-        Ok(self.sanitize_auth_response(result))
-    }
-
-    /// Logs out a provider and removes its stored opaque credentials.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when logout or credential removal fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
-    /// earlier core-thread panic.
-    pub fn logout(&self, provider: &ProviderId) -> Result<(), CoreError> {
-        let operation = self.auth_operation(provider);
-        let _operation = operation
-            .lock()
-            .expect("provider auth operation mutex must not be poisoned");
-        self.provider_request(provider, "auth.logout", json!({}))?;
-        let _credentials = self
-            .inner
-            .credential_operations
-            .lock()
-            .expect("credential operation mutex must not be poisoned");
-        self.inner.credential_store.remove(provider)?;
-        self.emit(&CoreEvent::AuthenticationChanged {
-            provider: provider.clone(),
-            authenticated: false,
-        });
-        Ok(())
-    }
     /// Fetches a provider's models and emits a [`CoreEvent::ModelsListed`] event.
     ///
     /// # Errors
     ///
     /// Returns an error when the provider request fails or its model payload is invalid.
     pub fn list_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
-        let models = self.fetch_models(provider)?;
+        let models = self.fetch_models(provider)?.models;
         self.emit(&CoreEvent::ModelsListed {
             provider: provider.clone(),
             models: models.clone(),
@@ -427,7 +364,7 @@ impl MisyCore {
                 continue;
             }
             match self.fetch_models(&provider.id) {
-                Ok(models) => available.models.extend(models),
+                Ok(catalog) => available.models.extend(catalog.models),
                 Err(error) => available.errors.push(ProviderModelError {
                     provider: provider.id,
                     provider_display_name: provider.display_name,
@@ -454,9 +391,8 @@ impl MisyCore {
             .model_operations
             .lock()
             .expect("model operation mutex must not be poisoned");
-        let response = self.provider_request(provider, "models.list", json!({}))?;
-        let models = parse_models(provider, &response)?;
-        let model = select_catalog_default(provider, &response, &models)?;
+        let catalog = self.fetch_models(provider)?;
+        let model = select_catalog_default(provider, &catalog.response, &catalog.models)?;
         self.persist_selected_model(model.clone())?;
         Ok(model)
     }
@@ -478,6 +414,7 @@ impl MisyCore {
             .expect("model operation mutex must not be poisoned");
         if !self
             .fetch_models(&model.provider)?
+            .models
             .iter()
             .any(|available| available.model == model)
         {
@@ -486,12 +423,6 @@ impl MisyCore {
         self.persist_selected_model(model)
     }
 
-    fn fetch_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
-        parse_models(
-            provider,
-            &self.provider_request(provider, "models.list", json!({}))?,
-        )
-    }
     fn persist_selected_model(&self, model: ModelRef) -> Result<(), CoreError> {
         self.inner
             .config_store
@@ -600,32 +531,6 @@ impl MisyCore {
         }
         Ok(())
     }
-    fn auth_operation(&self, provider: &ProviderId) -> Arc<Mutex<()>> {
-        let mut operations = self
-            .inner
-            .auth_operations
-            .lock()
-            .expect("auth operations mutex must not be poisoned");
-        Arc::clone(
-            operations
-                .entry(provider.as_str().to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
-    }
-    fn store_returned_credentials(
-        &self,
-        provider: &ProviderId,
-        response: &mut Value,
-    ) -> Result<(), CoreError> {
-        if let Some(credentials) = response.get("credentials").cloned() {
-            self.inner.credential_store.save(provider, credentials)?;
-            if let Some(object) = response.as_object_mut() {
-                object.remove("credentials");
-            }
-        }
-        Ok(())
-    }
-
     fn sanitize_auth_response(&self, response: Value) -> Value {
         strip_credentials(response)
     }

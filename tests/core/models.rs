@@ -21,5 +21,12 @@ fn core_selects_the_provider_declared_default_model() {
         selected,
         ModelRef::new(provider, ModelId::new("fixture-model-b"))
     );
+    assert_eq!(
+        core.cached_available_models()
+            .expect("cached models")
+            .models
+            .len(),
+        2
+    );
     core.shutdown().expect("shutdown");
 }

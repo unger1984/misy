@@ -72,25 +72,26 @@ impl From<CoreError> for TuiError {
     }
 }
 
-enum ProviderOperationResult {
+pub(super) enum ProviderOperationResult {
     Start(ProviderId, String, Result<Value, String>),
     Complete(ProviderId, String, Result<(), String>),
     Logout(ProviderId, Result<(), String>),
-    Models(Result<AvailableModels, String>),
+    Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
     Usage(ModelRef, Result<UsageReport, String>),
 }
 
 /// Thin interactive client that translates input into headless core operations.
 pub struct TuiClient<B> {
-    core: MisyCore,
+    pub(super) core: MisyCore,
     events: Receiver<CoreEvent>,
     browser: B,
-    state: UiState,
-    operation_sender: Sender<ProviderOperationResult>,
+    pub(super) state: UiState,
+    pub(super) operation_sender: Sender<ProviderOperationResult>,
     operation_results: Receiver<ProviderOperationResult>,
     provider_names: BTreeMap<String, String>,
     prompt_history: Option<PromptHistoryStore>,
+    pub(super) model_refresh_generation: u64,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
@@ -132,6 +133,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             operation_results,
             provider_names,
             prompt_history,
+            model_refresh_generation: 0,
         }
     }
 
@@ -276,6 +278,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Returns failures from an accepted selection or submitted prompt.
     pub fn handle_key(&mut self, key: UiKey) -> Result<TuiControl, TuiError> {
         self.state.clear_quit_shortcut();
+        if self.state.mode() != UiMode::Input {
+            self.state.clear_escape_shortcut();
+            return self.handle_view_key(key);
+        }
         if key == UiKey::Escape {
             if self.state.escape_shortcut_active(Instant::now()) {
                 self.core.cancel_all_submissions();
@@ -289,9 +295,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
             }
         }
         self.state.clear_escape_shortcut();
-        if self.state.mode() != UiMode::Input {
-            return self.handle_view_key(key);
-        }
         if self.state.composer.popup_visible() {
             match key {
                 UiKey::Up => self.state.composer.popup_up(),
@@ -333,6 +336,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
         match key {
             UiKey::Up => self.state.reduce(UiAction::PickerUp),
             UiKey::Down => self.state.reduce(UiAction::PickerDown),
+            UiKey::Left => self.state.reduce(UiAction::PickerTabLeft),
+            UiKey::Right => self.state.reduce(UiAction::PickerTabRight),
             UiKey::Backspace => self.state.backspace_filter(),
             UiKey::Escape => {
                 if matches!(
@@ -381,7 +386,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
     fn execute(&mut self, action: UiAction) -> Result<TuiControl, TuiError> {
         match action {
             UiAction::ShowProviders => self.show_providers()?,
-            UiAction::ShowModels => self.show_models(),
+            UiAction::ShowModels => self.start_model_refresh(),
             UiAction::ShowUsage => self.show_usage()?,
             UiAction::SubmitPrompt(prompt) => {
                 let submission = self.core.submit(Message::user(prompt.clone()))?;
@@ -423,16 +428,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
             .collect::<Result<Vec<_>, CoreError>>()?;
         self.state.open_providers(providers);
         Ok(())
-    }
-
-    fn show_models(&mut self) {
-        self.state.open_loading_models();
-        let core = self.core.clone();
-        let sender = self.operation_sender.clone();
-        thread::spawn(move || {
-            let result = core.available_models().map_err(|error| error.to_string());
-            let _ = sender.send(ProviderOperationResult::Models(result));
-        });
     }
 
     fn show_usage(&mut self) -> Result<(), TuiError> {
@@ -526,18 +521,23 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     fn apply_operation_result(&mut self, result: ProviderOperationResult) {
         match result {
-            ProviderOperationResult::Models(result) => match result {
-                Ok(available) => self.state.finish_models(available, &self.provider_names),
-                Err(error) => {
-                    let provider = ProviderId::new("models");
-                    if self
-                        .state
-                        .finish_provider_operation(&provider, ProviderOperationKind::Models)
-                    {
-                        self.state.add_error(error);
+            ProviderOperationResult::Models(generation, result) => {
+                if generation != self.model_refresh_generation {
+                    return;
+                }
+                match result {
+                    Ok(available) => self.state.finish_models(available, &self.provider_names),
+                    Err(error) => {
+                        let provider = ProviderId::new("models");
+                        if self
+                            .state
+                            .finish_provider_operation(&provider, ProviderOperationKind::Models)
+                        {
+                            self.state.add_error(error);
+                        }
                     }
                 }
-            },
+            }
             ProviderOperationResult::Start(provider, method, result) => {
                 if !self
                     .state

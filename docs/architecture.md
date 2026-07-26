@@ -25,10 +25,11 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The Rust core owns normalized state, configuration, credentials, the in-memory conversation,
-  FIFO submission scheduling, agent/tool iteration, cancellation, provider supervision, and
-  public events. It also owns
-  capability negotiation, credential injection, deadlines, and validation for
+- The Rust core owns normalized state, configuration, credentials, the persisted model catalog
+  cache (`~/.misy/models.json`), the in-memory conversation, FIFO submission scheduling,
+  agent/tool iteration, cancellation, provider supervision, and public events. Clients read the
+  model cache through the core. The core also owns capability negotiation, credential injection,
+  deadlines, and validation for
   provider-normalized account-limit reports.
 - The TUI and future desktop or third-party programs are clients of the core. They do not duplicate orchestration state.
 - Rust owns local tool definitions and execution. Provider plugins only translate between Misy's normalized contract and a remote provider protocol.

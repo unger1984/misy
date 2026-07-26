@@ -21,6 +21,13 @@ pub(super) fn selected() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Returns the blue tab background used only by the model picker.
+pub(super) fn model_tab_active() -> Style {
+    Style::default()
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// Returns a subdued span style that remains readable on an active row.
 pub(super) fn selected_muted() -> Style {
     muted().bg(Color::DarkGray)

@@ -6,12 +6,13 @@ use super::{
     action::{UiAction, UiMode},
     composer::Composer,
     list::{ListRow, ListView},
-    presentation::{list_presentation, operation_label, provider_settings},
+    model_picker::ModelPicker,
+    presentation::{
+        list_presentation, model_picker_presentation, operation_label, provider_settings,
+    },
     startup_header::StartupHeader,
 };
-use crate::{
-    AvailableModels, CoreEvent, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId, ToolResult,
-};
+use crate::{CoreEvent, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId, ToolResult};
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
@@ -95,7 +96,7 @@ pub(super) enum ActiveView {
         credential_method: Option<String>,
         actions: ListView<ProviderAction>,
     },
-    Models(ListView<ModelRef>),
+    Models(ModelPicker),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -105,6 +106,8 @@ pub(super) struct ModalPresentation {
     pub(super) rows: Vec<super::list::ListRowDisplay>,
     pub(super) operation: Option<String>,
     pub(super) back_hint: bool,
+    pub(super) tabs: Vec<(String, bool)>,
+    pub(super) loading: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,8 +125,8 @@ pub struct UiState {
     pub(super) startup_header: StartupHeader,
     transcript: Vec<TranscriptRow>,
     providers: BTreeMap<String, ProviderChoice>,
-    provider_names: BTreeMap<String, String>,
-    selected_model: Option<ModelRef>,
+    pub(super) provider_names: BTreeMap<String, String>,
+    pub(super) selected_model: Option<ModelRef>,
     active_submission: Option<SubmissionId>,
     starting_submission: Option<SubmissionId>,
     queued_prompts: VecDeque<QueuedPrompt>,
@@ -134,7 +137,7 @@ pub struct UiState {
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
     pub(super) provider_operation: Option<(ProviderId, ProviderOperationKind)>,
-    provider_device_code: Option<String>,
+    pub(super) provider_device_code: Option<String>,
 }
 
 impl Default for UiState {
@@ -227,6 +230,14 @@ impl UiState {
         }
     }
 
+    /// Returns model-picker tabs and whether each tab is active.
+    pub fn picker_tabs(&self) -> Vec<(String, bool)> {
+        match &self.view {
+            Some(ActiveView::Models(picker)) => picker.tabs(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Returns the current composer draft.
     pub fn composer_input(&self) -> &str {
         self.composer.text()
@@ -280,6 +291,8 @@ impl UiState {
             UiAction::HistoryNext => self.composer.history_next(),
             UiAction::PickerUp => self.move_picker_up(),
             UiAction::PickerDown => self.move_picker_down(),
+            UiAction::PickerTabLeft => self.move_picker_tab_left(),
+            UiAction::PickerTabRight => self.move_picker_tab_right(),
             UiAction::PickerBack => self.back_from_picker(),
             UiAction::CancelAndExit => self.should_exit = true,
             UiAction::PickerConfirm
@@ -326,65 +339,6 @@ impl UiState {
             return;
         };
         self.view = Some(provider_settings(choice));
-    }
-
-    pub(super) fn open_loading_models(&mut self) {
-        self.set_provider_operation(
-            ProviderId::new("models"),
-            ProviderOperationKind::Models,
-            None,
-        );
-        self.view = Some(ActiveView::Models(ListView::new(
-            "Select model",
-            vec![ListRow::informational("Loading models…")],
-        )));
-    }
-
-    pub(super) fn finish_models(
-        &mut self,
-        available: AvailableModels,
-        names: &BTreeMap<String, String>,
-    ) {
-        if !matches!(self.view, Some(ActiveView::Models(_)))
-            || !matches!(
-                self.provider_operation,
-                Some((_, ProviderOperationKind::Models))
-            )
-        {
-            return;
-        }
-        self.provider_operation = None;
-        self.provider_device_code = None;
-        let mut rows = available
-            .models
-            .into_iter()
-            .map(|model| {
-                let display_name = model.display_name;
-                let provider = names
-                    .get(model.model.provider.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| model.model.provider.as_str().to_owned());
-                let selected = self.selected_model.as_ref() == Some(&model.model);
-                let label = model.model.model.as_str().to_owned();
-                if selected {
-                    ListRow::current_with_search(model.model, label, Some(provider), display_name)
-                } else {
-                    ListRow::selectable_with_search(
-                        model.model,
-                        label,
-                        Some(provider),
-                        display_name,
-                    )
-                }
-            })
-            .collect::<Vec<_>>();
-        rows.extend(available.errors.into_iter().map(|error| {
-            ListRow::informational(format!(
-                "{} — error: {}",
-                error.provider_display_name, error.message
-            ))
-        }));
-        self.view = Some(ActiveView::Models(ListView::new("Select model", rows)));
     }
 
     pub(super) fn set_provider_authenticated(
@@ -491,13 +445,7 @@ impl UiState {
                     .as_ref()
                     .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
-            Some(ActiveView::Models(view)) => Some(list_presentation(
-                view,
-                visible_rows,
-                self.provider_operation
-                    .as_ref()
-                    .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
-            )),
+            Some(ActiveView::Models(view)) => Some(model_picker_presentation(view, visible_rows)),
             Some(ActiveView::ProviderSettings {
                 display_name,
                 credential_method,
@@ -515,6 +463,8 @@ impl UiState {
                         operation_label(*kind, self.provider_device_code.as_deref())
                     }),
                     back_hint: true,
+                    tabs: Vec::new(),
+                    loading: false,
                 })
             }
         }
@@ -641,6 +591,18 @@ impl UiState {
         }
     }
 
+    fn move_picker_tab_left(&mut self) {
+        if let Some(ActiveView::Models(picker)) = &mut self.view {
+            picker.tab_left();
+        }
+    }
+
+    fn move_picker_tab_right(&mut self) {
+        if let Some(ActiveView::Models(picker)) = &mut self.view {
+            picker.tab_right();
+        }
+    }
+
     fn back_from_picker(&mut self) {
         match &self.view {
             Some(ActiveView::ProviderSettings { .. }) => {
@@ -669,5 +631,20 @@ impl UiState {
             return;
         }
         self.transcript.push(TranscriptRow::AssistantText(text));
+    }
+}
+
+pub(super) fn spinner_frame(ticks: u128) -> &'static str {
+    match ticks % 10 {
+        0 => "⠋",
+        1 => "⠙",
+        2 => "⠹",
+        3 => "⠸",
+        4 => "⠼",
+        5 => "⠴",
+        6 => "⠦",
+        7 => "⠧",
+        8 => "⠇",
+        _ => "⠏",
     }
 }

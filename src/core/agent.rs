@@ -32,6 +32,15 @@ impl MisyCore {
             .session_operation
             .lock()
             .expect("session operation mutex must not be poisoned");
+        if active.cancelled.load(Ordering::Acquire) {
+            self.inner
+                .active
+                .lock()
+                .expect("active submissions mutex must not be poisoned")
+                .remove(&id.get());
+            self.emit(CoreEvent::Cancelled { submission: id });
+            return;
+        }
         self.emit(CoreEvent::SubmissionStarted {
             submission: id,
             model: model.clone(),
@@ -142,6 +151,7 @@ impl MisyCore {
             .lock()
             .expect("active request mutex must not be poisoned") =
             Some((model.provider.clone(), pending.id()));
+        let request_id = pending.id().get();
         let (reply_sender, reply_receiver) = mpsc::channel();
         thread::spawn(move || {
             let _ = reply_sender.send(pending.wait());
@@ -172,60 +182,77 @@ impl MisyCore {
                 }
             }
             match events.recv_timeout(Duration::from_millis(20)) {
-                Ok(event) => match event.method.as_str() {
-                    "text_delta" => {
-                        let delta = event
-                            .params
-                            .get("delta")
-                            .and_then(Value::as_str)
-                            .ok_or_else(|| {
-                                "provider text_delta is missing string delta".to_owned()
-                            })?
-                            .to_owned();
-                        let metadata = event.params.get("metadata").cloned().unwrap_or(Value::Null);
-                        if !metadata.is_null() {
-                            stream_metadata.push(metadata.clone());
-                        }
-                        text.push_str(&delta);
-                        self.emit(CoreEvent::TextDelta {
-                            submission,
-                            delta,
-                            provider_metadata: metadata,
-                        });
+                Ok(event) => {
+                    if event
+                        .params
+                        .get("request_id")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|event_request_id| event_request_id != request_id)
+                    {
+                        continue;
                     }
-                    "tool_call" => {
-                        let metadata = event.params.get("metadata").cloned().unwrap_or(Value::Null);
-                        if !metadata.is_null() {
-                            stream_metadata.push(metadata.clone());
+                    match event.method.as_str() {
+                        "text_delta" => {
+                            let delta = event
+                                .params
+                                .get("delta")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                    "provider text_delta is missing string delta".to_owned()
+                                })?
+                                .to_owned();
+                            let metadata =
+                                event.params.get("metadata").cloned().unwrap_or(Value::Null);
+                            if !metadata.is_null() {
+                                stream_metadata.push(metadata.clone());
+                            }
+                            text.push_str(&delta);
+                            self.emit(CoreEvent::TextDelta {
+                                submission,
+                                delta,
+                                provider_metadata: metadata,
+                            });
                         }
-                        let call: ToolCall = serde_json::from_value(event.params)
-                            .map_err(|error| format!("invalid provider tool_call: {error}"))?;
-                        self.emit(CoreEvent::ToolCall {
-                            submission,
-                            call: call.clone(),
-                            provider_metadata: metadata,
-                        });
-                        tool_calls.push(call);
-                    }
-                    "completed" => {
-                        completed = true;
-                        if let Some(metadata) = event.params.get("metadata") {
-                            stream_metadata.push(metadata.clone());
+                        "tool_call" => {
+                            let metadata =
+                                event.params.get("metadata").cloned().unwrap_or(Value::Null);
+                            if !metadata.is_null() {
+                                stream_metadata.push(metadata.clone());
+                            }
+                            let call: ToolCall = serde_json::from_value(event.params)
+                                .map_err(|error| format!("invalid provider tool_call: {error}"))?;
+                            self.emit(CoreEvent::ToolCall {
+                                submission,
+                                call: call.clone(),
+                                provider_metadata: metadata,
+                            });
+                            tool_calls.push(call);
                         }
-                        if response_received {
-                            break;
+                        "completed" => {
+                            completed = true;
+                            if let Some(metadata) = event.params.get("metadata") {
+                                stream_metadata.push(metadata.clone());
+                            }
+                            if response_received {
+                                break;
+                            }
+                        }
+                        "failed" => {
+                            return Err(event
+                                .params
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("provider stream failed")
+                                .to_owned());
+                        }
+                        _ => {
+                            return Err(format!(
+                                "unknown provider stream event `{}`",
+                                event.method
+                            ));
                         }
                     }
-                    "failed" => {
-                        return Err(event
-                            .params
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("provider stream failed")
-                            .to_owned());
-                    }
-                    _ => return Err(format!("unknown provider stream event `{}`", event.method)),
-                },
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err("provider event router disconnected".to_owned());

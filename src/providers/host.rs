@@ -382,7 +382,7 @@ impl ProviderProcess {
         if let Some(sender) = pending {
             let _ = sender.send(Err(PendingFailure::Cancelled));
         }
-        self.send_notification("$/cancelRequest", json!({ "id": id.get() }))
+        self.send_notification("chat.cancel", json!({ "request_id": id.get() }))
     }
 
     fn write_message(&self, message: &Value) -> std::io::Result<()> {

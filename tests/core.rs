@@ -60,9 +60,9 @@ fn receive_until(
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut received = Vec::new();
     while Instant::now() < deadline {
-        let event = events
-            .recv_timeout(Duration::from_millis(100))
-            .expect("core event before timeout");
+        let Ok(event) = events.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
         let done = matches!(
             event,
             CoreEvent::Completed { submission: id } | CoreEvent::Cancelled { submission: id }
@@ -133,6 +133,37 @@ fn core_persists_auth_credentials_without_exposing_them_to_callers() {
             .expect("refreshed credentials")
             .contains("refreshed-opaque")
     );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn core_sanitizes_all_public_auth_responses() {
+    let (_temporary, core, _) = test_core("sanitized-auth");
+    let provider = ProviderId::new("fixture");
+
+    assert!(
+        core.auth_status(&provider)
+            .expect("status")
+            .get("credentials")
+            .is_none()
+    );
+    assert!(
+        core.start_auth(&provider)
+            .expect("start")
+            .get("credentials")
+            .is_none()
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn subscription_replays_the_discovered_provider_snapshot() {
+    let (_temporary, core, _) = test_core("provider-snapshot");
+    let events = core.subscribe();
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("provider snapshot"),
+        CoreEvent::ProviderDiscovered { provider } if provider.as_str() == "fixture"
+    ));
     core.shutdown().expect("shutdown");
 }
 
@@ -421,6 +452,80 @@ fn cancellation_before_tool_dispatch_prevents_tool_side_effects() {
         |event| matches!(event, CoreEvent::Cancelled { submission: id } if *id == submission),
     );
     assert!(!target.exists(), "cancelled tool must not write a file");
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn cancelling_a_submission_queued_on_the_session_gate_does_not_append_its_prompt() {
+    let (_temporary, core, _) = test_core("queued-cancel");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let blocking = core
+        .submit(Message::user("block-session"))
+        .expect("blocking submit");
+    receive_until(
+        &events,
+        blocking,
+        |event| matches!(event, CoreEvent::SubmissionStarted { submission, .. } if *submission == blocking),
+    );
+    let queued = core
+        .submit(Message::user("queued-cancel"))
+        .expect("queued submit");
+    core.cancel(queued).expect("cancel queued submission");
+
+    receive_until(
+        &events,
+        blocking,
+        |event| matches!(event, CoreEvent::Completed { submission } if *submission == blocking),
+    );
+    receive_until(
+        &events,
+        queued,
+        |event| matches!(event, CoreEvent::Cancelled { submission } if *submission == queued),
+    );
+    assert!(
+        !core
+            .history()
+            .iter()
+            .any(|entry| entry.message.content == "queued-cancel")
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn late_stream_events_from_a_cancelled_request_do_not_reach_the_next_request() {
+    let (_temporary, core, _) = test_core("late-events");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let cancelled = core
+        .submit(Message::user("late-cancel"))
+        .expect("cancelled submission");
+    receive_until(
+        &events,
+        cancelled,
+        |event| matches!(event, CoreEvent::SubmissionStarted { submission, .. } if *submission == cancelled),
+    );
+    core.cancel(cancelled).expect("cancel");
+    receive_until(
+        &events,
+        cancelled,
+        |event| matches!(event, CoreEvent::Cancelled { submission } if *submission == cancelled),
+    );
+
+    let next = core
+        .submit(Message::user("late-next"))
+        .expect("next submission");
+    let received = receive_until(
+        &events,
+        next,
+        |event| matches!(event, CoreEvent::Completed { submission } if *submission == next),
+    );
+    assert!(received.iter().any(
+        |event| matches!(event, CoreEvent::TextDelta { delta, submission, .. } if *submission == next && delta == "next")
+    ));
+    assert!(!received.iter().any(
+        |event| matches!(event, CoreEvent::TextDelta { delta, submission, .. } if *submission == next && delta == "late")
+    ));
     core.shutdown().expect("shutdown");
 }
 

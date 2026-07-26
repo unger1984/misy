@@ -9,8 +9,8 @@ reply() {
 while IFS= read -r line; do
     id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
     case "$line" in
-        *'"method":"auth.status"'*) reply "$id" '{"authenticated":false}' ;;
-        *'"method":"auth.start"'*) reply "$id" '{"url":"https://example.test/auth"}' ;;
+        *'"method":"auth.status"'*) reply "$id" '{"authenticated":false,"credentials":{"access":"status-secret"}}' ;;
+        *'"method":"auth.start"'*) reply "$id" '{"url":"https://example.test/auth","credentials":{"access":"start-secret"}}' ;;
         *'"method":"auth.complete"'*) reply "$id" '{"credentials":{"access":"opaque"}}' ;;
         *'"method":"auth.refresh"'*) sleep 1; reply "$id" '{"credentials":{"access":"refreshed-opaque"}}' ;;
         *'"method":"auth.logout"'*) reply "$id" '{}' ;;
@@ -74,6 +74,20 @@ while IFS= read -r line; do
                     reply "$id" '{}'
                     ;;
                 *'"content":"cancel-me"'*) sleep 2; reply "$id" '{}' ;;
+                *'"content":"block-session"'*)
+                    sleep 1
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'
+                    reply "$id" '{}'
+                    ;;
+                *'"content":"late-next"'*)
+                    printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"next"}}\n' "$id"
+                    sleep 2
+                    printf '{"jsonrpc":"2.0","method":"completed","params":{"request_id":%s}}\n' "$id"
+                    reply "$id" '{}'
+                    ;;
+                *'"content":"late-cancel"'*)
+                    (sleep 1; printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"late"}}\n' "$id"; printf '{"jsonrpc":"2.0","method":"completed","params":{"request_id":%s}}\n' "$id"; reply "$id" '{}') &
+                    ;;
                 *'"content":"cancel-before-tool"'*)
                     printf '{"jsonrpc":"2.0","method":"tool_call","params":{"id":"cancel-write","name":"write_file","arguments":{"path":"%s","content":"must not exist"}}}\n' "$target"
                     sleep 1

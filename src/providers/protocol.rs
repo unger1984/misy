@@ -20,6 +20,9 @@ pub const PROVIDER_METHODS: &[&str] = &[
 /// Notification methods emitted while a provider streams a chat turn.
 pub const PROVIDER_STREAM_EVENTS: &[&str] = &["text_delta", "tool_call", "completed", "failed"];
 
+/// Payload key used by `chat.cancel` to identify the `chat.start` request being cancelled.
+pub const CHAT_CANCEL_REQUEST_ID_FIELD: &str = "request_id";
+
 /// A JSON-RPC notification received from a provider subprocess.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderEvent {

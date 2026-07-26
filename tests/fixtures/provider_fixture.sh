@@ -49,7 +49,7 @@ while IFS= read -r line; do
         *'"method":"test.exit"'*)
             exit 0
             ;;
-        *'"method":"$/cancelRequest"'*)
+        *'"method":"chat.cancel"'*'"request_id":'*)
             printf 'cancelled\n' >> "$log_file"
             ;;
     esac

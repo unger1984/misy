@@ -43,5 +43,7 @@ is in use. Communication is JSON-RPC 2.0, one JSON object per newline on stdin
 and stdout. Version 1 requires `auth.status`, `auth.start`, `auth.complete`,
 `auth.refresh`, `auth.logout`, `models.list`, `chat.start`, and `chat.cancel`.
 Streaming chat notifications use `text_delta`, `tool_call`, `completed`, or
-`failed`. A provider may be implemented in any language; Bun is only the
+`failed`; each notification's params carry the originating `request_id` from
+`chat.start`. To cancel a chat, misy sends the documented `chat.cancel`
+notification with `{ "request_id": <chat-start-id> }`. A provider may be implemented in any language; Bun is only the
 planned runtime for the bundled Codex provider.

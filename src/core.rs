@@ -254,6 +254,11 @@ impl MisyCore {
     /// Subscribes to bounded, non-blocking core events. Slow listeners may miss events.
     pub fn subscribe(&self) -> Receiver<CoreEvent> {
         let (sender, receiver) = mpsc::sync_channel(128);
+        for package in self.inner.catalog.packages() {
+            let _ = sender.try_send(CoreEvent::ProviderDiscovered {
+                provider: package.manifest().id.clone(),
+            });
+        }
         self.inner
             .subscribers
             .lock()
@@ -263,7 +268,11 @@ impl MisyCore {
     }
 
     pub fn auth_status(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        let result = self.provider_request(provider, "auth.status", json!({}))?;
+        let result = self.sanitize_auth_response(self.provider_request(
+            provider,
+            "auth.status",
+            json!({}),
+        )?);
         self.emit(CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
             authenticated: result
@@ -274,7 +283,13 @@ impl MisyCore {
         Ok(result)
     }
     pub fn start_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        self.provider_request(provider, "auth.start", json!({}))
+        Ok(
+            self.sanitize_auth_response(self.provider_request(
+                provider,
+                "auth.start",
+                json!({}),
+            )?),
+        )
     }
     pub fn complete_auth(
         &self,
@@ -452,6 +467,13 @@ impl MisyCore {
             }
         }
         Ok(())
+    }
+
+    fn sanitize_auth_response(&self, mut response: Value) -> Value {
+        if let Some(object) = response.as_object_mut() {
+            object.remove("credentials");
+        }
+        response
     }
 }
 

@@ -63,9 +63,12 @@ authentication, session, and tool orchestration remain in the core.
   centered model popup from the core-owned catalog cache while refreshing the catalog in the
   background. An empty cache shows an animated loading indicator. The popup has an `All` tab and
   one tab for every provider represented by models or an error; `Left` and `Right` switch tabs and
-  `Up` and `Down` move within the filtered model list. The text filter is retained across tabs, and
-  a background refresh preserves the active tab and selected model when they still exist. Lists
-  show eight scrollable numbered rows, aligned dim second-column descriptions, and an
+  `Up` and `Down` move within the filtered model list. Its width is capped and centered on wider
+  terminals, while provider tabs wrap across rows and keep the active tab visible on short screens.
+  The model viewport uses the height left below those rows and scrolls the selection when the list
+  does not fit. The text filter is retained across tabs, and a background refresh preserves the
+  active tab and selected model when they still exist. Lists show up to eight scrollable numbered
+  rows, aligned dim second-column descriptions, and an
   accent-highlighted selection. Digits select visible numbered entries directly. The selected
   model has a checkmark; provider authentication is a second-column status. Providers without
   credentials are not queried, and a failure from one configured provider is shown without hiding
@@ -116,5 +119,6 @@ behavior tests. Core events or lifecycle changes also require updates to
 
 - [`src/tui.rs`](../src/tui.rs)
 - [`tests/tui.rs`](../tests/tui.rs)
+- [`tests/tui_model_popup.rs`](../tests/tui_model_popup.rs)
 - [`src/core.rs`](../src/core.rs)
 - [Decisions and References](decisions-and-references.md)

@@ -9,6 +9,7 @@ mod composer;
 mod history;
 mod list;
 mod model_picker;
+mod model_popup;
 mod model_refresh;
 mod model_view;
 mod presentation;

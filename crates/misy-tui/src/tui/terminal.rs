@@ -265,9 +265,9 @@ impl Drop for TerminalGuard {
 }
 
 fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    // Alternate codes preserve layout-resolved text while disambiguation keeps Shift+Enter.
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 fn write_escape(stdout: &mut io::Stdout, sequence: &str) -> Result<(), io::Error> {
@@ -296,12 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_protocol_requests_modified_plain_keys() {
+    fn keyboard_protocol_preserves_layout_text_and_modified_enter() {
         assert_eq!(
             keyboard_enhancement_flags(),
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        );
+        assert!(
+            !keyboard_enhancement_flags()
+                .contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES)
         );
     }
 }

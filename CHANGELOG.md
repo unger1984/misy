@@ -19,6 +19,8 @@
   prompts or emitting duplicate cancellation rows.
 - Published terminal submission events only after the completed turn is removed from the core
   snapshot, preventing a stale busy indicator.
+- Preserved system keyboard-layout symbols such as `?` and shifted digits while retaining
+  `Shift+Enter` multiline input.
 
 ## 2026-07-26
 

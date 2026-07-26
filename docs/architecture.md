@@ -17,7 +17,7 @@ Read this document before changing ownership, lifecycle, sessions, tools, provid
 
 ```mermaid
 flowchart LR
-    Client[TUI / future clients] --> Core[Headless Rust core]
+    Client[TUI / future clients] --> Core[misy-core: headless Rust core]
     Core --> Tools[Local Rust tools]
     Core --> Host[Provider process host]
     Host <-->|JSON-RPC 2.0 NDJSON| Plugin[Provider plugin process]
@@ -25,19 +25,28 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The Rust core owns normalized state, configuration, credentials, the persisted model catalog
+- The `misy-core` workspace crate owns normalized state, configuration, credentials, the persisted model catalog
   cache (`~/.misy/models.json`), the in-memory conversation, FIFO submission scheduling,
   agent/tool iteration, cancellation, provider supervision, and public events. Clients read the
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
-- The TUI and future desktop or third-party programs are clients of the core. They do not duplicate orchestration state.
+- `misy-core` is an async Tokio library. It owns a private multi-thread Tokio runtime so provider
+  supervision and queued work survive callers using another runtime or dropping an operation
+  future. Its public async operations are safe to call from a client's runtime.
+- The `misy-tui` workspace crate and future desktop or third-party programs are clients of the
+  core. They do not duplicate orchestration state.
+- `CoreSnapshot` is the cheap, in-memory client projection of the selected model, active and
+  queued submissions, and cached provider authentication state. Reading it never performs
+  filesystem, process, or network I/O; clients refresh their projections after relevant core
+  events rather than maintaining a competing source of truth.
 - Rust owns local tool definitions and execution. Provider plugins only translate between Misy's normalized contract and a remote provider protocol.
 - One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
 
 ## Runtime Flow
 
-1. The core discovers provider manifests without starting plugin processes.
+1. The core discovers provider manifests without starting plugin processes and starts its private
+   Tokio runtime.
 2. A client selects a provider/model and invokes public core operations.
 3. The host lazily starts only the provider being used.
 4. Every inference carries an explicit provider and model.
@@ -58,7 +67,8 @@ flowchart LR
 - The architecture is approved and changes only by explicit user decision.
 - Provider plugins are language-independent standalone packages and subprocesses.
 - The selected model is a default for direct interaction, not a global singleton assumption; future agents may use other provider/model pairs.
-- External clients must reuse the core contract.
+- External clients must reuse the `misy-core` contract, including its public async operations,
+  events, cancellation methods, and `CoreSnapshot` projection.
 
 ## Change Impact
 
@@ -66,9 +76,10 @@ Changing ownership or event semantics affects the core, TUI, provider host, inte
 
 ## Sources of Truth
 
-- [`src/lib.rs`](../src/lib.rs)
-- [`src/core.rs`](../src/core.rs)
-- [`src/core/agent.rs`](../src/core/agent.rs)
-- [`src/core/events.rs`](../src/core/events.rs)
+- [`crates/misy-core/src/lib.rs`](../crates/misy-core/src/lib.rs)
+- [`crates/misy-core/src/core.rs`](../crates/misy-core/src/core.rs)
+- [`crates/misy-core/src/core/agent.rs`](../crates/misy-core/src/core/agent.rs)
+- [`crates/misy-core/src/core/events.rs`](../crates/misy-core/src/core/events.rs)
+- [`crates/misy-core/src/core/snapshot.rs`](../crates/misy-core/src/core/snapshot.rs)
 - [Provider Plugins](provider-plugins.md)
 - [TUI Client](tui-client.md)

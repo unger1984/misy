@@ -16,9 +16,16 @@ selection pickers, scrolling, or browser handoff.
 
 ## Client Boundary
 
-The TUI is a thin in-process client over `MisyCore`. UI state is explicit, rendering is
-deterministic, and keyboard/input is mapped to actions before side effects. Provider, model,
-authentication, session, and tool orchestration remain in the core.
+The `misy-tui` crate is a thin in-process client over `misy_core::MisyCore`. Its binary starts on
+Tokio's current runtime; its terminal loop remains a synchronous frame loop (`draw`, 50 ms poll,
+then event pump) so animation and input retain predictable cadence. Long core operations run in
+Tokio tasks and return through the TUI operation-result channel.
+
+UI state is explicit, rendering is deterministic, and keyboard/input is mapped to actions before
+side effects. `UiState` is a client projection: it refreshes core-owned selected-model,
+submission-queue, and provider-authentication state from `CoreSnapshot` at startup and after
+relevant core events. The transcript remains a TUI-owned projection of the event stream. Provider,
+model, authentication, session, and tool orchestration remain in the core.
 
 ## Interaction Model
 
@@ -79,10 +86,12 @@ authentication, session, and tool orchestration remain in the core.
 - Transcript rows use semantic styling: dim user prompts and service messages, normal assistant
   text, structured tool calls with indented results, and red failures. An active submission adds an
   animated one-line spinner with elapsed time and the `esc to interrupt` hint above the composer.
-- The first accepted prompt is shown optimistically in the transcript. Prompts submitted while a
-  turn is active remain in a bounded queue preview above the composer and enter the transcript only
-  when the core starts them. The core processes them in FIFO order, so each answer stays directly
-  after its prompt. Before the first assistant text the activity row says `Thinking…`; once text
+- Entered prompts immediately join a bounded local queue preview above the composer, then enter
+  the transcript when the core starts them. The client serializes submission requests before
+  handing them to the core, maps each prompt by its submission ID rather than its text, and buffers
+  turn events that arrive before that mapping. Thus repeated identical prompts remain distinct,
+  FIFO transcript entries and no assistant output can be merged or misplaced by event/result
+  interleaving. Before the first assistant text the activity row says `Thinking…`; once text
   begins it says `Responding…`.
 
 ## Lifecycle and Safety
@@ -101,11 +110,11 @@ authentication, session, and tool orchestration remain in the core.
   first press highlights `press Ctrl+C again to exit` in the footer for one second; a second press
   inside that window shuts down the core/provider host, restores the terminal, and exits. Any
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
-- Event processing is bounded per tick so continuous streaming cannot starve input handling.
-- `Esc` interrupts the active turn. When prompts are queued, the next one starts after cancellation
-  and the activity row briefly offers `esc again to stop queue`; a second press within one second
-  cancels both the active turn and every remaining queued submission. With no queued prompt, one
-  press is sufficient to stop the active turn.
+- Event and background-operation processing are bounded per tick so continuous streaming cannot
+  starve input handling.
+- `Esc` interrupts the active turn identified by the current core snapshot. Repeated presses are
+  idempotent for that turn and never clear the remaining FIFO queue; the next queued prompt starts
+  after cancellation.
 - Usage is a core operation, not a TUI-owned provider request: the TUI supplies no endpoint,
   headers, credentials, or provider-specific parsing.
 
@@ -117,8 +126,11 @@ behavior tests. Core events or lifecycle changes also require updates to
 
 ## Sources of Truth
 
-- [`src/tui.rs`](../src/tui.rs)
-- [`tests/tui.rs`](../tests/tui.rs)
-- [`tests/tui_model_popup.rs`](../tests/tui_model_popup.rs)
-- [`src/core.rs`](../src/core.rs)
+- [`crates/misy-tui/src/lib.rs`](../crates/misy-tui/src/lib.rs)
+- [`crates/misy-tui/src/tui/client.rs`](../crates/misy-tui/src/tui/client.rs)
+- [`crates/misy-tui/src/tui/state.rs`](../crates/misy-tui/src/tui/state.rs)
+- [`crates/misy-tui/src/tui/terminal.rs`](../crates/misy-tui/src/tui/terminal.rs)
+- [`crates/misy-tui/tests/tui.rs`](../crates/misy-tui/tests/tui.rs)
+- [`crates/misy-tui/tests/tui_model_popup.rs`](../crates/misy-tui/tests/tui_model_popup.rs)
+- [`crates/misy-core/src/core.rs`](../crates/misy-core/src/core.rs)
 - [Decisions and References](decisions-and-references.md)

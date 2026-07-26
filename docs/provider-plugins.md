@@ -163,9 +163,9 @@ fixtures, README, and contract tests. Do not silently widen the current protocol
 
 ## Sources of Truth
 
-- [`src/providers/manifest.rs`](../src/providers/manifest.rs)
-- [`src/providers/protocol.rs`](../src/providers/protocol.rs)
-- [`src/providers/host.rs`](../src/providers/host.rs)
+- [`crates/misy-core/src/providers/manifest.rs`](../crates/misy-core/src/providers/manifest.rs)
+- [`crates/misy-core/src/providers/protocol.rs`](../crates/misy-core/src/providers/protocol.rs)
+- [`crates/misy-core/src/providers/host.rs`](../crates/misy-core/src/providers/host.rs)
 - [`plugins/providers/openai/README.md`](../plugins/providers/openai/README.md)
 - [`plugins/providers/anthropic/README.md`](../plugins/providers/anthropic/README.md)
 - [`plugins/providers/kimi/README.md`](../plugins/providers/kimi/README.md)

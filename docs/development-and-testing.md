@@ -39,10 +39,12 @@ bunx tsc --noEmit
 
 ## Testing Layers
 
-1. Rust unit tests for domain/core/tool behavior.
-2. Rust integration and end-to-end tests for provider host and client flows using fake provider
-   processes.
-3. Language-native contract tests inside every provider package using fake local remote-provider
+1. Rust unit tests live beside the implementation in `crates/misy-core/src/` and
+   `crates/misy-tui/src/`.
+2. Rust integration and end-to-end tests live in `crates/misy-core/tests/` for core, provider-host,
+   configuration, credential, domain, and tool flows, and in `crates/misy-tui/tests/` for terminal
+   client flows. They use fake provider processes from `crates/misy-core/tests/fixtures/`.
+3. Language-native contract tests inside every provider package use fake local remote-provider
    endpoints.
 
 Prefer observable behavior over implementation details. Add concurrency/lifecycle tests where
@@ -51,7 +53,8 @@ dropped events, blocked input, leaked processes, or credential exposure are plau
 ## Sources of Truth
 
 - [`Cargo.toml`](../Cargo.toml)
-- [`tests/`](../tests/)
+- [`crates/misy-core/tests/`](../crates/misy-core/tests/)
+- [`crates/misy-tui/tests/`](../crates/misy-tui/tests/)
 - [`plugins/providers/openai/package.json`](../plugins/providers/openai/package.json)
 - [`plugins/providers/anthropic/package.json`](../plugins/providers/anthropic/package.json)
 - [`plugins/providers/kimi/package.json`](../plugins/providers/kimi/package.json)

@@ -16,7 +16,8 @@
 
 ## Purpose
 
-Rules for everything under `src/` and `tests/`. Read [Code Style](code-style.md) first — it holds
+Rules for Rust code and tests under `crates/misy-core/` and `crates/misy-tui/`. Read
+[Code Style](code-style.md) first — it holds
 the language-agnostic rules on size, module boundaries, comments, and error handling. This document
 adds what is specific to Rust and does not repeat what is already there.
 

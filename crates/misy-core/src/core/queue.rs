@@ -1,0 +1,210 @@
+//! FIFO submission scheduling with exactly one session-mutating agent task.
+
+use super::{ActiveSubmission, CoreError, CoreState, MisyCore, SubmissionId};
+use crate::{Message, ModelRef};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, atomic::Ordering},
+};
+
+pub(super) struct QueuedSubmission {
+    pub(super) id: SubmissionId,
+    pub(super) model: ModelRef,
+    pub(super) message: Message,
+    pub(super) active: Arc<ActiveSubmission>,
+}
+
+#[derive(Default)]
+pub(crate) struct SubmissionQueue {
+    pending: VecDeque<QueuedSubmission>,
+    current: Option<(SubmissionId, Arc<ActiveSubmission>)>,
+    worker_running: bool,
+}
+
+impl SubmissionQueue {
+    pub(super) fn snapshot(&self) -> (Option<SubmissionId>, Vec<SubmissionId>) {
+        let active_submission = self
+            .current
+            .as_ref()
+            .and_then(|(id, active)| (!active.cancelled.load(Ordering::Acquire)).then_some(*id));
+        let queued_submissions = self
+            .pending
+            .iter()
+            .filter(|submission| !submission.active.cancelled.load(Ordering::Acquire))
+            .map(|submission| submission.id)
+            .collect();
+        (active_submission, queued_submissions)
+    }
+}
+
+impl MisyCore {
+    /// Enqueues one user or system message for deterministic asynchronous processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::NoModelSelected`] when no direct-interaction model is selected, or
+    /// [`CoreError::Shutdown`] after shutdown.
+    pub async fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
+        self.inner.state.ensure_running()?;
+        let model = self
+            .selected_model()
+            .await
+            .ok_or(CoreError::NoModelSelected)?;
+        let (id, start_worker) = self.inner.state.enqueue_submission(message, model)?;
+        if start_worker {
+            let state = Arc::clone(&self.inner.state);
+            self.inner.runtime.handle.spawn(async move {
+                state.drain_submission_queue().await;
+            });
+        }
+        Ok(id)
+    }
+
+    /// Cancels every running or queued submission without shutting down the core.
+    pub async fn cancel_all_submissions(&self) {
+        self.inner.state.cancel_all_submissions().await;
+    }
+
+    /// Cancels the submission currently owning the session.
+    ///
+    /// Returns `false` when no submission is running. Queued submissions remain FIFO work until
+    /// they are explicitly cancelled or the active submission completes.
+    pub async fn cancel_current_submission(&self) -> bool {
+        self.inner.state.cancel_current_submission().await
+    }
+}
+
+impl CoreState {
+    fn enqueue_submission(
+        &self,
+        message: Message,
+        model: ModelRef,
+    ) -> Result<(SubmissionId, bool), CoreError> {
+        let mut queue = self
+            .submission_queue
+            .lock()
+            .expect("submission queue mutex must not be poisoned");
+        // Acceptance must be linearized with shutdown after acquiring queue ownership.
+        self.ensure_running()?;
+        let id = SubmissionId(self.next_submission.fetch_add(1, Ordering::Relaxed));
+        let active = Arc::new(ActiveSubmission::new());
+        self.active
+            .lock()
+            .expect("active submissions mutex must not be poisoned")
+            .insert(id.get(), Arc::clone(&active));
+        queue.pending.push_back(QueuedSubmission {
+            id,
+            model,
+            message,
+            active,
+        });
+        if queue.worker_running {
+            Ok((id, false))
+        } else {
+            queue.worker_running = true;
+            Ok((id, true))
+        }
+    }
+
+    pub(super) async fn cancel_submission(
+        &self,
+        submission: SubmissionId,
+    ) -> Result<(), CoreError> {
+        let active = self
+            .active
+            .lock()
+            .expect("active submissions mutex must not be poisoned")
+            .get(&submission.get())
+            .cloned()
+            .ok_or(CoreError::UnknownSubmission(submission))?;
+        self.cancel_active_submission(active).await;
+        Ok(())
+    }
+
+    pub(super) async fn cancel_all_submissions(&self) {
+        let submissions = self
+            .active
+            .lock()
+            .expect("active submissions mutex must not be poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for submission in submissions {
+            self.cancel_active_submission(submission).await;
+        }
+    }
+
+    pub(super) async fn cancel_current_submission(&self) -> bool {
+        let active = {
+            let queue = self
+                .submission_queue
+                .lock()
+                .expect("submission queue mutex must not be poisoned");
+            queue.current.as_ref().map(|(_, active)| Arc::clone(active))
+        };
+        let Some(active) = active else {
+            return false;
+        };
+        self.cancel_active_submission(active).await;
+        true
+    }
+
+    async fn cancel_active_submission(&self, active: Arc<ActiveSubmission>) {
+        if !active.cancel() {
+            return;
+        }
+        let request = active
+            .request
+            .lock()
+            .expect("active request mutex must not be poisoned")
+            .clone();
+        if let Some((provider, request)) = request {
+            // Local cancellation is authoritative; remote cancellation only accelerates cleanup.
+            let _ = self.host.cancel_request(&provider, request).await;
+        }
+    }
+
+    pub(super) async fn drain_submission_queue(self: Arc<Self>) {
+        loop {
+            let next = {
+                let mut queue = self
+                    .submission_queue
+                    .lock()
+                    .expect("submission queue mutex must not be poisoned");
+                let next = queue.pending.pop_front();
+                if let Some(next) = &next {
+                    queue.current = Some((next.id, Arc::clone(&next.active)));
+                } else {
+                    queue.current = None;
+                    queue.worker_running = false;
+                }
+                next
+            };
+            let Some(next) = next else {
+                return;
+            };
+            let terminal_event = self
+                .run_submission(next.id, &next.model, next.message, &next.active)
+                .await;
+            self.finish_submission(next.id);
+            self.emit(&terminal_event);
+        }
+    }
+
+    fn finish_submission(&self, submission: SubmissionId) {
+        // Terminal events promise that a fresh snapshot cannot still expose this submission as
+        // active. Keep the queue lock through active-state removal so cancellation cannot find a
+        // finished submission in the gap before that event is published.
+        let mut queue = self
+            .submission_queue
+            .lock()
+            .expect("submission queue mutex must not be poisoned");
+        if queue.current.as_ref().map(|(id, _)| *id) == Some(submission) {
+            queue.current = None;
+        }
+        self.active
+            .lock()
+            .expect("active submissions mutex must not be poisoned")
+            .remove(&submission.get());
+    }
+}

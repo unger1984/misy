@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-27
+
+### Changed
+
+- Split the Rust project into the headless `misy-core` library and `misy-tui` client crates in a
+  Cargo workspace.
+- Migrated core orchestration, provider processes, event subscriptions, tools, and cancellation
+  to Tokio while keeping a dedicated core-owned runtime.
+- Made `CoreSnapshot` the client contract for selected-model, authentication, and submission-queue
+  state.
+
+### Fixed
+
+- Preserved rapid and duplicate prompts as distinct FIFO entries, kept queued prompts visible
+  until their turns start, and prevented assistant output from adjacent turns from merging.
+- Made `Esc` and active `Ctrl+C` cancel only the captured active turn without clearing queued
+  prompts or emitting duplicate cancellation rows.
+- Published terminal submission events only after the completed turn is removed from the core
+  snapshot, preventing a stale busy indicator.
+
 ## 2026-07-26
 
 ### Added

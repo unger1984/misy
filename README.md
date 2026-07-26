@@ -4,7 +4,8 @@ English | [Русский](README-RU.md)
 
 Misy is a fast, minimal agent harness written in Rust. It is designed around a terminal user
 interface, with planned support for MCP, explicit permissions, and TypeScript plugins powered by
-Bun.
+Bun. The Cargo workspace separates the reusable headless async core (`crates/misy-core`) from the
+terminal client (`crates/misy-tui`).
 
 Project documentation: [docs/README.md](docs/README.md).
 

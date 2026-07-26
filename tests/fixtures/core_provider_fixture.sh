@@ -27,6 +27,7 @@ while IFS= read -r line; do
         *'"content":"no-id-terminal"'*) printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'; reply '{}' ;;
         *'"content":"late-cancel"'*) (sleep 1; printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"late"}}\n' "$id"; complete; reply '{}') & ;;
         *'"content":"tool-round-trip"'*) text writing; call_write write-1 "$target" 'written by tool'; call_read read-1 "$target"; complete; reply '{"metadata":{"turn":"one"}}' ;;
+        *'"content":"credential-chat"'*) case "$line" in *'"credentials":{"access":"opaque"}'*) text authenticated; complete; reply '{}' ;; *) printf '{"jsonrpc":"2.0","method":"failed","params":{"request_id":%s,"message":"missing chat credentials"}}\n' "$id"; reply '{}' ;; esac ;;
         *'"content":"bad-tool-arguments"'*) printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_id":%s,"id":"bad-1","name":"write_file","arguments":{"path":"missing-content"}}}\n' "$id"; complete; reply '{}' ;;
         *'"content":"unknown-tool"'*) printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_id":%s,"id":"unknown-1","name":"not_registered","arguments":{}}}\n' "$id"; complete; reply '{}' ;;
         *'"content":"provider-failure"'*) printf '{"jsonrpc":"2.0","method":"failed","params":{"request_id":%s,"message":"fixture failure"}}\n' "$id"; reply '{}' ;;

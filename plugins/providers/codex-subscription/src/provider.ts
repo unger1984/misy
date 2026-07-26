@@ -1,0 +1,264 @@
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+export type Credentials = {
+  access_token: string;
+  refresh_token?: string;
+  expires_at?: number;
+  [key: string]: Json | undefined;
+};
+
+export type ProviderConfig = {
+  issuer: string;
+  clientId: string;
+  codexBaseUrl: string;
+  scopes: string[];
+};
+
+export type AuthSession = { id: string; url: string; session: { id: string } };
+type PendingAuth = {
+  verifier: string;
+  redirectUri: string;
+  code: Promise<{ code?: string; error?: string }>;
+  stop: () => void;
+};
+
+export type ChatRequest = {
+  model_id: string;
+  messages: Array<Record<string, unknown>>;
+  tools: Array<{ name: string; description: string; input_schema: Json }>;
+  credentials: Credentials;
+};
+
+export type Notify = (method: string, params: Record<string, unknown>) => void;
+
+const DEFAULT_CONFIG: ProviderConfig = {
+  issuer: process.env.MISY_CODEX_AUTH_ISSUER ?? "https://auth.openai.com",
+  clientId: process.env.MISY_CODEX_CLIENT_ID ?? "app_EMoamEEZ73f0CkXaXp7hrann",
+  codexBaseUrl: process.env.MISY_CODEX_BASE_URL ?? "https://chatgpt.com/backend-api/codex",
+  scopes: (process.env.MISY_CODEX_OAUTH_SCOPES ?? "openid profile email offline_access api.connectors.read api.connectors.invoke").split(" ").filter(Boolean),
+};
+
+/** Stateless API adapter; temporary OAuth callbacks are retained only in memory. */
+export class CodexSubscriptionProvider {
+  private readonly config: ProviderConfig;
+  private readonly pending = new Map<string, PendingAuth>();
+
+  constructor(config: Partial<ProviderConfig> = {}) {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  async startAuth(): Promise<AuthSession> {
+    const verifier = randomUrlToken(64);
+    const state = randomUrlToken(32);
+    let resolveCode!: (result: { code?: string; error?: string }) => void;
+    const code = new Promise<{ code?: string; error?: string }>((resolve) => {
+      resolveCode = resolve;
+    });
+    let server: ReturnType<typeof Bun.serve> | undefined;
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const callback = new URL(request.url);
+        if (callback.pathname !== "/callback") return new Response("Not found", { status: 404 });
+        if (callback.searchParams.get("state") !== state) {
+          resolveCode({ error: "OAuth callback state did not match" });
+          return new Response("OAuth state did not match", { status: 400 });
+        }
+        const authorizationCode = callback.searchParams.get("code");
+        if (!authorizationCode) {
+          resolveCode({ error: "OAuth callback did not include an authorization code" });
+          return new Response("OAuth code is missing", { status: 400 });
+        }
+        resolveCode({ code: authorizationCode });
+        return new Response("Authentication completed. You may close this window.");
+      },
+    });
+    const redirectUri = `http://127.0.0.1:${server.port}/callback`;
+    const url = new URL("/oauth/authorize", this.config.issuer);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", this.config.clientId);
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("scope", this.config.scopes.join(" "));
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", await pkceChallenge(verifier));
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("id_token_add_organizations", "true");
+    url.searchParams.set("codex_cli_simplified_flow", "true");
+    const id = randomUrlToken(18);
+    this.pending.set(id, { verifier, redirectUri, code, stop: () => server?.stop(true) });
+    return { id, url: url.toString(), session: { id } };
+  }
+
+  async completeAuth(session: unknown, completion: Record<string, unknown>): Promise<{ credentials: Credentials }> {
+    const sessionId = typeof session === "object" && session !== null && "id" in session
+      ? String((session as { id: unknown }).id)
+      : String(session);
+    const pending = this.pending.get(sessionId);
+    if (!pending) throw new Error("OAuth session is missing or expired");
+    try {
+      const suppliedCode = typeof completion.code === "string" ? completion.code : undefined;
+      const callback = suppliedCode ? undefined : await pending.code;
+      if (callback?.error) throw new Error(callback.error);
+      const credentials = await this.token({
+        grant_type: "authorization_code",
+        code: suppliedCode ?? callback?.code ?? "",
+        redirect_uri: pending.redirectUri,
+        code_verifier: pending.verifier,
+      });
+      return { credentials };
+    } finally {
+      pending.stop();
+      this.pending.delete(sessionId);
+    }
+  }
+
+  async refreshAuth(credentials: Credentials): Promise<{ credentials: Credentials }> {
+    if (!credentials.refresh_token) throw new Error("Credentials do not contain a refresh token");
+    return { credentials: await this.token({ grant_type: "refresh_token", refresh_token: credentials.refresh_token }) };
+  }
+
+  authStatus(credentials: Credentials | undefined): { authenticated: boolean; expires_at?: number } {
+    return credentials?.access_token
+      ? { authenticated: true, ...(credentials.expires_at ? { expires_at: credentials.expires_at } : {}) }
+      : { authenticated: false };
+  }
+
+  logout(): Record<string, never> { return {}; }
+
+  async listModels(credentials: Credentials): Promise<Array<{ id: string; display_name: string; context_window: number }>> {
+    const response = await fetch(new URL("models", withSlash(this.config.codexBaseUrl)), {
+      headers: bearer(credentials),
+    });
+    if (!response.ok) throw new Error(`Models request failed (${response.status})`);
+    const payload = await response.json() as Record<string, unknown>;
+    const values = Array.isArray(payload) ? payload : Array.isArray(payload.models) ? payload.models : payload.data;
+    if (!Array.isArray(values)) throw new Error("Models response did not contain a models array");
+    return values.map((value) => {
+      const model = value as Record<string, unknown>;
+      const id = pickString(model, ["id", "slug", "model"]);
+      if (!id) throw new Error("Model is missing an id");
+      return {
+        id,
+        display_name: pickString(model, ["display_name", "name", "id", "slug"]) ?? id,
+        context_window: pickNumber(model, ["context_window", "contextWindow", "context_length"]) ?? 128000,
+      };
+    });
+  }
+
+  async streamChat(request: ChatRequest, requestId: number, notify: Notify, signal?: AbortSignal): Promise<{ metadata: Json }> {
+    try {
+      const response = await fetch(new URL("responses", withSlash(this.config.codexBaseUrl)), {
+        method: "POST",
+        signal,
+        headers: { ...bearer(request.credentials), accept: "text/event-stream", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: request.model_id,
+          stream: true,
+          input: responseInput(request.messages),
+          tools: request.tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.input_schema })),
+        }),
+      });
+      if (!response.ok) throw new Error(`Responses request failed (${response.status})`);
+      if (!response.body) throw new Error("Responses stream did not include a body");
+      let completed = false;
+      for await (const event of sse(response.body)) {
+        const data = parseEvent(event.data);
+        if (event.event === "response.output_text.delta" || event.event === "response.text.delta") {
+          const delta = typeof data.delta === "string" ? data.delta : "";
+          if (delta) notify("text_delta", { request_id: requestId, delta });
+        } else if (event.event === "response.output_item.done") {
+          const item = asRecord(data.item);
+          if (item?.type === "function_call") {
+            const argumentsValue = parseArguments(item.arguments);
+            const id = pickString(item, ["call_id", "id"]);
+            const name = pickString(item, ["name"]);
+            if (id && name) notify("tool_call", { request_id: requestId, id, name, arguments: argumentsValue });
+          }
+        } else if (event.event === "response.completed") {
+          notify("completed", { request_id: requestId, metadata: data });
+          completed = true;
+        } else if (event.event === "response.failed" || event.event === "error") {
+          throw new Error(pickString(data, ["message", "error"]) ?? "Responses stream failed");
+        }
+      }
+      if (!completed) notify("completed", { request_id: requestId });
+      return { metadata: { completed } };
+    } catch (error) {
+      if (signal?.aborted) return { metadata: { completed: false, cancelled: true } };
+      const message = error instanceof Error ? error.message : String(error);
+      notify("failed", { request_id: requestId, message });
+      throw error;
+    }
+  }
+
+  private async token(parameters: Record<string, string>): Promise<Credentials> {
+    const body = new URLSearchParams({ ...parameters, client_id: this.config.clientId });
+    const response = await fetch(new URL("oauth/token", withSlash(this.config.issuer)), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!response.ok) throw new Error(`OAuth token request failed (${response.status})`);
+    const token = await response.json() as Credentials & { expires_in?: number };
+    if (!token.access_token) throw new Error("OAuth token response did not include an access token");
+    return { ...token, ...(typeof token.expires_in === "number" ? { expires_at: Date.now() + token.expires_in * 1000 } : {}) };
+  }
+}
+
+function withSlash(url: string) { return url.endsWith("/") ? url : `${url}/`; }
+function bearer(credentials: Credentials) { return { authorization: `Bearer ${credentials.access_token}` }; }
+function randomUrlToken(bytes: number) { return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url"); }
+async function pkceChallenge(verifier: string) { return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url"); }
+function asRecord(value: unknown): Record<string, unknown> | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function pickString(value: Record<string, unknown>, names: string[]) { const candidate = names.map((name) => value[name]).find((item) => typeof item === "string"); return typeof candidate === "string" ? candidate : undefined; }
+function pickNumber(value: Record<string, unknown>, names: string[]) { const candidate = names.map((name) => value[name]).find((item) => typeof item === "number"); return typeof candidate === "number" ? candidate : undefined; }
+function parseEvent(value: string): Record<string, unknown> { try { return asRecord(JSON.parse(value)) ?? {}; } catch { return {}; } }
+function parseArguments(value: unknown): Json { if (typeof value !== "string") return (value ?? {}) as Json; try { return JSON.parse(value) as Json; } catch { return { raw: value }; } }
+
+function responseInput(messages: Array<Record<string, unknown>>): Json[] {
+  const input: Json[] = [];
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.tool_calls)) {
+      for (const call of message.tool_calls) {
+        const tool = call as Record<string, unknown>;
+        input.push({
+          type: "function_call",
+          call_id: String(tool.id ?? ""),
+          name: String(tool.name ?? ""),
+          arguments: JSON.stringify(tool.arguments ?? {}),
+        });
+      }
+    }
+    if (message.role === "tool" && Array.isArray(message.tool_results)) {
+      for (const result of message.tool_results) {
+        const tool = result as Record<string, unknown>;
+        input.push({ type: "function_call_output", call_id: String(tool.tool_call_id ?? ""), output: String(tool.content ?? "") });
+      }
+      continue;
+    }
+    input.push({ role: String(message.role ?? "user"), content: String(message.content ?? "") });
+  }
+  return input;
+}
+
+async function* sse(stream: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      pending += decoder.decode(value, { stream: !done });
+      let separator: number;
+      while ((separator = pending.indexOf("\n\n")) >= 0) {
+        const block = pending.slice(0, separator);
+        pending = pending.slice(separator + 2);
+        const event = block.match(/^event:\s*(.+)$/m)?.[1] ?? "message";
+        const data = block.match(/^data:\s*(.*)$/m)?.[1] ?? "";
+        if (data !== "[DONE]") yield { event, data };
+      }
+      if (done) break;
+    }
+  } finally { reader.releaseLock(); }
+}

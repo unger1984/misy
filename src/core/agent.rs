@@ -142,10 +142,23 @@ impl MisyCore {
         active: &ActiveSubmission,
         events: &Receiver<ProviderEvent>,
     ) -> Result<ModelTurn, String> {
-        let pending = self.inner.host.request_async(&model.provider, "chat.start", json!({
+        let mut params = json!({
             "provider_id": model.provider.as_str(), "model_id": model.model.as_str(),
             "messages": self.serialized_history(), "tools": ToolRegistry::new().definitions(),
-        })).map_err(|error| error.to_string())?;
+        });
+        if let Some(credentials) = self
+            .inner
+            .credential_store
+            .load(&model.provider)
+            .map_err(|error| error.to_string())?
+        {
+            params["credentials"] = credentials;
+        }
+        let pending = self
+            .inner
+            .host
+            .request_async(&model.provider, "chat.start", params)
+            .map_err(|error| error.to_string())?;
         *active
             .request
             .lock()

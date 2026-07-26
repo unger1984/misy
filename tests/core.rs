@@ -137,6 +137,28 @@ fn core_persists_auth_credentials_without_exposing_them_to_callers() {
 }
 
 #[test]
+fn core_passes_stored_credentials_to_streaming_chat_requests() {
+    let (_temporary, core, _) = test_core("chat-credentials");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(&provider, json!({"code": "opaque"}))
+        .expect("authenticate");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let submission = core
+        .submit(Message::user("credential-chat"))
+        .expect("submit");
+    let received = receive_until(
+        &events,
+        submission,
+        |event| matches!(event, CoreEvent::Completed { submission: id } if *id == submission),
+    );
+    assert!(received.iter().any(|event| {
+        matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "authenticated")
+    }));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_sanitizes_all_public_auth_responses() {
     let (_temporary, core, _) = test_core("sanitized-auth");
     let provider = ProviderId::new("fixture");

@@ -7,14 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn write_fixture_manifest(root: &Path, fixture: &Path, target: &Path) {
-    let package = root.join("fixture");
+fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) {
+    let package = root.join(id);
     fs::create_dir_all(&package).expect("package directory");
     fs::write(
         package.join("misy-plugin.json"),
         format!(
             r#"{{
-  "id": "fixture",
+  "id": "{id}",
   "version": "1.0.0",
   "kind": "provider",
   "protocol_version": 1,
@@ -39,7 +39,7 @@ fn test_core(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf) {
     let target = temporary.path().join(format!("{name}.txt"));
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
-    write_fixture_manifest(&bundled, &fixture, &target);
+    write_fixture_manifest(&bundled, "fixture", &fixture, &target);
     let core = MisyCore::discover(
         MisyPaths::from_root(temporary.path().join("misy")),
         &bundled,
@@ -112,6 +112,31 @@ fn core_discovers_authenticates_lists_and_persists_the_selected_model() {
 }
 
 #[test]
+fn core_persists_auth_credentials_without_exposing_them_to_callers() {
+    let (temporary, core, _) = test_core("redacted-auth");
+    let provider = ProviderId::new("fixture");
+
+    let completed = core
+        .complete_auth(&provider, json!({"code": "opaque"}))
+        .expect("auth complete");
+
+    assert!(completed.get("credentials").is_none());
+    assert!(
+        fs::read_to_string(temporary.path().join("misy/credentials.json"))
+            .expect("stored credentials")
+            .contains("opaque")
+    );
+    let refreshed = core.refresh_auth(&provider).expect("auth refresh");
+    assert!(refreshed.get("credentials").is_none());
+    assert!(
+        fs::read_to_string(temporary.path().join("misy/credentials.json"))
+            .expect("refreshed credentials")
+            .contains("refreshed-opaque")
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_streams_a_tool_round_trip_and_keeps_provider_and_model_on_every_turn() {
     let (_temporary, core, target) = test_core("tool-round-trip");
     core.select_model(fixture_model()).expect("select model");
@@ -168,6 +193,158 @@ fn core_streams_a_tool_round_trip_and_keeps_provider_and_model_on_every_turn() {
 }
 
 #[test]
+fn core_losslessly_collects_a_burst_of_provider_stream_events() {
+    let (_temporary, core, _) = test_core("burst");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let submission = core.submit(Message::user("burst")).expect("submit");
+
+    receive_until(
+        &events,
+        submission,
+        |event| matches!(event, CoreEvent::Completed { submission: id } if *id == submission),
+    );
+    let assistant = core
+        .history()
+        .into_iter()
+        .find(|entry| entry.message.role == misy::MessageRole::Assistant)
+        .expect("assistant history");
+    assert_eq!(assistant.message.content.len(), 4_096);
+    assert_eq!(assistant.message.content, "x".repeat(4_096));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn core_serializes_concurrent_submissions_into_one_canonical_history() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let target = temporary.path().join("target.txt");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(&bundled, "fixture", &fixture, &target);
+    write_fixture_manifest(&bundled, "fixture-two", &fixture, &target);
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core discovery");
+    core.select_model(fixture_model())
+        .expect("select first model");
+    let events = core.subscribe();
+    let first = core
+        .submit(Message::user("session-one"))
+        .expect("first submit");
+    core.select_model(ModelRef::new(
+        ProviderId::new("fixture-two"),
+        ModelId::new("fixture-model"),
+    ))
+    .expect("select second model");
+    let second = core
+        .submit(Message::user("session-two"))
+        .expect("second submit");
+
+    receive_until(
+        &events,
+        first,
+        |event| matches!(event, CoreEvent::Completed { submission } if *submission == first),
+    );
+    receive_until(
+        &events,
+        second,
+        |event| matches!(event, CoreEvent::Completed { submission } if *submission == second),
+    );
+    let history = core.history();
+    assert_eq!(history.len(), 4);
+    assert!(history.chunks_exact(2).all(|pair| {
+        pair[0].message.role == misy::MessageRole::User
+            && pair[1].message.role == misy::MessageRole::Assistant
+    }));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn concurrent_model_selection_keeps_memory_and_disk_in_sync() {
+    let (temporary, core, _) = test_core("model-race");
+    let first = fixture_model();
+    let second = ModelRef::new(ProviderId::new("fixture"), ModelId::new("fixture-model-b"));
+    let core_a = core.clone();
+    let core_b = core.clone();
+    let first_for_thread = first.clone();
+    let second_for_thread = second.clone();
+
+    let select_a = std::thread::spawn(move || core_a.select_model(first_for_thread));
+    let select_b = std::thread::spawn(move || core_b.select_model(second_for_thread));
+    select_a
+        .join()
+        .expect("first selector")
+        .expect("first selection");
+    select_b
+        .join()
+        .expect("second selector")
+        .expect("second selection");
+
+    let persisted = misy::ConfigStore::new(MisyPaths::from_root(temporary.path().join("misy")))
+        .load()
+        .expect("saved config")
+        .default_model;
+    assert_eq!(core.selected_model(), persisted);
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn concurrent_auth_mutations_do_not_lose_or_resurrect_credentials() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let target = temporary.path().join("target.txt");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(&bundled, "fixture", &fixture, &target);
+    write_fixture_manifest(&bundled, "fixture-two", &fixture, &target);
+    let paths = MisyPaths::from_root(temporary.path().join("misy"));
+    let core = MisyCore::discover(paths.clone(), &bundled).expect("core discovery");
+    let first = ProviderId::new("fixture");
+    let second = ProviderId::new("fixture-two");
+
+    let complete_a = {
+        let core = core.clone();
+        let provider = first.clone();
+        std::thread::spawn(move || core.complete_auth(&provider, json!({"code":"a"})))
+    };
+    let complete_b = {
+        let core = core.clone();
+        let provider = second.clone();
+        std::thread::spawn(move || core.complete_auth(&provider, json!({"code":"b"})))
+    };
+    complete_a
+        .join()
+        .expect("first completion")
+        .expect("first auth");
+    complete_b
+        .join()
+        .expect("second completion")
+        .expect("second auth");
+    let store = misy::CredentialStore::new(paths);
+    assert!(store.load(&first).expect("first credential").is_some());
+    assert!(store.load(&second).expect("second credential").is_some());
+
+    let refreshing = {
+        let core = core.clone();
+        let provider = first.clone();
+        std::thread::spawn(move || core.refresh_auth(&provider))
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let logging_out = {
+        let core = core.clone();
+        let provider = first.clone();
+        std::thread::spawn(move || core.logout(&provider))
+    };
+    refreshing.join().expect("refresh thread").expect("refresh");
+    logging_out.join().expect("logout thread").expect("logout");
+    assert!(store.load(&first).expect("logged out credential").is_none());
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_returns_tool_errors_to_the_provider_for_malformed_and_unknown_calls() {
     for prompt in ["bad-tool-arguments", "unknown-tool"] {
         let (_temporary, core, _) = test_core(prompt);
@@ -220,6 +397,30 @@ fn core_emits_provider_failure_and_honours_cancellation() {
             .iter()
             .any(|event| matches!(event, CoreEvent::Cancelled { .. }))
     );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn cancellation_before_tool_dispatch_prevents_tool_side_effects() {
+    let (_temporary, core, target) = test_core("cancel-before-tool");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let submission = core
+        .submit(Message::user("cancel-before-tool"))
+        .expect("submit");
+
+    receive_until(
+        &events,
+        submission,
+        |event| matches!(event, CoreEvent::ToolCall { submission: id, .. } if *id == submission),
+    );
+    core.cancel(submission).expect("cancel");
+    receive_until(
+        &events,
+        submission,
+        |event| matches!(event, CoreEvent::Cancelled { submission: id } if *id == submission),
+    );
+    assert!(!target.exists(), "cancelled tool must not write a file");
     core.shutdown().expect("shutdown");
 }
 

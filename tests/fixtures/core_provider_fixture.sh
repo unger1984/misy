@@ -12,9 +12,11 @@ while IFS= read -r line; do
         *'"method":"auth.status"'*) reply "$id" '{"authenticated":false}' ;;
         *'"method":"auth.start"'*) reply "$id" '{"url":"https://example.test/auth"}' ;;
         *'"method":"auth.complete"'*) reply "$id" '{"credentials":{"access":"opaque"}}' ;;
-        *'"method":"models.list"'*) reply "$id" '{"models":[{"id":"fixture-model","display_name":"Fixture","context_window":4096}]}' ;;
+        *'"method":"auth.refresh"'*) sleep 1; reply "$id" '{"credentials":{"access":"refreshed-opaque"}}' ;;
+        *'"method":"auth.logout"'*) reply "$id" '{}' ;;
+        *'"method":"models.list"'*) reply "$id" '{"models":[{"id":"fixture-model","display_name":"Fixture","context_window":4096},{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}' ;;
         *'"method":"chat.start"'*)
-            case "$line" in *'"provider_id":"fixture"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","method":"failed","params":{"message":"missing explicit provider reference"}}'; reply "$id" '{}'; continue ;; esac
+            case "$line" in *'"provider_id":"fixture"'*|*'"provider_id":"fixture-two"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","method":"failed","params":{"message":"missing explicit provider reference"}}'; reply "$id" '{}'; continue ;; esac
             case "$line" in *'"model_id":"fixture-model"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","method":"failed","params":{"message":"missing explicit model reference"}}'; reply "$id" '{}'; continue ;; esac
             case "$line" in
                 *'"tool_call_id":"write-1"'*)
@@ -52,7 +54,32 @@ while IFS= read -r line; do
                     printf '%s\n' '{"jsonrpc":"2.0","method":"failed","params":{"message":"fixture failure"}}'
                     reply "$id" '{}'
                     ;;
+                *'"content":"burst"'*)
+                    count=0
+                    while [ "$count" -lt 4096 ]; do
+                        printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"x"}}'
+                        count=$((count + 1))
+                    done
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'
+                    reply "$id" '{}'
+                    ;;
+                *'"content":"session-one"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"one"}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'
+                    reply "$id" '{}'
+                    ;;
+                *'"content":"session-two"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"two"}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'
+                    reply "$id" '{}'
+                    ;;
                 *'"content":"cancel-me"'*) sleep 2; reply "$id" '{}' ;;
+                *'"content":"cancel-before-tool"'*)
+                    printf '{"jsonrpc":"2.0","method":"tool_call","params":{"id":"cancel-write","name":"write_file","arguments":{"path":"%s","content":"must not exist"}}}\n' "$target"
+                    sleep 1
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'
+                    reply "$id" '{}'
+                    ;;
                 *'"content":"turn-limit"'*)
                     printf '%s\n' '{"jsonrpc":"2.0","method":"tool_call","params":{"id":"loop-1","name":"read_file","arguments":{"path":"missing"}}}'
                     printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'

@@ -27,6 +27,11 @@ impl MisyCore {
         message: Message,
         active: Arc<ActiveSubmission>,
     ) {
+        let _session = self
+            .inner
+            .session_operation
+            .lock()
+            .expect("session operation mutex must not be poisoned");
         self.emit(CoreEvent::SubmissionStarted {
             submission: id,
             model: model.clone(),
@@ -43,6 +48,9 @@ impl MisyCore {
                     return Err("cancelled".to_owned());
                 }
                 let turn = self.run_model_turn(id, &model, &active)?;
+                if active.cancelled.load(Ordering::Acquire) {
+                    return Err("cancelled".to_owned());
+                }
                 self.push_history(HistoryEntry {
                     message: Message::new(MessageRole::Assistant, turn.text),
                     tool_calls: turn.tool_calls.clone(),
@@ -56,6 +64,9 @@ impl MisyCore {
                     .tool_calls
                     .iter()
                     .map(|call| {
+                        if active.cancelled.load(Ordering::Acquire) {
+                            return crate::ToolResult::error(&call.id, "tool dispatch cancelled");
+                        }
                         let result = self.inner.dispatcher.dispatch(call);
                         self.emit(CoreEvent::ToolResult {
                             submission: id,
@@ -100,7 +111,7 @@ impl MisyCore {
         let _guard = provider_gate
             .lock()
             .expect("provider gate mutex must not be poisoned");
-        let (sender, receiver) = mpsc::sync_channel(128);
+        let (sender, receiver) = mpsc::channel();
         self.inner
             .routes
             .lock()

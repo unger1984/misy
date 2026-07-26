@@ -13,7 +13,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver, Sender, SyncSender},
     },
     thread,
 };
@@ -168,9 +168,12 @@ struct CoreInner {
     history: Mutex<Vec<HistoryEntry>>,
     dispatcher: ToolDispatcher,
     subscribers: Mutex<Vec<SyncSender<CoreEvent>>>,
-    routes: Mutex<BTreeMap<String, SyncSender<crate::ProviderEvent>>>,
+    routes: Mutex<BTreeMap<String, Sender<crate::ProviderEvent>>>,
     provider_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
+    auth_operations: Mutex<()>,
+    model_operations: Mutex<()>,
+    session_operation: Mutex<()>,
     next_submission: AtomicU64,
     is_shutdown: AtomicBool,
 }
@@ -208,11 +211,14 @@ impl MisyCore {
             routes: Mutex::new(BTreeMap::new()),
             provider_gates: Mutex::new(BTreeMap::new()),
             active: Mutex::new(BTreeMap::new()),
+            auth_operations: Mutex::new(()),
+            model_operations: Mutex::new(()),
+            session_operation: Mutex::new(()),
             next_submission: AtomicU64::new(1),
             is_shutdown: AtomicBool::new(false),
         });
         let core = Self { inner };
-        core.start_provider_event_router(host.subscribe());
+        core.start_provider_event_router(host.subscribe_lossless());
         for package in core.inner.catalog.packages() {
             core.emit(CoreEvent::ProviderDiscovered {
                 provider: package.manifest().id.clone(),
@@ -275,12 +281,17 @@ impl MisyCore {
         provider: &ProviderId,
         completion: Value,
     ) -> Result<Value, CoreError> {
-        let result = self.provider_request(
+        let _operation = self
+            .inner
+            .auth_operations
+            .lock()
+            .expect("auth operation mutex must not be poisoned");
+        let mut result = self.provider_request(
             provider,
             "auth.complete",
             json!({ "completion": completion }),
         )?;
-        self.store_returned_credentials(provider, &result)?;
+        self.store_returned_credentials(provider, &mut result)?;
         self.emit(CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
             authenticated: true,
@@ -288,11 +299,21 @@ impl MisyCore {
         Ok(result)
     }
     pub fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        let result = self.provider_request(provider, "auth.refresh", json!({}))?;
-        self.store_returned_credentials(provider, &result)?;
+        let _operation = self
+            .inner
+            .auth_operations
+            .lock()
+            .expect("auth operation mutex must not be poisoned");
+        let mut result = self.provider_request(provider, "auth.refresh", json!({}))?;
+        self.store_returned_credentials(provider, &mut result)?;
         Ok(result)
     }
     pub fn logout(&self, provider: &ProviderId) -> Result<(), CoreError> {
+        let _operation = self
+            .inner
+            .auth_operations
+            .lock()
+            .expect("auth operation mutex must not be poisoned");
         self.provider_request(provider, "auth.logout", json!({}))?;
         self.inner.credential_store.remove(provider)?;
         self.emit(CoreEvent::AuthenticationChanged {
@@ -313,6 +334,11 @@ impl MisyCore {
         Ok(models)
     }
     pub fn select_model(&self, model: ModelRef) -> Result<(), CoreError> {
+        let _operation = self
+            .inner
+            .model_operations
+            .lock()
+            .expect("model operation mutex must not be poisoned");
         if !self
             .list_models(&model.provider)?
             .iter()
@@ -417,12 +443,13 @@ impl MisyCore {
     fn store_returned_credentials(
         &self,
         provider: &ProviderId,
-        response: &Value,
+        response: &mut Value,
     ) -> Result<(), CoreError> {
-        if let Some(credentials) = response.get("credentials") {
-            self.inner
-                .credential_store
-                .save(provider, credentials.clone())?;
+        if let Some(credentials) = response.get("credentials").cloned() {
+            self.inner.credential_store.save(provider, credentials)?;
+            if let Some(object) = response.as_object_mut() {
+                object.remove("credentials");
+            }
         }
         Ok(())
     }

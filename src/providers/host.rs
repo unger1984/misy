@@ -44,7 +44,7 @@ impl PendingProviderRequest {
 pub struct ProviderHost {
     catalog: ProviderCatalog,
     lifecycle: Mutex<LifecycleState>,
-    subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
+    subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
     next_request_id: AtomicU64,
 }
 
@@ -70,7 +70,17 @@ impl ProviderHost {
         self.subscribers
             .lock()
             .expect("provider subscribers mutex must not be poisoned")
-            .push(sender);
+            .push(ProviderSubscriber::Lossy(sender));
+        receiver
+    }
+
+    /// Subscribes a request-correlated consumer without dropping stream events.
+    pub fn subscribe_lossless(&self) -> Receiver<ProviderEvent> {
+        let (sender, receiver) = mpsc::channel();
+        self.subscribers
+            .lock()
+            .expect("provider subscribers mutex must not be poisoned")
+            .push(ProviderSubscriber::Lossless(sender));
         receiver
     }
 
@@ -254,7 +264,7 @@ impl ProviderProcess {
     fn start(
         provider: ProviderId,
         package: &ProviderPackage,
-        subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
+        subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
     ) -> Result<Self, ProviderError> {
         let mut command = Command::new(&package.manifest().command);
         command
@@ -415,7 +425,7 @@ fn reader_loop(
     provider: ProviderId,
     stdout: impl std::io::Read,
     state: ReaderState,
-    subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
+    subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
 ) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
@@ -456,7 +466,7 @@ fn route_message(
     provider: &ProviderId,
     message: Value,
     state: &TransportStateLock,
-    subscribers: &Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
+    subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>,
 ) -> Result<(), PendingFailure> {
     let object = message
         .as_object()
@@ -526,13 +536,22 @@ fn parse_remote_error(value: &Value) -> Result<PendingFailure, PendingFailure> {
 
 /// Subscriber delivery is bounded and non-blocking. Full queues drop the new event;
 /// disconnected subscribers are removed.
-fn broadcast(subscribers: &Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>, event: ProviderEvent) {
+#[derive(Debug)]
+enum ProviderSubscriber {
+    Lossy(SyncSender<ProviderEvent>),
+    Lossless(Sender<ProviderEvent>),
+}
+
+fn broadcast(subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>, event: ProviderEvent) {
     subscribers
         .lock()
         .expect("provider subscribers mutex must not be poisoned")
-        .retain(|sender| match sender.try_send(event.clone()) {
-            Ok(()) | Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
+        .retain(|subscriber| match subscriber {
+            ProviderSubscriber::Lossy(sender) => match sender.try_send(event.clone()) {
+                Ok(()) | Err(TrySendError::Full(_)) => true,
+                Err(TrySendError::Disconnected(_)) => false,
+            },
+            ProviderSubscriber::Lossless(sender) => sender.send(event.clone()).is_ok(),
         });
 }
 

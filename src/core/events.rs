@@ -20,7 +20,7 @@ impl MisyCore {
                     .get(event.provider.as_str())
                     .cloned()
                 {
-                    let _ = sender.try_send(event);
+                    let _ = sender.send(event);
                 }
             }
         });

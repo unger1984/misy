@@ -6,17 +6,6 @@ Project documentation: [docs/README.md](docs/README.md).
 
 Misy is a fast, minimal agent harness written in Rust. It is designed around a terminal user interface, with planned support for MCP, explicit permissions, and TypeScript plugins powered by Bun.
 
-## Configuration directory
-
-Misy stores its configuration, credentials, and user-installed provider packages under `~/.misy`
-by default. Select a different directory for one invocation with either command-line form:
-
-```console
-misy -c /path/to/profile
-misy --config=/path/to/profile
-misy --config="/path with spaces/profile"
-```
-
 ## Motivation
 
 I got tired of fighting with multi-provider agent tools like OpenCode and OMP, so I decided to build my own.

@@ -8,12 +8,14 @@
 - The Rust core owns orchestration, credentials, sessions, tools, cancellation, and events. Frontends must remain clients of the core.
 - Provider plugins are standalone, language-independent subprocess packages. They translate remote protocols and never execute local tools or own Misy credential files.
 - Keep external contracts capability-scoped and versioned.
+- Follow [Code Style](docs/code-style.md): size limits, module boundaries, `why`-not-`what` comments, documented public APIs. It is binding for every language in the tree.
 
 ## Documentation Routing
 
 - Read [Architecture](docs/architecture.md) before changing core boundaries, ownership, lifecycle, sessions, tools, or frontend separation.
 - Read [Provider Plugins](docs/provider-plugins.md) before changing manifests, discovery, provider processes, JSON-RPC, authentication, models, or streaming.
 - Read [TUI Client](docs/tui-client.md) before changing commands, composer behavior, pickers, rendering, keyboard input, or browser handoff.
+- Read [Code Style](docs/code-style.md) before writing or reviewing any code, then the document for the language you are touching: [Rust](docs/code-style-rust.md) or [TypeScript](docs/code-style-typescript.md).
 - Read [Development and Testing](docs/development-and-testing.md) before implementation, verification, or test-structure changes.
 - Read [Decisions and References](docs/decisions-and-references.md) before making a new architecture or UX choice. Inspect both local references before inventing a new solution.
 - Start at [Documentation Index](docs/README.md) when the task spans multiple areas.

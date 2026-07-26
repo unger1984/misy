@@ -15,6 +15,9 @@ This directory holds stable project knowledge for maintainers and future agents.
 - [Architecture](architecture.md) — core boundaries, ownership, lifecycle, and data flow.
 - [Provider Plugins](provider-plugins.md) — package layout, discovery, process protocol, and provider responsibilities.
 - [TUI Client](tui-client.md) — client boundaries, interaction model, and keyboard behavior.
+- [Code Style](code-style.md) — rules common to every language: size limits, module boundaries, comments, documentation, enforcement.
+  - [Rust Code Style](code-style-rust.md) — formatting, naming, rustdoc, errors, concurrency, Clippy lints.
+  - [TypeScript Code Style](code-style-typescript.md) — compiler flags, Biome, boundary validation, async and cancellation.
 - [Development and Testing](development-and-testing.md) — workflow and verification commands.
 - [Decisions and References](decisions-and-references.md) — fixed decisions, deferred scope, and use of Codex/Oh My Pi references.
 

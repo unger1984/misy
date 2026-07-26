@@ -5,6 +5,7 @@ pub mod core;
 pub mod domain;
 pub mod providers;
 pub mod tools;
+pub mod tui;
 
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, CredentialStore, MisyPaths};
 pub use core::{CoreError, CoreEvent, HistoryEntry, MisyCore, SubmissionId};

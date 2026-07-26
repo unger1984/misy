@@ -36,5 +36,11 @@ impl MisyCore {
             Ok(()) | Err(TrySendError::Full(_)) => true,
             Err(TrySendError::Disconnected(_)) => false,
         });
+        let mut lossless_subscribers = self
+            .inner
+            .lossless_subscribers
+            .lock()
+            .expect("lossless core subscribers mutex must not be poisoned");
+        lossless_subscribers.retain(|sender| sender.send(event.clone()).is_ok());
     }
 }

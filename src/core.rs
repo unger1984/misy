@@ -199,6 +199,7 @@ struct CoreInner {
     history: Mutex<Vec<HistoryEntry>>,
     dispatcher: ToolDispatcher,
     subscribers: Mutex<Vec<SyncSender<CoreEvent>>>,
+    lossless_subscribers: Mutex<Vec<Sender<CoreEvent>>>,
     routes: Mutex<BTreeMap<String, Sender<crate::ProviderEvent>>>,
     provider_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
@@ -239,6 +240,7 @@ impl MisyCore {
             history: Mutex::new(Vec::new()),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
             subscribers: Mutex::new(Vec::new()),
+            lossless_subscribers: Mutex::new(Vec::new()),
             routes: Mutex::new(BTreeMap::new()),
             provider_gates: Mutex::new(BTreeMap::new()),
             active: Mutex::new(BTreeMap::new()),
@@ -295,6 +297,23 @@ impl MisyCore {
             .subscribers
             .lock()
             .expect("core subscribers mutex must not be poisoned")
+            .push(sender);
+        receiver
+    }
+
+    /// Subscribes to every core event in order. Interactive clients use this to
+    /// retain terminal lifecycle events while a provider emits a large stream.
+    pub fn subscribe_lossless(&self) -> Receiver<CoreEvent> {
+        let (sender, receiver) = mpsc::channel();
+        for package in self.inner.catalog.packages() {
+            let _ = sender.send(CoreEvent::ProviderDiscovered {
+                provider: package.manifest().id.clone(),
+            });
+        }
+        self.inner
+            .lossless_subscribers
+            .lock()
+            .expect("lossless core subscribers mutex must not be poisoned")
             .push(sender);
         receiver
     }

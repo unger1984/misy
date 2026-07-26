@@ -32,6 +32,7 @@ while IFS= read -r line; do
         *'"content":"unknown-tool"'*) printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_id":%s,"id":"unknown-1","name":"not_registered","arguments":{}}}\n' "$id"; complete; reply '{}' ;;
         *'"content":"provider-failure"'*) printf '{"jsonrpc":"2.0","method":"failed","params":{"request_id":%s,"message":"fixture failure"}}\n' "$id"; reply '{}' ;;
         *'"content":"burst"'*) count=0; while [ "$count" -lt 4096 ]; do text x; count=$((count+1)); done; complete; reply '{}' ;;
+        *'"content":"continuous-stream"'*) while :; do text x; done ;;
         *'"content":"session-one"'*) text one; complete; reply '{}' ;;
         *'"content":"session-two"'*) text two; complete; reply '{}' ;;
         *'"content":"block-session"'*) sleep 1; complete; reply '{}' ;;

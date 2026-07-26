@@ -35,24 +35,47 @@ pub trait BrowserHandoff {
 #[derive(Default)]
 pub struct SystemBrowser;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserPlatform {
+    MacOs,
+    Windows,
+    Unix,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+pub fn browser_command(platform: BrowserPlatform, url: &str) -> Result<BrowserCommand, String> {
+    validate_authorization_url(url)?;
+    let (program, arguments): (&str, &[&str]) = match platform {
+        BrowserPlatform::MacOs => ("open", &[url]),
+        BrowserPlatform::Windows => ("rundll32", &["url.dll,FileProtocolHandler", url]),
+        BrowserPlatform::Unix => ("xdg-open", &[url]),
+    };
+    Ok(BrowserCommand {
+        program: program.to_owned(),
+        args: arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect(),
+    })
+}
+
 impl BrowserHandoff for SystemBrowser {
     fn open(&mut self, url: &str) -> Result<(), String> {
-        validate_authorization_url(url)?;
         #[cfg(target_os = "macos")]
-        let mut command = Command::new("open");
+        let platform = BrowserPlatform::MacOs;
         #[cfg(target_os = "windows")]
-        let mut command = {
-            let mut command = Command::new("rundll32");
-            command.arg("url.dll,FileProtocolHandler");
-            command
-        };
+        let platform = BrowserPlatform::Windows;
         #[cfg(all(unix, not(target_os = "macos")))]
-        let mut command = Command::new("xdg-open");
+        let platform = BrowserPlatform::Unix;
+        let specification = browser_command(platform, url)?;
 
-        #[cfg(not(target_os = "windows"))]
-        command.arg(url);
-
-        command
+        Command::new(specification.program)
+            .args(specification.args)
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("could not open authorization URL: {error}"))
@@ -433,16 +456,18 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     /// Drains received core events without blocking the terminal event loop.
     pub fn pump_events(&mut self) -> usize {
+        const MAX_EVENTS_PER_TICK: usize = 256;
         let mut received = 0;
-        loop {
+        while received < MAX_EVENTS_PER_TICK {
             match self.events.try_recv() {
                 Ok(event) => {
                     received += 1;
                     self.state.apply_core_event(event);
                 }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return received,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        received
     }
 
     /// Ctrl+C always attempts cancellation and shutdown before requesting terminal exit.
@@ -464,14 +489,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::Noop => Ok(TuiControl::Continue),
             UiAction::ShowProviders => {
                 for provider in self.core.providers() {
-                    let authenticated = self
-                        .core
-                        .auth_status(&provider.id)
-                        .map_err(TuiError::from)?
-                        .get("authenticated")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    self.state.add_provider(provider.id, authenticated);
+                    self.core.auth_status(&provider.id)?;
                 }
                 Ok(TuiControl::Continue)
             }
@@ -492,19 +510,16 @@ impl<B: BrowserHandoff> TuiClient<B> {
             }
             UiAction::CompleteAuth(provider, completion) => {
                 self.core.complete_auth(&provider, completion)?;
-                self.state.add_provider(provider, true);
                 Ok(TuiControl::Continue)
             }
             UiAction::ShowModels => {
                 for provider in self.core.providers() {
-                    let models = self.core.list_models(&provider.id)?;
-                    self.state.add_models(models);
+                    self.core.list_models(&provider.id)?;
                 }
                 Ok(TuiControl::Continue)
             }
             UiAction::SelectModel(model) => {
-                self.core.select_model(model.clone())?;
-                self.state.set_selected_model(model);
+                self.core.select_model(model)?;
                 Ok(TuiControl::Continue)
             }
             UiAction::SubmitPrompt(prompt) => {
@@ -570,6 +585,7 @@ pub fn run(core: MisyCore) -> Result<(), io::Error> {
 
 /// Renders the unboxed transcript, one separator, and one-line input.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
+    const WORDMARK: &str = "███   ███  █████  █████  █   █\n████ ████    █    █       █ █\n██ ███ ██    █     ███     █\n██  █  ██    █        █    █\n██     ██  █████  █████    █\n                 MISY";
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -578,14 +594,30 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
             Constraint::Length(1),
         ])
         .split(frame.area());
+    let provider = state
+        .selected_model
+        .as_ref()
+        .map(|model| model.provider.as_str())
+        .or_else(|| state.provider_auth.keys().next().map(String::as_str))
+        .unwrap_or("none");
+    let model = state
+        .selected_model
+        .as_ref()
+        .map(|model| model.model.as_str())
+        .unwrap_or("none");
     let transcript = state
         .transcript
         .iter()
         .map(TranscriptRow::display)
         .collect::<Vec<_>>()
         .join("\n");
+    let content = if transcript.is_empty() {
+        format!("{WORDMARK}\nagent: misy | provider: {provider} | model: {model}")
+    } else {
+        format!("{WORDMARK}\nagent: misy | provider: {provider} | model: {model}\n\n{transcript}")
+    };
     frame.render_widget(
-        Paragraph::new(transcript)
+        Paragraph::new(content)
             .wrap(Wrap { trim: false })
             .scroll((u16::try_from(state.scroll_offset).unwrap_or(u16::MAX), 0)),
         areas[0],

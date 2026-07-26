@@ -20,6 +20,7 @@ use std::{
 
 mod agent;
 mod events;
+use events::LosslessSubscribers;
 
 /// A stable handle for one asynchronous agent submission.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -199,7 +200,7 @@ struct CoreInner {
     history: Mutex<Vec<HistoryEntry>>,
     dispatcher: ToolDispatcher,
     subscribers: Mutex<Vec<SyncSender<CoreEvent>>>,
-    lossless_subscribers: Mutex<Vec<Sender<CoreEvent>>>,
+    lossless_subscribers: LosslessSubscribers,
     routes: Mutex<BTreeMap<String, Sender<crate::ProviderEvent>>>,
     provider_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
@@ -240,7 +241,7 @@ impl MisyCore {
             history: Mutex::new(Vec::new()),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
             subscribers: Mutex::new(Vec::new()),
-            lossless_subscribers: Mutex::new(Vec::new()),
+            lossless_subscribers: LosslessSubscribers::default(),
             routes: Mutex::new(BTreeMap::new()),
             provider_gates: Mutex::new(BTreeMap::new()),
             active: Mutex::new(BTreeMap::new()),
@@ -304,18 +305,16 @@ impl MisyCore {
     /// Subscribes to every core event in order. Interactive clients use this to
     /// retain terminal lifecycle events while a provider emits a large stream.
     pub fn subscribe_lossless(&self) -> Receiver<CoreEvent> {
-        let (sender, receiver) = mpsc::channel();
-        for package in self.inner.catalog.packages() {
-            let _ = sender.send(CoreEvent::ProviderDiscovered {
-                provider: package.manifest().id.clone(),
-            });
-        }
         self.inner
             .lossless_subscribers
-            .lock()
-            .expect("lossless core subscribers mutex must not be poisoned")
-            .push(sender);
-        receiver
+            .subscribe(
+                self.inner
+                    .catalog
+                    .packages()
+                    .map(|package| CoreEvent::ProviderDiscovered {
+                        provider: package.manifest().id.clone(),
+                    }),
+            )
     }
 
     pub fn auth_status(&self, provider: &ProviderId) -> Result<Value, CoreError> {

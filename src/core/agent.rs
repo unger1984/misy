@@ -1,5 +1,8 @@
 use super::{ActiveSubmission, CoreEvent, HistoryEntry, MisyCore, SubmissionId};
-use crate::{Message, MessageRole, ModelRef, ProviderEvent, ProviderId, ToolCall, ToolRegistry};
+use crate::{
+    Message, MessageRole, ModelRef, PendingProviderRequest, ProviderError, ProviderEvent,
+    ProviderId, ToolCall, ToolRegistry,
+};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -8,7 +11,7 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_MODEL_TURNS: usize = 64;
@@ -19,13 +22,62 @@ struct ModelTurn {
     metadata: Value,
 }
 
+struct TurnStream {
+    text: String,
+    tool_calls: Vec<ToolCall>,
+    stream_metadata: Vec<Value>,
+    response_metadata: Value,
+    response_received: bool,
+    completed: bool,
+}
+
+impl TurnStream {
+    fn record_response(&mut self, response: Result<Value, ProviderError>) -> Result<(), String> {
+        let value = response.map_err(|error| error.to_string())?;
+        if let Some(metadata) = value.get("metadata") {
+            self.response_metadata = metadata.clone();
+        }
+        self.response_received = true;
+        Ok(())
+    }
+
+    fn record_metadata(&mut self, metadata: Option<Value>) {
+        if let Some(metadata) = metadata.filter(|value| !value.is_null()) {
+            self.stream_metadata.push(metadata);
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.response_received && self.completed
+    }
+
+    fn into_model_turn(self) -> ModelTurn {
+        ModelTurn {
+            text: self.text,
+            tool_calls: self.tool_calls,
+            metadata: json!({
+                "stream": self.stream_metadata,
+                "response": self.response_metadata,
+            }),
+        }
+    }
+}
+
+fn response_receiver(pending: PendingProviderRequest) -> Receiver<Result<Value, ProviderError>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(pending.wait());
+    });
+    receiver
+}
+
 impl MisyCore {
     pub(super) fn run_submission(
         &self,
         id: SubmissionId,
-        model: ModelRef,
+        model: &ModelRef,
         message: Message,
-        active: Arc<ActiveSubmission>,
+        active: &ActiveSubmission,
     ) {
         let _session = self
             .inner
@@ -38,10 +90,10 @@ impl MisyCore {
                 .lock()
                 .expect("active submissions mutex must not be poisoned")
                 .remove(&id.get());
-            self.emit(CoreEvent::Cancelled { submission: id });
+            self.emit(&CoreEvent::Cancelled { submission: id });
             return;
         }
-        self.emit(CoreEvent::SubmissionStarted {
+        self.emit(&CoreEvent::SubmissionStarted {
             submission: id,
             model: model.clone(),
         });
@@ -56,7 +108,7 @@ impl MisyCore {
                 if active.cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".to_owned());
                 }
-                let turn = self.run_model_turn(id, &model, &active)?;
+                let turn = self.run_model_turn(id, model, active)?;
                 if active.cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".to_owned());
                 }
@@ -77,7 +129,7 @@ impl MisyCore {
                             return crate::ToolResult::error(&call.id, "tool dispatch cancelled");
                         }
                         let result = self.inner.dispatcher.dispatch(call);
-                        self.emit(CoreEvent::ToolResult {
+                        self.emit(&CoreEvent::ToolResult {
                             submission: id,
                             result: result.clone(),
                         });
@@ -99,11 +151,11 @@ impl MisyCore {
             .expect("active submissions mutex must not be poisoned")
             .remove(&id.get());
         match outcome {
-            Ok(()) => self.emit(CoreEvent::Completed { submission: id }),
+            Ok(()) => self.emit(&CoreEvent::Completed { submission: id }),
             Err(message) if message == "cancelled" || active.cancelled.load(Ordering::Acquire) => {
-                self.emit(CoreEvent::Cancelled { submission: id })
+                self.emit(&CoreEvent::Cancelled { submission: id })
             }
-            Err(message) => self.emit(CoreEvent::Failed {
+            Err(message) => self.emit(&CoreEvent::Failed {
                 submission: id,
                 message,
             }),
@@ -120,6 +172,7 @@ impl MisyCore {
         let _guard = provider_gate
             .lock()
             .expect("provider gate mutex must not be poisoned");
+        self.refresh_expiring_credentials(&model.provider)?;
         let (sender, receiver) = mpsc::channel();
         self.inner
             .routes
@@ -135,6 +188,30 @@ impl MisyCore {
         result
     }
 
+    fn refresh_expiring_credentials(&self, provider: &ProviderId) -> Result<(), String> {
+        let credentials = self
+            .inner
+            .credential_store
+            .load(provider)
+            .map_err(|error| error.to_string())?;
+        let Some(expires_at) = credentials
+            .as_ref()
+            .and_then(|value| value.get("expires_at"))
+            .and_then(Value::as_u64)
+        else {
+            return Ok(());
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis();
+        if u128::from(expires_at) <= now.saturating_add(60_000) {
+            self.refresh_auth(provider)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn start_and_collect_turn(
         &self,
         submission: SubmissionId,
@@ -142,9 +219,33 @@ impl MisyCore {
         active: &ActiveSubmission,
         events: &Receiver<ProviderEvent>,
     ) -> Result<ModelTurn, String> {
+        let params = self.chat_params(model)?;
+        let pending = self
+            .inner
+            .host
+            .request_async(&model.provider, "chat.start", params)
+            .map_err(|error| error.to_string())?;
+        let request_id = pending.id().get();
+        *active
+            .request
+            .lock()
+            .expect("active request mutex must not be poisoned") =
+            Some((model.provider.clone(), pending.id()));
+        let replies = response_receiver(pending);
+        let stream = self.collect_stream(submission, request_id, active, events, &replies)?;
+        *active
+            .request
+            .lock()
+            .expect("active request mutex must not be poisoned") = None;
+        Ok(stream.into_model_turn())
+    }
+
+    fn chat_params(&self, model: &ModelRef) -> Result<Value, String> {
         let mut params = json!({
-            "provider_id": model.provider.as_str(), "model_id": model.model.as_str(),
-            "messages": self.serialized_history(), "tools": ToolRegistry::new().definitions(),
+            "provider_id": model.provider.as_str(),
+            "model_id": model.model.as_str(),
+            "messages": self.serialized_history(),
+            "tools": ToolRegistry::new().definitions(),
         });
         if let Some(credentials) = self
             .inner
@@ -154,135 +255,135 @@ impl MisyCore {
         {
             params["credentials"] = credentials;
         }
-        let pending = self
-            .inner
-            .host
-            .request_async(&model.provider, "chat.start", params)
-            .map_err(|error| error.to_string())?;
-        *active
-            .request
-            .lock()
-            .expect("active request mutex must not be poisoned") =
-            Some((model.provider.clone(), pending.id()));
-        let request_id = pending.id().get();
-        let (reply_sender, reply_receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = reply_sender.send(pending.wait());
-        });
-        let (mut response_received, mut completed) = (false, false);
-        let (mut text, mut tool_calls, mut stream_metadata, mut response_metadata) =
-            (String::new(), Vec::new(), Vec::new(), Value::Null);
+        Ok(params)
+    }
+
+    fn collect_stream(
+        &self,
+        submission: SubmissionId,
+        request_id: u64,
+        active: &ActiveSubmission,
+        events: &Receiver<ProviderEvent>,
+        replies: &Receiver<Result<Value, ProviderError>>,
+    ) -> Result<TurnStream, String> {
+        let mut stream = TurnStream {
+            text: String::new(),
+            tool_calls: Vec::new(),
+            stream_metadata: Vec::new(),
+            response_metadata: Value::Null,
+            response_received: false,
+            completed: false,
+        };
         loop {
-            if active.cancelled.load(Ordering::Acquire) {
-                if let Some((provider, request)) = active
-                    .request
-                    .lock()
-                    .expect("active request mutex must not be poisoned")
-                    .clone()
-                {
-                    let _ = self.inner.host.cancel_request(&provider, request);
-                }
-                return Err("cancelled".to_owned());
-            }
-            if let Ok(result) = reply_receiver.try_recv() {
-                let value = result.map_err(|error| error.to_string())?;
-                if let Some(metadata) = value.get("metadata") {
-                    response_metadata = metadata.clone();
-                }
-                response_received = true;
-                if completed {
-                    break;
+            self.cancel_if_requested(active)?;
+            if let Ok(result) = replies.try_recv() {
+                stream.record_response(result)?;
+                if stream.is_complete() {
+                    return Ok(stream);
                 }
             }
             match events.recv_timeout(Duration::from_millis(20)) {
                 Ok(event) => {
-                    let Some(event_request_id) =
-                        event.params.get("request_id").and_then(Value::as_u64)
-                    else {
-                        return Err(
-                            "provider stream event is missing numeric request_id".to_owned()
-                        );
-                    };
-                    if event_request_id != request_id {
-                        continue;
-                    }
-                    match event.method.as_str() {
-                        "text_delta" => {
-                            let delta = event
-                                .params
-                                .get("delta")
-                                .and_then(Value::as_str)
-                                .ok_or_else(|| {
-                                    "provider text_delta is missing string delta".to_owned()
-                                })?
-                                .to_owned();
-                            let metadata =
-                                event.params.get("metadata").cloned().unwrap_or(Value::Null);
-                            if !metadata.is_null() {
-                                stream_metadata.push(metadata.clone());
-                            }
-                            text.push_str(&delta);
-                            self.emit(CoreEvent::TextDelta {
-                                submission,
-                                delta,
-                                provider_metadata: metadata,
-                            });
-                        }
-                        "tool_call" => {
-                            let metadata =
-                                event.params.get("metadata").cloned().unwrap_or(Value::Null);
-                            if !metadata.is_null() {
-                                stream_metadata.push(metadata.clone());
-                            }
-                            let call: ToolCall = serde_json::from_value(event.params)
-                                .map_err(|error| format!("invalid provider tool_call: {error}"))?;
-                            self.emit(CoreEvent::ToolCall {
-                                submission,
-                                call: call.clone(),
-                                provider_metadata: metadata,
-                            });
-                            tool_calls.push(call);
-                        }
-                        "completed" => {
-                            completed = true;
-                            if let Some(metadata) = event.params.get("metadata") {
-                                stream_metadata.push(metadata.clone());
-                            }
-                            if response_received {
-                                break;
-                            }
-                        }
-                        "failed" => {
-                            return Err(event
-                                .params
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("provider stream failed")
-                                .to_owned());
-                        }
-                        _ => {
-                            return Err(format!(
-                                "unknown provider stream event `{}`",
-                                event.method
-                            ));
-                        }
-                    }
+                    self.consume_stream_event(event, request_id, submission, &mut stream)?
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err("provider event router disconnected".to_owned());
                 }
             }
+            if stream.is_complete() {
+                return Ok(stream);
+            }
         }
-        *active
+    }
+
+    fn cancel_if_requested(&self, active: &ActiveSubmission) -> Result<(), String> {
+        if !active.cancelled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if let Some((provider, request)) = active
             .request
             .lock()
-            .expect("active request mutex must not be poisoned") = None;
-        Ok(ModelTurn {
-            text,
-            tool_calls,
-            metadata: json!({ "stream": stream_metadata, "response": response_metadata }),
-        })
+            .expect("active request mutex must not be poisoned")
+            .clone()
+        {
+            let _ = self.inner.host.cancel_request(&provider, request);
+        }
+        Err("cancelled".to_owned())
+    }
+
+    fn consume_stream_event(
+        &self,
+        event: ProviderEvent,
+        request_id: u64,
+        submission: SubmissionId,
+        stream: &mut TurnStream,
+    ) -> Result<(), String> {
+        let event_request_id = event
+            .params
+            .get("request_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "provider stream event is missing numeric request_id".to_owned())?;
+        if event_request_id != request_id {
+            return Ok(());
+        }
+        match event.method.as_str() {
+            "text_delta" => self.append_text(&event.params, submission, stream),
+            "tool_call" => self.append_tool_call(event.params, submission, stream),
+            "completed" => {
+                stream.completed = true;
+                stream.record_metadata(event.params.get("metadata").cloned());
+                Ok(())
+            }
+            "failed" => Err(event
+                .params
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider stream failed")
+                .to_owned()),
+            _ => Err(format!("unknown provider stream event `{}`", event.method)),
+        }
+    }
+
+    fn append_text(
+        &self,
+        params: &Value,
+        submission: SubmissionId,
+        stream: &mut TurnStream,
+    ) -> Result<(), String> {
+        let delta = params
+            .get("delta")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "provider text_delta is missing string delta".to_owned())?
+            .to_owned();
+        let metadata = params.get("metadata").cloned().unwrap_or(Value::Null);
+        stream.record_metadata(Some(metadata.clone()));
+        stream.text.push_str(&delta);
+        self.emit(&CoreEvent::TextDelta {
+            submission,
+            delta,
+            provider_metadata: metadata,
+        });
+        Ok(())
+    }
+
+    fn append_tool_call(
+        &self,
+        params: Value,
+        submission: SubmissionId,
+        stream: &mut TurnStream,
+    ) -> Result<(), String> {
+        let metadata = params.get("metadata").cloned().unwrap_or(Value::Null);
+        stream.record_metadata(Some(metadata.clone()));
+        let call: ToolCall = serde_json::from_value(params)
+            .map_err(|error| format!("invalid provider tool_call: {error}"))?;
+        self.emit(&CoreEvent::ToolCall {
+            submission,
+            call: call.clone(),
+            provider_metadata: metadata,
+        });
+        stream.tool_calls.push(call);
+        Ok(())
     }
 
     fn provider_gate(&self, provider: &ProviderId) -> Arc<Mutex<()>> {
@@ -299,11 +400,13 @@ impl MisyCore {
     }
 
     fn serialized_history(&self) -> Vec<Value> {
-        self.inner.history.lock().expect("history mutex must not be poisoned").iter().map(|entry| json!({
-            "role": match entry.message.role { MessageRole::System => "system", MessageRole::User => "user", MessageRole::Assistant => "assistant", MessageRole::Tool => "tool" },
-            "content": entry.message.content, "tool_calls": entry.tool_calls,
-            "tool_results": entry.tool_results, "provider_metadata": entry.provider_metadata,
-        })).collect()
+        self.inner
+            .history
+            .lock()
+            .expect("history mutex must not be poisoned")
+            .iter()
+            .map(serialize_history_entry)
+            .collect()
     }
 
     fn push_history(&self, entry: HistoryEntry) {
@@ -313,4 +416,20 @@ impl MisyCore {
             .expect("history mutex must not be poisoned")
             .push(entry);
     }
+}
+
+fn serialize_history_entry(entry: &HistoryEntry) -> Value {
+    let role = match entry.message.role {
+        MessageRole::System => "system",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "tool",
+    };
+    json!({
+        "role": role,
+        "content": entry.message.content,
+        "tool_calls": entry.tool_calls,
+        "tool_results": entry.tool_results,
+        "provider_metadata": entry.provider_metadata,
+    })
 }

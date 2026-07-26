@@ -1,0 +1,161 @@
+/** OpenAI Responses request construction and SSE normalization. */
+import { supportsReasoning } from "./model-catalog";
+import type { Json, Notify, ToolDefinition } from "./types";
+
+/** Builds the complete Responses body required by the subscription backend. */
+export function createResponsesRequest(
+	model: string,
+	messages: readonly Record<string, unknown>[],
+	tools: readonly ToolDefinition[],
+): Record<string, Json> {
+	const instructions = messages
+		.filter((message) => message["role"] === "system")
+		.map((message) => (typeof message["content"] === "string" ? message["content"] : ""))
+		.join("\n\n");
+	const input = responseInput(messages);
+	return {
+		model,
+		instructions,
+		stream: true,
+		store: false,
+		tool_choice: "auto",
+		parallel_tool_calls: true,
+		include: ["reasoning.encrypted_content"],
+		...reasoningOptions(model),
+		text: { verbosity: "medium" },
+		input,
+		tools: tools.map((tool) => ({
+			type: "function",
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.input_schema,
+		})),
+	};
+}
+
+function reasoningOptions(model: string): Record<string, Json> {
+	if (!supportsReasoning(model)) return {};
+	return {
+		reasoning: { effort: "medium", summary: "auto" },
+		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
+	};
+}
+
+/** Converts Responses SSE events to Misy notifications. */
+export async function notifyResponseEvents(
+	stream: ReadableStream<Uint8Array>,
+	requestId: number,
+	notify: Notify,
+): Promise<Json> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let pending = "";
+	let metadata: Json = { completed: false };
+	try {
+		while (true) {
+			const read = await reader.read();
+			pending += decoder.decode(read.value, { stream: !read.done });
+			const parts = pending.split(/\r?\n\r?\n/);
+			pending = parts.pop() ?? "";
+			for (const part of parts) {
+				const event = part.match(/^event:\s*(.+)$/m)?.[1] ?? "message";
+				const raw = part.match(/^data:\s*(.+)$/m)?.[1] ?? "{}";
+				const value: unknown = JSON.parse(raw);
+				const data = record(value);
+				if (event === "response.output_text.delta" && typeof data["delta"] === "string")
+					notify("text_delta", { request_id: requestId, delta: data["delta"] });
+				if (event === "response.output_item.done") notifyToolCall(data, requestId, notify);
+				if (event === "response.completed") {
+					metadata = data;
+					notify("completed", { request_id: requestId, metadata });
+				}
+				if (event === "response.failed" || event === "error")
+					throw new Error(
+						typeof data["message"] === "string"
+							? data["message"]
+							: "OpenAI Responses stream failed",
+					);
+			}
+			if (read.done) break;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return metadata;
+}
+function record(value: unknown): Record<string, Json> {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, Json>)
+		: {};
+}
+function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
+	const input: Json[] = [];
+	for (const message of messages) {
+		if (message["role"] === "system") continue;
+		input.push(...reasoningInputs(message["provider_metadata"]));
+		if (message["role"] === "assistant" && Array.isArray(message["tool_calls"]))
+			for (const call of message["tool_calls"]) {
+				const value = record(call);
+				input.push({
+					type: "function_call",
+					call_id: typeof value["id"] === "string" ? value["id"] : "",
+					name: typeof value["name"] === "string" ? value["name"] : "",
+					arguments: JSON.stringify(value["arguments"] ?? {}),
+				});
+			}
+		if (message["role"] === "tool" && Array.isArray(message["tool_results"])) {
+			for (const result of message["tool_results"]) {
+				const value = record(result);
+				input.push({
+					type: "function_call_output",
+					call_id: typeof value["tool_call_id"] === "string" ? value["tool_call_id"] : "",
+					output: typeof value["content"] === "string" ? value["content"] : "",
+				});
+			}
+			continue;
+		}
+		input.push({
+			role: typeof message["role"] === "string" ? message["role"] : "user",
+			content: typeof message["content"] === "string" ? message["content"] : "",
+		});
+	}
+	return input;
+}
+
+function reasoningInputs(metadata: unknown): Json[] {
+	const inputs: Json[] = [];
+	const seen = new Set<string>();
+	collectReasoningInputs(metadata, inputs, seen);
+	return inputs;
+}
+
+function collectReasoningInputs(value: unknown, inputs: Json[], seen: Set<string>): void {
+	if (Array.isArray(value)) {
+		for (const item of value) collectReasoningInputs(item, inputs, seen);
+		return;
+	}
+	if (value === null || typeof value !== "object") return;
+	const item = record(value);
+	const encrypted = item["encrypted_content"];
+	if (item["type"] === "reasoning" && typeof encrypted === "string" && !seen.has(encrypted)) {
+		seen.add(encrypted);
+		inputs.push({ type: "reasoning", encrypted_content: encrypted });
+	}
+	for (const nested of Object.values(item)) collectReasoningInputs(nested, inputs, seen);
+}
+function notifyToolCall(data: Record<string, Json>, requestId: number, notify: Notify): void {
+	const item = record(data["item"]);
+	if (item["type"] !== "function_call" || typeof item["name"] !== "string") return;
+	const id = typeof item["call_id"] === "string" ? item["call_id"] : item["id"];
+	if (typeof id !== "string") return;
+	const raw = item["arguments"];
+	let argumentsValue: Json = raw ?? {};
+	if (typeof raw === "string") {
+		try {
+			argumentsValue = JSON.parse(raw) as Json;
+		} catch {
+			argumentsValue = { raw };
+		}
+	}
+	notify("tool_call", { request_id: requestId, id, name: item["name"], arguments: argumentsValue });
+}

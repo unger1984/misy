@@ -25,7 +25,7 @@ Read this document before implementation, verification, or changes to the test s
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test
-cd plugins/providers/codex-subscription
+cd plugins/providers/openai
 bun test
 bunx tsc --noEmit
 ```
@@ -42,5 +42,5 @@ Prefer observable behavior over implementation details. Add concurrency/lifecycl
 
 - [`Cargo.toml`](../Cargo.toml)
 - [`tests/`](../tests/)
-- [`plugins/providers/codex-subscription/package.json`](../plugins/providers/codex-subscription/package.json)
+- [`plugins/providers/openai/package.json`](../plugins/providers/openai/package.json)
 - [Architecture](architecture.md)

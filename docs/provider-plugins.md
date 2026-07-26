@@ -18,11 +18,14 @@ Read this document before changing provider packages, manifests, discovery, proc
 
 Each provider is a self-contained publishable package under `plugins/providers/<provider-id>/` when bundled or the matching user plugin directory when installed. It contains `misy-plugin.json`, documentation, a license, language-native build metadata/lockfiles, source, and tests.
 
-Plugins may use any language that can run as a process and speak the protocol. Bun is the implementation choice for `codex-subscription`, not a global host dependency.
+Plugins may use any language that can run as a process and speak the protocol. Bun is the
+implementation choice for `openai`, not a global host dependency.
 
 ## Discovery and Lifecycle
 
 - Discovery reads and validates manifests without launching plugins.
+- Every manifest declares a stable `id`, a user-facing `display_name`, and one or more
+  `auth_methods` with stable IDs and user-facing names. Credentials persist the selected method ID.
 - Duplicate IDs and incompatible protocol versions are rejected.
 - A provider starts lazily when selected or used, remains alive while in use, and is terminated/reaped during failure or shutdown.
 - Provider stdout is reserved for protocol messages; diagnostics use stderr.
@@ -34,6 +37,9 @@ Transport is JSON-RPC 2.0 with one JSON object per line over stdin/stdout.
 Required methods: `auth.status`, `auth.start`, `auth.complete`, `auth.refresh`, `auth.logout`, `models.list`, `chat.start`, and `chat.cancel`.
 
 Streaming notifications are `text_delta`, `tool_call`, `completed`, and `failed`. Every stream notification carries the numeric `request_id` of its `chat.start`; cancellation carries `{ "request_id": ... }`.
+
+`models.list` returns `models` and may include a provider-local `default_model` ID. The core uses
+that declared default when it is present and falls back to the first model for older providers.
 
 ## Responsibilities
 
@@ -51,5 +57,5 @@ Protocol changes require a version decision plus updates to host, core, provider
 - [`src/providers/manifest.rs`](../src/providers/manifest.rs)
 - [`src/providers/protocol.rs`](../src/providers/protocol.rs)
 - [`src/providers/host.rs`](../src/providers/host.rs)
-- [`plugins/providers/codex-subscription/README.md`](../plugins/providers/codex-subscription/README.md)
+- [`plugins/providers/openai/README.md`](../plugins/providers/openai/README.md)
 - [Architecture](architecture.md)

@@ -1,3 +1,5 @@
+//! Headless-core integration tests.
+
 use misy::{CoreEvent, Message, MisyCore, MisyPaths, ModelId, ModelRef, ProviderId, SubmissionId};
 use serde_json::json;
 use std::{
@@ -7,6 +9,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "core/auth.rs"]
+mod auth;
+#[path = "core/limits.rs"]
+mod limits;
+#[path = "core/models.rs"]
+mod models;
+#[path = "core/snapshots.rs"]
+mod snapshots;
+#[path = "core/streaming.rs"]
+mod streaming;
+
 fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) {
     let package = root.join(id);
     fs::create_dir_all(&package).expect("package directory");
@@ -15,6 +28,7 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
         format!(
             r#"{{
   "id": "{id}",
+  "display_name": "{id} fixture",
   "version": "1.0.0",
   "kind": "provider",
   "protocol_version": 1,
@@ -24,7 +38,8 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
   "repository": "https://example.test/repository",
   "license": "MIT",
   "command": "{}",
-  "args": ["{}"]
+  "args": ["{}"],
+  "auth_methods": [{{"id": "oauth", "display_name": "Fixture OAuth"}}]
 }}"#,
             fixture.display(),
             target.display(),
@@ -137,6 +152,74 @@ fn core_persists_auth_credentials_without_exposing_them_to_callers() {
 }
 
 #[test]
+fn credential_method_is_read_locally_without_starting_a_provider() {
+    let (_temporary, core, _) = test_core("credential-method");
+    let provider = ProviderId::new("fixture");
+
+    assert_eq!(core.credential_method(&provider).expect("method"), None);
+    assert_eq!(core.running_provider_count(), 0);
+
+    core.complete_auth(&provider, json!({"code": "opaque"}))
+        .expect("authenticate");
+    core.shutdown().expect("shutdown");
+
+    assert_eq!(
+        core.credential_method(&provider).expect("method"),
+        Some("oauth".to_owned())
+    );
+}
+
+#[test]
+fn available_models_skips_unconfigured_providers_and_isolates_provider_failures() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        &fixture,
+        &temporary.path().join("models.txt"),
+    );
+    write_fixture_manifest(
+        &bundled,
+        "failed-provider",
+        &fixture,
+        &temporary.path().join("bad-models.txt"),
+    );
+    write_fixture_manifest(
+        &bundled,
+        "unconfigured-provider",
+        &fixture,
+        &temporary.path().join("unconfigured.txt"),
+    );
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core discovery");
+
+    for provider in [
+        ProviderId::new("fixture"),
+        ProviderId::new("failed-provider"),
+    ] {
+        core.complete_auth(&provider, json!({"code": "opaque"}))
+            .expect("authenticate provider");
+    }
+    let available = core.available_models().expect("available models");
+
+    assert_eq!(available.models.len(), 2);
+    assert_eq!(available.errors.len(), 1);
+    assert_eq!(available.errors[0].provider.as_str(), "failed-provider");
+    assert_eq!(
+        available.errors[0].provider_display_name,
+        "failed-provider fixture"
+    );
+    assert_eq!(core.running_provider_count(), 2);
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_passes_stored_credentials_to_streaming_chat_requests() {
     let (_temporary, core, _) = test_core("chat-credentials");
     let provider = ProviderId::new("fixture");
@@ -221,17 +304,6 @@ fn core_sanitizes_credentials_from_remote_auth_errors() {
 }
 
 #[test]
-fn subscription_replays_the_discovered_provider_snapshot() {
-    let (_temporary, core, _) = test_core("provider-snapshot");
-    let events = core.subscribe();
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)).expect("provider snapshot"),
-        CoreEvent::ProviderDiscovered { provider } if provider.as_str() == "fixture"
-    ));
-    core.shutdown().expect("shutdown");
-}
-
-#[test]
 fn subscription_snapshot_includes_more_than_the_default_event_buffer() {
     let temporary = tempfile::tempdir().expect("temporary root");
     let bundled = temporary.path().join("bundled");
@@ -258,84 +330,6 @@ fn subscription_snapshot_includes_more_than_the_default_event_buffer() {
         providers.insert(provider.as_str().to_owned());
     }
     assert_eq!(providers.len(), 129);
-    core.shutdown().expect("shutdown");
-}
-
-#[test]
-fn core_streams_a_tool_round_trip_and_keeps_provider_and_model_on_every_turn() {
-    let (_temporary, core, target) = test_core("tool-round-trip");
-    core.select_model(fixture_model()).expect("select model");
-    let events = core.subscribe();
-    let submission = core
-        .submit(Message::user("tool-round-trip"))
-        .expect("submit");
-
-    let received = receive_until(
-        &events,
-        submission,
-        |event| matches!(event, CoreEvent::Completed { submission: id } if *id == submission),
-    );
-    assert!(
-        received
-            .iter()
-            .any(|event| matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "writing"))
-    );
-    assert!(
-        received
-            .iter()
-            .any(|event| matches!(event, CoreEvent::ToolResult { result, .. } if !result.is_error))
-    );
-    let tool_results: Vec<_> = received
-        .iter()
-        .filter_map(|event| match event {
-            CoreEvent::ToolResult { result, .. } => Some(result),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        tool_results
-            .iter()
-            .map(|result| result.tool_call_id.as_str())
-            .collect::<Vec<_>>(),
-        ["write-1", "read-1"]
-    );
-    assert!(tool_results.iter().all(|result| !result.is_error));
-    assert!(
-        received
-            .iter()
-            .any(|event| matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "done"))
-    );
-    assert_eq!(
-        fs::read_to_string(target).expect("tool output"),
-        "written by tool"
-    );
-    assert!(core.history().iter().any(|entry| {
-        entry.message.role == misy::MessageRole::Assistant
-            && entry.provider_metadata["response"] == json!({"turn": "one"})
-            && entry.provider_metadata["stream"].as_array().is_some()
-    }));
-    core.shutdown().expect("shutdown");
-}
-
-#[test]
-fn core_losslessly_collects_a_burst_of_provider_stream_events() {
-    let (_temporary, core, _) = test_core("burst");
-    core.select_model(fixture_model()).expect("select model");
-    let events = core.subscribe();
-    let submission = core.submit(Message::user("burst")).expect("submit");
-
-    receive_until(
-        &events,
-        submission,
-        |event| matches!(event, CoreEvent::Completed { submission: id } if *id == submission),
-    );
-    let assistant = core
-        .history()
-        .into_iter()
-        .find(|entry| entry.message.role == misy::MessageRole::Assistant)
-        .expect("assistant history");
-    assert_eq!(assistant.message.content.len(), 4_096);
-    assert_eq!(assistant.message.content, "x".repeat(4_096));
     core.shutdown().expect("shutdown");
 }
 
@@ -394,8 +388,8 @@ fn concurrent_model_selection_keeps_memory_and_disk_in_sync() {
     let second = ModelRef::new(ProviderId::new("fixture"), ModelId::new("fixture-model-b"));
     let core_a = core.clone();
     let core_b = core.clone();
-    let first_for_thread = first.clone();
-    let second_for_thread = second.clone();
+    let first_for_thread = first;
+    let second_for_thread = second;
 
     let select_a = std::thread::spawn(move || core_a.select_model(first_for_thread));
     let select_b = std::thread::spawn(move || core_b.select_model(second_for_thread));
@@ -499,7 +493,7 @@ fn pending_auth_for_one_provider_does_not_block_logout_for_another() {
 
     let pending = {
         let core = core.clone();
-        let provider = first.clone();
+        let provider = first;
         std::thread::spawn(move || core.complete_auth(&provider, json!({"id":"pending-a"})))
     };
     std::thread::sleep(Duration::from_millis(100));
@@ -599,11 +593,12 @@ fn cancelling_a_submission_queued_on_the_session_gate_does_not_append_its_prompt
     let blocking = core
         .submit(Message::user("block-session"))
         .expect("blocking submit");
-    receive_until(
-        &events,
-        blocking,
-        |event| matches!(event, CoreEvent::SubmissionStarted { submission, .. } if *submission == blocking),
-    );
+    receive_until(&events, blocking, |event| {
+        matches!(
+            event,
+            CoreEvent::SubmissionStarted { submission, .. } if *submission == blocking
+        )
+    });
     let queued = core
         .submit(Message::user("queued-cancel"))
         .expect("queued submit");
@@ -636,11 +631,12 @@ fn late_stream_events_from_a_cancelled_request_do_not_reach_the_next_request() {
     let cancelled = core
         .submit(Message::user("late-cancel"))
         .expect("cancelled submission");
-    receive_until(
-        &events,
-        cancelled,
-        |event| matches!(event, CoreEvent::SubmissionStarted { submission, .. } if *submission == cancelled),
-    );
+    receive_until(&events, cancelled, |event| {
+        matches!(
+            event,
+            CoreEvent::SubmissionStarted { submission, .. } if *submission == cancelled
+        )
+    });
     core.cancel(cancelled).expect("cancel");
     receive_until(
         &events,
@@ -656,12 +652,20 @@ fn late_stream_events_from_a_cancelled_request_do_not_reach_the_next_request() {
         next,
         |event| matches!(event, CoreEvent::Completed { submission } if *submission == next),
     );
-    assert!(received.iter().any(
-        |event| matches!(event, CoreEvent::TextDelta { delta, submission, .. } if *submission == next && delta == "next")
-    ));
-    assert!(!received.iter().any(
-        |event| matches!(event, CoreEvent::TextDelta { delta, submission, .. } if *submission == next && delta == "late")
-    ));
+    assert!(received.iter().any(|event| {
+        matches!(
+            event,
+            CoreEvent::TextDelta { delta, submission, .. }
+                if *submission == next && delta == "next"
+        )
+    }));
+    assert!(!received.iter().any(|event| {
+        matches!(
+            event,
+            CoreEvent::TextDelta { delta, submission, .. }
+                if *submission == next && delta == "late"
+        )
+    }));
     core.shutdown().expect("shutdown");
 }
 
@@ -673,33 +677,15 @@ fn stream_terminal_event_without_request_id_fails_the_active_submission_promptly
     let submission = core
         .submit(Message::user("no-id-terminal"))
         .expect("submission");
-    let received = receive_until(
-        &events,
-        submission,
-        |event| matches!(event, CoreEvent::Failed { submission: id, message } if *id == submission && message.contains("request_id")),
-    );
+    let received = receive_until(&events, submission, |event| {
+        matches!(
+            event,
+            CoreEvent::Failed { submission: id, message }
+                if *id == submission && message.contains("request_id")
+        )
+    });
     assert!(received.iter().any(
         |event| matches!(event, CoreEvent::Failed { message, .. } if message.contains("request_id"))
     ));
-    core.shutdown().expect("shutdown");
-}
-
-#[test]
-fn core_stops_after_sixty_four_model_turns() {
-    let (_temporary, core, _) = test_core("turn-limit");
-    core.select_model(fixture_model()).expect("select model");
-    let events = core.subscribe();
-    let submission = core.submit(Message::user("turn-limit")).expect("submit");
-
-    let received = receive_until(
-        &events,
-        submission,
-        |event| matches!(event, CoreEvent::Failed { submission: id, message } if *id == submission && message.contains("64")),
-    );
-    assert!(
-        received.iter().any(
-            |event| matches!(event, CoreEvent::Failed { message, .. } if message.contains("64"))
-        )
-    );
     core.shutdown().expect("shutdown");
 }

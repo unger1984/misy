@@ -1,3 +1,5 @@
+//! Tool-registry integration tests.
+
 use misy::{ToolDefinition, ToolRegistry};
 use serde_json::json;
 
@@ -22,7 +24,7 @@ fn registry_rejects_arguments_that_do_not_match_the_json_schema() {
 
     let error = registry
         .validate_arguments("read_file", &json!({"path": 42}))
-        .unwrap_err();
+        .expect_err("invalid arguments must fail validation");
 
     assert!(error.to_string().contains("string"));
 }
@@ -37,7 +39,7 @@ fn registry_rejects_a_duplicate_registration() {
             "duplicate",
             json!({"type": "object"}),
         ))
-        .unwrap_err();
+        .expect_err("duplicate registration must fail");
 
     assert!(error.to_string().contains("already registered"));
 }
@@ -59,7 +61,7 @@ fn registry_enforces_draft_2020_12_string_combinator_and_object_constraints() {
                 "additionalProperties": false
             }),
         ))
-        .unwrap();
+        .expect("register constrained test schema");
 
     assert!(
         registry
@@ -91,7 +93,7 @@ fn registry_enforces_draft_2020_12_string_combinator_and_object_constraints() {
             "An object that accepts no properties.",
             json!({"type": "object", "additionalProperties": false}),
         ))
-        .unwrap();
+        .expect("register closed-object test schema");
     assert!(
         registry
             .validate_arguments("closed-object", &json!({"unexpected": true}))
@@ -109,7 +111,7 @@ fn registry_rejects_malformed_schema_at_registration() {
             "An invalid JSON Schema document.",
             json!({"type": "not-a-json-schema-type"}),
         ))
-        .unwrap_err();
+        .expect_err("malformed schema must fail registration");
 
     assert!(error.to_string().contains("invalid JSON Schema"));
 }

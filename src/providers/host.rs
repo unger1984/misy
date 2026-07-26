@@ -23,14 +23,21 @@ pub struct PendingProviderRequest {
 }
 
 impl PendingProviderRequest {
+    /// Returns the host-assigned JSON-RPC request identifier.
     pub fn id(&self) -> ProviderRequestId {
         self.id
     }
 
+    /// Waits for the request's provider response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider transport, protocol, remote, cancellation, or shutdown error when the
+    /// response cannot be delivered successfully.
     pub fn wait(self) -> Result<Value, ProviderError> {
         match self.receiver.recv() {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(failure)) => Err(failure.into_error(self.provider, self.id)),
+            Ok(Err(failure)) => Err(failure.into_error(&self.provider, self.id)),
             Err(_) => Err(ProviderError::Transport {
                 provider: self.provider.as_str().to_owned(),
                 message: "response channel closed unexpectedly".to_owned(),
@@ -55,6 +62,7 @@ struct LifecycleState {
 }
 
 impl ProviderHost {
+    /// Creates a host that lazily launches packages from `catalog`.
     pub fn new(catalog: ProviderCatalog) -> Self {
         Self {
             catalog,
@@ -65,6 +73,10 @@ impl ProviderHost {
     }
 
     /// Registers a listener for all provider notifications.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subscriber mutex is poisoned by an earlier host-thread panic.
     pub fn subscribe(&self) -> Receiver<ProviderEvent> {
         let (sender, receiver) = mpsc::sync_channel(64);
         self.subscribers
@@ -75,6 +87,10 @@ impl ProviderHost {
     }
 
     /// Subscribes a request-correlated consumer without dropping stream events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subscriber mutex is poisoned by an earlier host-thread panic.
     pub fn subscribe_lossless(&self) -> Receiver<ProviderEvent> {
         let (sender, receiver) = mpsc::channel();
         self.subscribers
@@ -85,6 +101,14 @@ impl ProviderHost {
     }
 
     /// Sends a JSON-RPC request and returns a handle that waits for its correlated response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unknown, shut down, cannot start, or cannot accept
+    /// the request.
+    // This consumes request JSON so callers can construct and hand off an opaque payload without
+    // retaining it; borrowing here would change the established public host contract.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn request_async(
         &self,
         provider: &ProviderId,
@@ -102,6 +126,10 @@ impl ProviderHost {
     }
 
     /// Sends a request and waits for its response.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from request submission or response delivery.
     pub fn request(
         &self,
         provider: &ProviderId,
@@ -112,6 +140,13 @@ impl ProviderHost {
     }
 
     /// Sends a JSON-RPC notification without allocating a response slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unavailable or the notification cannot be written.
+    // This consumes notification JSON so callers can hand off an opaque payload without retaining
+    // it; borrowing here would change the established public host contract.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn notify(
         &self,
         provider: &ProviderId,
@@ -123,6 +158,10 @@ impl ProviderHost {
     }
 
     /// Cancels a pending request locally and forwards JSON-RPC cancellation to the provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unavailable or cancellation cannot be written.
     pub fn cancel_request(
         &self,
         provider: &ProviderId,
@@ -131,6 +170,11 @@ impl ProviderHost {
         self.process_for(provider)?.cancel(id)
     }
 
+    /// Returns the number of healthy child processes currently running.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lifecycle mutex is poisoned by an earlier host-thread panic.
     pub fn running_provider_count(&self) -> usize {
         self.lifecycle
             .lock()
@@ -142,6 +186,14 @@ impl ProviderHost {
     }
 
     /// Stops every child, failing outstanding requests and closing their stdin streams.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first child-process termination error after attempting every shutdown.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lifecycle mutex is poisoned by an earlier host-thread panic.
     pub fn shutdown(&self) -> Result<(), ProviderError> {
         let processes = {
             let mut lifecycle = self
@@ -234,7 +286,7 @@ struct TransportState {
 }
 
 impl PendingFailure {
-    fn into_error(self, provider: ProviderId, id: ProviderRequestId) -> ProviderError {
+    fn into_error(self, provider: &ProviderId, id: ProviderRequestId) -> ProviderError {
         match self {
             Self::Transport(message) => ProviderError::Transport {
                 provider: provider.as_str().to_owned(),
@@ -304,7 +356,7 @@ impl ProviderProcess {
             state: Arc::new(Mutex::new(TransportState::default())),
         };
         let reader = process.reader_state();
-        thread::spawn(move || reader_loop(provider, stdout, reader, subscribers));
+        thread::spawn(move || reader_loop(&provider, stdout, &reader, &subscribers));
         Ok(process)
     }
 
@@ -323,6 +375,8 @@ impl ProviderProcess {
             .is_some()
     }
 
+    // The opaque payload moves into the provider command channel and must outlive this call.
+    #[allow(clippy::needless_pass_by_value)]
     fn send_request(
         &self,
         id: ProviderRequestId,
@@ -336,7 +390,7 @@ impl ProviderProcess {
                 .lock()
                 .expect("provider transport mutex must not be poisoned");
             if let Some(failure) = state.failure.clone() {
-                return Err(failure.into_error(self.provider.clone(), id));
+                return Err(failure.into_error(&self.provider, id));
             }
             state.pending.insert(id.get(), sender);
         }
@@ -348,12 +402,14 @@ impl ProviderProcess {
         });
         if let Err(error) = self.write_message(&message) {
             let failure = PendingFailure::Transport(error.to_string());
-            self.fail(failure.clone());
-            return Err(failure.into_error(self.provider.clone(), id));
+            self.fail(&failure);
+            return Err(failure.into_error(&self.provider, id));
         }
         Ok(receiver)
     }
 
+    // The opaque payload moves into the provider command channel and must outlive this call.
+    #[allow(clippy::needless_pass_by_value)]
     fn send_notification(&self, method: &str, params: Value) -> Result<(), ProviderError> {
         if let Some(failure) = self
             .state
@@ -362,13 +418,13 @@ impl ProviderProcess {
             .failure
             .clone()
         {
-            return Err(failure.into_error(self.provider.clone(), ProviderRequestId(0)));
+            return Err(failure.into_error(&self.provider, ProviderRequestId(0)));
         }
         let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         self.write_message(&message).map_err(|error| {
             let failure = PendingFailure::Transport(error.to_string());
-            self.fail(failure.clone());
-            failure.into_error(self.provider.clone(), ProviderRequestId(0))
+            self.fail(&failure);
+            failure.into_error(&self.provider, ProviderRequestId(0))
         })
     }
 
@@ -399,7 +455,7 @@ impl ProviderProcess {
         stdin.flush()
     }
 
-    fn fail(&self, failure: PendingFailure) {
+    fn fail(&self, failure: &PendingFailure) {
         if fail_pending(&self.state, failure) {
             let _ = terminate_and_reap(&self.io);
         }
@@ -407,7 +463,7 @@ impl ProviderProcess {
 
     fn shutdown(&self) -> Result<(), ProviderError> {
         let _ = self.send_notification("misy.shutdown", Value::Null);
-        self.fail(PendingFailure::Shutdown);
+        self.fail(&PendingFailure::Shutdown);
         terminate_and_reap(&self.io).map_err(|error| ProviderError::Transport {
             provider: self.provider.as_str().to_owned(),
             message: error.to_string(),
@@ -422,17 +478,17 @@ struct ReaderState {
 }
 
 fn reader_loop(
-    provider: ProviderId,
+    provider: &ProviderId,
     stdout: impl std::io::Read,
-    state: ReaderState,
-    subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
+    state: &ReaderState,
+    subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>,
 ) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                if fail_pending(&state.state, PendingFailure::Transport(error.to_string())) {
+                if fail_pending(&state.state, &PendingFailure::Transport(error.to_string())) {
                     let _ = terminate_and_reap(&state.io);
                 }
                 return;
@@ -441,14 +497,14 @@ fn reader_loop(
         let message: Value = match serde_json::from_str(&line) {
             Ok(message) => message,
             Err(error) => {
-                if fail_pending(&state.state, PendingFailure::Protocol(error.to_string())) {
+                if fail_pending(&state.state, &PendingFailure::Protocol(error.to_string())) {
                     let _ = terminate_and_reap(&state.io);
                 }
                 return;
             }
         };
-        if let Err(failure) = route_message(&provider, message, &state.state, &subscribers) {
-            if fail_pending(&state.state, failure) {
+        if let Err(failure) = route_message(provider, &message, &state.state, subscribers) {
+            if fail_pending(&state.state, &failure) {
                 let _ = terminate_and_reap(&state.io);
             }
             return;
@@ -456,7 +512,7 @@ fn reader_loop(
     }
     if fail_pending(
         &state.state,
-        PendingFailure::Transport("provider closed stdout".to_owned()),
+        &PendingFailure::Transport("provider closed stdout".to_owned()),
     ) {
         let _ = terminate_and_reap(&state.io);
     }
@@ -464,7 +520,7 @@ fn reader_loop(
 
 fn route_message(
     provider: &ProviderId,
-    message: Value,
+    message: &Value,
     state: &TransportStateLock,
     subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>,
 ) -> Result<(), PendingFailure> {
@@ -484,7 +540,7 @@ fn route_message(
         }
         broadcast(
             subscribers,
-            ProviderEvent {
+            &ProviderEvent {
                 provider: provider.clone(),
                 method: method.to_owned(),
                 params: object.get("params").cloned().unwrap_or(Value::Null),
@@ -542,7 +598,7 @@ enum ProviderSubscriber {
     Lossless(Sender<ProviderEvent>),
 }
 
-fn broadcast(subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>, event: ProviderEvent) {
+fn broadcast(subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>, event: &ProviderEvent) {
     subscribers
         .lock()
         .expect("provider subscribers mutex must not be poisoned")
@@ -555,7 +611,7 @@ fn broadcast(subscribers: &Arc<Mutex<Vec<ProviderSubscriber>>>, event: ProviderE
         });
 }
 
-fn fail_pending(state: &TransportStateLock, failure: PendingFailure) -> bool {
+fn fail_pending(state: &TransportStateLock, failure: &PendingFailure) -> bool {
     let pending = {
         let mut state = state
             .lock()

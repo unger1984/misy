@@ -12,17 +12,41 @@ use std::{
 /// Metadata and launch information declared by one self-contained provider package.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ProviderManifest {
+    /// Stable provider identifier used by the core and credential store.
     pub id: ProviderId,
+    /// The provider name displayed to users.
+    pub display_name: String,
+    /// Provider package semantic version.
     pub version: Version,
+    /// Package kind; provider packages must use `provider`.
     pub kind: String,
+    /// JSON-RPC protocol revision required by this package.
     pub protocol_version: u32,
+    /// User-facing summary of the provider and authentication method.
     pub description: String,
+    /// Package author.
     pub author: String,
+    /// Package homepage URL.
     pub homepage: String,
+    /// Source repository URL.
     pub repository: String,
+    /// Package license identifier or text reference.
     pub license: String,
+    /// Executable used to launch the package from its root directory.
     pub command: String,
+    /// Arguments passed to [`Self::command`].
     pub args: Vec<String>,
+    /// Authentication mechanisms this provider supports.
+    pub auth_methods: Vec<ProviderAuthMethod>,
+}
+
+/// One authentication mechanism a provider package can offer to a client.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ProviderAuthMethod {
+    /// Stable provider-local identifier persisted with credentials.
+    pub id: String,
+    /// User-facing name for this method.
+    pub display_name: String,
 }
 
 /// A discovered package and the root that owns its relative launch command.
@@ -33,10 +57,12 @@ pub struct ProviderPackage {
 }
 
 impl ProviderPackage {
+    /// Returns the package root used as the provider process working directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Returns the validated package manifest.
     pub fn manifest(&self) -> &ProviderManifest {
         &self.manifest
     }
@@ -50,6 +76,11 @@ pub struct ProviderCatalog {
 
 impl ProviderCatalog {
     /// Finds bundled and installed packages. A provider ID must be globally unique.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for filesystem failures, invalid manifests, duplicate IDs, or unsupported
+    /// protocol versions.
     pub fn discover(
         bundled_root: &Path,
         installed_root: &Path,
@@ -66,18 +97,22 @@ impl ProviderCatalog {
         Ok(Self { packages })
     }
 
+    /// Returns a package by stable provider ID.
     pub fn get(&self, id: &str) -> Option<&ProviderPackage> {
         self.packages.get(id)
     }
 
+    /// Returns the number of discovered packages.
     pub fn len(&self) -> usize {
         self.packages.len()
     }
 
+    /// Reports whether discovery found no packages.
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
 
+    /// Iterates packages in stable provider-ID order.
     pub fn packages(&self) -> impl Iterator<Item = &ProviderPackage> {
         self.packages.values()
     }
@@ -118,10 +153,13 @@ fn validate_manifest(
     manifest: &ProviderManifest,
     path: &Path,
 ) -> Result<(), ProviderDiscoveryError> {
-    if manifest.id.as_str().is_empty() || manifest.command.trim().is_empty() {
+    if manifest.id.as_str().is_empty()
+        || manifest.display_name.trim().is_empty()
+        || manifest.command.trim().is_empty()
+    {
         return Err(ProviderDiscoveryError::InvalidManifestValue {
             path: path.to_owned(),
-            message: "id and command must not be empty".to_owned(),
+            message: "id, display_name, and command must not be empty".to_owned(),
         });
     }
     if manifest.kind != "provider" {
@@ -152,23 +190,53 @@ fn validate_manifest(
             found: manifest.protocol_version,
         });
     }
+    if manifest.auth_methods.is_empty()
+        || manifest
+            .auth_methods
+            .iter()
+            .any(|method| method.id.trim().is_empty() || method.display_name.trim().is_empty())
+        || manifest
+            .auth_methods
+            .iter()
+            .map(|method| method.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != manifest.auth_methods.len()
+    {
+        return Err(ProviderDiscoveryError::InvalidManifestValue {
+            path: path.to_owned(),
+            message: "auth_methods must contain unique, non-empty IDs and display names".to_owned(),
+        });
+    }
     Ok(())
 }
 
+/// Errors reported while discovering and validating provider packages.
 #[derive(Debug)]
 pub enum ProviderDiscoveryError {
+    /// A directory or manifest filesystem operation failed.
     Io(std::io::Error),
+    /// A manifest was not valid JSON.
     InvalidManifest {
+        /// Path to the invalid manifest.
         path: PathBuf,
+        /// JSON parser error.
         source: serde_json::Error,
     },
+    /// A syntactically valid manifest violated the package contract.
     InvalidManifestValue {
+        /// Path to the invalid manifest.
         path: PathBuf,
+        /// Description of the violated requirement.
         message: String,
     },
+    /// More than one package declared the same provider ID.
     DuplicateProvider(String),
+    /// A package requires a protocol revision this host does not implement.
     UnsupportedProtocol {
+        /// Provider declaring the unsupported revision.
         id: String,
+        /// Required protocol revision.
         found: u32,
     },
 }

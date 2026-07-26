@@ -10,13 +10,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Paths owned by misy. `from_root` keeps filesystem tests independent from the user home directory.
+/// Paths owned by Misy.
+///
+/// [`Self::from_root`] keeps filesystem tests independent from the user home directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MisyPaths {
     root: PathBuf,
 }
 
 impl MisyPaths {
+    /// Resolves Misy's data directory below the current user's home directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::HomeDirectoryUnavailable`] when neither supported home-directory
+    /// environment variable is set.
     pub fn from_home() -> Result<Self, ConfigError> {
         let home = env::var_os("HOME")
             .or_else(|| env::var_os("USERPROFILE"))
@@ -24,22 +32,27 @@ impl MisyPaths {
         Ok(Self::from_root(PathBuf::from(home).join(".misy")))
     }
 
+    /// Creates paths below an explicit root, primarily for isolated clients and tests.
     pub fn from_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// Returns the directory containing all Misy-owned files.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Returns the versioned TOML configuration path.
     pub fn config_file(&self) -> PathBuf {
         self.root.join("config.toml")
     }
 
+    /// Returns the opaque provider-credential store path.
     pub fn credentials_file(&self) -> PathBuf {
         self.root.join("credentials.json")
     }
 
+    /// Returns the directory containing user-installed provider packages.
     pub fn provider_plugins_dir(&self) -> PathBuf {
         self.root.join("plugins").join("providers")
     }
@@ -48,13 +61,17 @@ impl MisyPaths {
 /// The on-disk configuration format. Versions are explicit so incompatible formats are rejected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Config {
+    /// On-disk schema revision used to reject incompatible files.
     pub version: u32,
+    /// Model selected for direct interaction, if one has been saved.
     pub default_model: Option<ModelRef>,
 }
 
 impl Config {
+    /// Current configuration and credential-file schema revision.
     pub const VERSION: u32 = 1;
 
+    /// Creates a current-version configuration with a selected default model.
     pub fn with_default_model(default_model: ModelRef) -> Self {
         Self {
             version: Self::VERSION,
@@ -72,12 +89,20 @@ impl Default for Config {
     }
 }
 
+// The established public name describes errors from the `config` contract.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
+/// Errors while locating, reading, parsing, or serializing configuration.
 pub enum ConfigError {
+    /// No supported home-directory environment variable was available.
     HomeDirectoryUnavailable,
+    /// A filesystem operation failed.
     Io(std::io::Error),
+    /// TOML configuration could not be parsed.
     Parse(toml::de::Error),
+    /// Configuration could not be serialized as TOML.
     Serialize(toml::ser::Error),
+    /// The file uses a schema revision this build does not support.
     UnsupportedVersion(u32),
 }
 
@@ -115,16 +140,25 @@ impl From<std::io::Error> for ConfigError {
 }
 
 /// Loads and saves versioned configuration under one `MisyPaths` root.
+// The established public name identifies the configuration persistence contract.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     paths: MisyPaths,
 }
 
+// The established public name describes errors from the credential-store contract.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
+/// Errors while reading, validating, or writing opaque provider credentials.
 pub enum CredentialError {
+    /// A filesystem operation failed.
     Io(std::io::Error),
+    /// The JSON credential document could not be parsed.
     Parse(serde_json::Error),
+    /// Credentials could not be serialized as JSON.
     Serialize(serde_json::Error),
+    /// The file uses a schema revision this build does not support.
     UnsupportedVersion(u32),
 }
 
@@ -180,10 +214,16 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    /// Creates a credential store rooted at `paths`.
     pub fn new(paths: MisyPaths) -> Self {
         Self { paths }
     }
 
+    /// Loads one provider's opaque credential value, if it has been stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the credential file cannot be read, parsed, or validated.
     pub fn load(
         &self,
         provider: &crate::domain::ProviderId,
@@ -192,6 +232,12 @@ impl CredentialStore {
         Ok(document.providers.get(provider.as_str()).cloned())
     }
 
+    /// Atomically saves one provider's opaque credential value with private permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when existing credentials cannot be read or the updated file cannot be
+    /// serialized or written.
     pub fn save(
         &self,
         provider: &crate::domain::ProviderId,
@@ -206,6 +252,11 @@ impl CredentialStore {
     }
 
     /// Removes one provider's opaque credential record after a successful logout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the credential document cannot be read or the updated document
+    /// cannot be serialized or written.
     pub fn remove(&self, provider: &crate::domain::ProviderId) -> Result<(), CredentialError> {
         let mut document = self.read_file()?;
         document.providers.remove(provider.as_str());
@@ -232,10 +283,16 @@ impl CredentialStore {
 }
 
 impl ConfigStore {
+    /// Creates a configuration store rooted at `paths`.
     pub fn new(paths: MisyPaths) -> Self {
         Self { paths }
     }
 
+    /// Loads configuration, returning the current defaults if no file exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, parsed, or validated.
     pub fn load(&self) -> Result<Config, ConfigError> {
         let path = self.paths.config_file();
         let contents = match fs::read_to_string(path) {
@@ -252,6 +309,12 @@ impl ConfigStore {
         Ok(config)
     }
 
+    /// Atomically saves a current-version configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `config` has an unsupported version or cannot be serialized or
+    /// written.
     pub fn save(&self, config: &Config) -> Result<(), ConfigError> {
         if config.version != Config::VERSION {
             return Err(ConfigError::UnsupportedVersion(config.version));

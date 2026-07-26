@@ -30,7 +30,7 @@ impl LosslessSubscribers {
         receiver
     }
 
-    pub(super) fn emit(&self, event: CoreEvent) {
+    pub(super) fn emit(&self, event: &CoreEvent) {
         self.senders
             .lock()
             .expect("lossless core subscribers mutex must not be poisoned")
@@ -56,7 +56,7 @@ impl MisyCore {
         });
     }
 
-    pub(super) fn emit(&self, event: CoreEvent) {
+    pub(super) fn emit(&self, event: &CoreEvent) {
         let mut subscribers = self
             .inner
             .subscribers
@@ -105,7 +105,7 @@ mod tests {
             let (finished_tx, finished_rx) = mpsc::channel();
             let handle = thread::spawn(move || {
                 started_tx.send(()).expect("emitter started");
-                subscribers.emit(CoreEvent::AuthenticationChanged {
+                subscribers.emit(&CoreEvent::AuthenticationChanged {
                     provider: ProviderId::new("fixture"),
                     authenticated: true,
                 });

@@ -1,3 +1,5 @@
+//! Tool-dispatch integration tests.
+
 use misy::{ToolCall, ToolDispatcher, ToolRegistry};
 use serde_json::json;
 use std::{
@@ -9,7 +11,7 @@ use std::{
 fn test_root(name: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system time must be after the Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("misy-{name}-{}-{unique}", std::process::id()))
 }
@@ -17,7 +19,7 @@ fn test_root(name: &str) -> PathBuf {
 #[test]
 fn dispatcher_writes_a_file_from_validated_arguments() {
     let root = test_root("write-file");
-    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&root).expect("create write-file test directory");
     let dispatcher = ToolDispatcher::new(ToolRegistry::new());
     let target = root.join("note.txt");
 
@@ -28,16 +30,19 @@ fn dispatcher_writes_a_file_from_validated_arguments() {
     ));
 
     assert!(!result.is_error, "{}", result.content);
-    assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(
+        fs::read_to_string(&target).expect("read written file"),
+        "hello"
+    );
+    fs::remove_dir_all(root).expect("remove write-file test directory");
 }
 
 #[test]
 fn dispatcher_reads_utf8_file_content() {
     let root = test_root("read-file");
-    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&root).expect("create read-file test directory");
     let target = root.join("note.txt");
-    fs::write(&target, "hello").unwrap();
+    fs::write(&target, "hello").expect("write fixture file");
     let dispatcher = ToolDispatcher::new(ToolRegistry::new());
 
     let result = dispatcher.dispatch(&ToolCall::new(
@@ -48,15 +53,15 @@ fn dispatcher_reads_utf8_file_content() {
 
     assert!(!result.is_error, "{}", result.content);
     assert_eq!(result.content, "hello");
-    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(root).expect("remove read-file test directory");
 }
 
 #[test]
 fn dispatcher_lists_directory_entries_in_stable_order() {
     let root = test_root("list-directory");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("zeta.txt"), "").unwrap();
-    fs::write(root.join("alpha.txt"), "").unwrap();
+    fs::create_dir_all(&root).expect("create list-directory test directory");
+    fs::write(root.join("zeta.txt"), "").expect("write zeta fixture");
+    fs::write(root.join("alpha.txt"), "").expect("write alpha fixture");
     let dispatcher = ToolDispatcher::new(ToolRegistry::new());
 
     let result = dispatcher.dispatch(&ToolCall::new(
@@ -67,7 +72,7 @@ fn dispatcher_lists_directory_entries_in_stable_order() {
 
     assert!(!result.is_error, "{}", result.content);
     assert_eq!(result.content, "[\"alpha.txt\",\"zeta.txt\"]");
-    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(root).expect("remove list-directory test directory");
 }
 
 #[cfg(unix)]
@@ -82,7 +87,8 @@ fn dispatcher_runs_a_command_without_a_shell() {
     ));
 
     assert!(!result.is_error, "{}", result.content);
-    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content).expect("parse command output");
     assert_eq!(output["exit_code"], 0);
     assert_eq!(output["stdout"], "hello");
 }
@@ -100,7 +106,8 @@ fn dispatcher_reports_command_timeout_after_killing_and_reaping_the_child() {
     ));
 
     assert!(result.is_error);
-    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content).expect("parse timeout output");
     assert_eq!(output["kind"], "timeout");
     assert_eq!(output["exit_code"], serde_json::Value::Null);
 }
@@ -117,10 +124,17 @@ fn dispatcher_marks_command_output_that_exceeds_its_bound() {
     ));
 
     assert!(result.is_error);
-    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content).expect("parse truncated output");
     assert_eq!(output["kind"], "truncated");
     assert_eq!(output["stdout_truncated"], true);
-    assert!(output["stdout"].as_str().unwrap().len() < 70000);
+    assert!(
+        output["stdout"]
+            .as_str()
+            .expect("stdout must be a string")
+            .len()
+            < 70000
+    );
 }
 
 #[cfg(unix)]
@@ -135,10 +149,17 @@ fn dispatcher_marks_stderr_that_exceeds_its_bound() {
     ));
 
     assert!(result.is_error);
-    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content).expect("parse truncated output");
     assert_eq!(output["kind"], "truncated");
     assert_eq!(output["stderr_truncated"], true);
-    assert!(output["stderr"].as_str().unwrap().len() < 70000);
+    assert!(
+        output["stderr"]
+            .as_str()
+            .expect("stderr must be a string")
+            .len()
+            < 70000
+    );
 }
 
 #[cfg(unix)]
@@ -153,7 +174,8 @@ fn dispatcher_labels_nonzero_exit_and_spawn_failures() {
     ));
     assert!(nonzero.is_error);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&nonzero.content).unwrap()["kind"],
+        serde_json::from_str::<serde_json::Value>(&nonzero.content)
+            .expect("parse nonzero command output")["kind"],
         "nonzero_exit"
     );
 
@@ -164,7 +186,8 @@ fn dispatcher_labels_nonzero_exit_and_spawn_failures() {
     ));
     assert!(spawn.is_error);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&spawn.content).unwrap()["kind"],
+        serde_json::from_str::<serde_json::Value>(&spawn.content)
+            .expect("parse spawn failure output")["kind"],
         "spawn_error"
     );
 }

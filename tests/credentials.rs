@@ -1,3 +1,5 @@
+//! Credential-store integration tests.
+
 use misy::{CredentialStore, MisyPaths, ProviderId};
 use serde_json::json;
 use std::{
@@ -9,7 +11,7 @@ use std::{
 fn test_root(name: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system time must be after the Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("misy-{name}-{}-{unique}", std::process::id()))
 }
@@ -19,20 +21,25 @@ fn credential_store_persists_opaque_provider_json_with_private_permissions() {
     let root = test_root("credentials");
     let paths = MisyPaths::from_root(&root);
     let store = CredentialStore::new(paths.clone());
-    let provider = ProviderId::new("codex-subscription");
+    let provider = ProviderId::new("openai");
     let credentials = json!({"access_token": "opaque-token", "expires_at": 42});
 
-    assert_eq!(store.load(&provider).unwrap(), None);
-    store.save(&provider, credentials.clone()).unwrap();
+    assert_eq!(store.load(&provider).expect("load empty credentials"), None);
+    store
+        .save(&provider, credentials.clone())
+        .expect("save credentials");
 
-    assert_eq!(store.load(&provider).unwrap(), Some(credentials));
+    assert_eq!(
+        store.load(&provider).expect("load credentials"),
+        Some(credentials)
+    );
     assert!(!root.join("credentials.json.tmp").exists());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             fs::metadata(paths.credentials_file())
-                .unwrap()
+                .expect("read credential file metadata")
                 .permissions()
                 .mode()
                 & 0o777,
@@ -40,26 +47,27 @@ fn credential_store_persists_opaque_provider_json_with_private_permissions() {
         );
     }
 
-    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(root).expect("remove credential test directory");
 }
 
 #[test]
 fn credential_store_rejects_an_unsupported_format_version() {
     let root = test_root("credentials-version");
     let paths = MisyPaths::from_root(&root);
-    fs::create_dir_all(&root).unwrap();
-    fs::write(paths.credentials_file(), r#"{"version":2,"providers":{}}"#).unwrap();
+    fs::create_dir_all(&root).expect("create credential test directory");
+    fs::write(paths.credentials_file(), r#"{"version":2,"providers":{}}"#)
+        .expect("write unsupported credentials");
 
     let error = CredentialStore::new(paths)
         .load(&ProviderId::new("codex"))
-        .unwrap_err();
+        .expect_err("unsupported credentials must fail");
 
     assert!(
         error
             .to_string()
             .contains("unsupported credentials version 2")
     );
-    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(root).expect("remove credential test directory");
 }
 
 #[test]
@@ -67,23 +75,23 @@ fn credential_store_replaces_existing_provider_credentials() {
     let root = test_root("credentials-overwrite");
     let paths = MisyPaths::from_root(&root);
     let store = CredentialStore::new(paths.clone());
-    let provider = ProviderId::new("codex-subscription");
+    let provider = ProviderId::new("openai");
 
     store
         .save(&provider, json!({"access_token": "old-token"}))
-        .unwrap();
+        .expect("save initial credentials");
     store
         .save(&provider, json!({"access_token": "replacement-token"}))
-        .unwrap();
+        .expect("replace credentials");
 
     assert_eq!(
-        store.load(&provider).unwrap(),
+        store.load(&provider).expect("load replacement credentials"),
         Some(json!({"access_token": "replacement-token"}))
     );
     assert!(
         !fs::read_to_string(paths.credentials_file())
-            .unwrap()
+            .expect("read replacement credentials")
             .contains("old-token")
     );
-    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(root).expect("remove credential test directory");
 }

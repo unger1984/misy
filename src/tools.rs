@@ -28,6 +28,12 @@ struct RegisteredTool {
 }
 
 impl ToolRegistry {
+    /// Creates a registry containing all built-in tool definitions.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a statically defined built-in schema is invalid, which is a build-time
+    /// invariant covered by tests.
     pub fn new() -> Self {
         let definitions = builtin_definitions()
             .into_iter()
@@ -46,6 +52,7 @@ impl ToolRegistry {
         Self { definitions }
     }
 
+    /// Returns cloned definitions for every registered tool in stable name order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.definitions
             .values()
@@ -53,10 +60,16 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Looks up a tool definition by provider-visible name.
     pub fn get(&self, name: &str) -> Option<&ToolDefinition> {
         self.definitions.get(name).map(|tool| &tool.definition)
     }
 
+    /// Registers a new tool after compiling its JSON Schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate names or invalid schemas.
     pub fn register(&mut self, definition: ToolDefinition) -> Result<(), ToolRegistryError> {
         if self.definitions.contains_key(&definition.name) {
             return Err(ToolRegistryError::DuplicateTool(definition.name));
@@ -72,6 +85,11 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Validates one provider-supplied argument value against a registered tool schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown or its arguments do not satisfy the schema.
     pub fn validate_arguments(
         &self,
         name: &str,
@@ -93,11 +111,16 @@ impl Default for ToolRegistry {
     }
 }
 
+/// Errors while defining or validating local tools.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ToolRegistryError {
+    /// A tool with this name has already been registered.
     DuplicateTool(String),
+    /// A JSON Schema could not be compiled.
     InvalidSchema(String),
+    /// No tool has this provider-visible name.
     UnknownTool(String),
+    /// Arguments failed the registered JSON Schema.
     InvalidArguments(String),
 }
 
@@ -122,6 +145,7 @@ pub struct ToolDispatcher {
 }
 
 impl ToolDispatcher {
+    /// Creates a synchronous dispatcher backed by `registry`.
     pub fn new(registry: ToolRegistry) -> Self {
         Self {
             registry,
@@ -129,6 +153,7 @@ impl ToolDispatcher {
         }
     }
 
+    /// Replaces the command execution timeout used by `run_command`.
     pub fn with_command_limits(self, command_timeout: Duration) -> Self {
         Self {
             command_timeout,
@@ -136,6 +161,10 @@ impl ToolDispatcher {
         }
     }
 
+    /// Validates and executes one local tool call.
+    ///
+    /// Failures are encoded in [`ToolResult`] so a provider receives the execution outcome rather
+    /// than an out-of-band core error.
     pub fn dispatch(&self, call: &ToolCall) -> ToolResult {
         if let Err(error) = self
             .registry
@@ -221,9 +250,9 @@ impl ToolDispatcher {
                     &call.id,
                     "spawn_error",
                     None,
-                    CapturedStream::default(),
-                    CapturedStream::default(),
-                    Some(format!("could not run {command_name}: {error}")),
+                    &CapturedStream::default(),
+                    &CapturedStream::default(),
+                    Some(&format!("could not run {command_name}: {error}")),
                 );
             }
         };
@@ -251,9 +280,9 @@ impl ToolDispatcher {
                     &call.id,
                     "timeout",
                     None,
-                    join_capture(stdout),
-                    join_capture(stderr),
-                    termination_error,
+                    &join_capture(stdout),
+                    &join_capture(stderr),
+                    termination_error.as_deref(),
                 );
             }
             Err(error) => {
@@ -264,10 +293,11 @@ impl ToolDispatcher {
                     &call.id,
                     "wait_error",
                     None,
-                    join_capture(stdout),
-                    join_capture(stderr),
+                    &join_capture(stdout),
+                    &join_capture(stderr),
                     Some(format!("could not wait for {command_name}: {error}"))
-                        .or(termination_error),
+                        .as_deref()
+                        .or(termination_error.as_deref()),
                 );
             }
         };
@@ -280,7 +310,7 @@ impl ToolDispatcher {
         } else {
             "nonzero_exit"
         };
-        command_result(&call.id, kind, Some(status), stdout, stderr, None)
+        command_result(&call.id, kind, Some(status), &stdout, &stderr, None)
     }
 
     fn write_file(&self, call: &ToolCall) -> ToolResult {
@@ -302,22 +332,49 @@ fn builtin_definitions() -> [ToolDefinition; 4] {
         ToolDefinition::new(
             "list_directory",
             "List entries in a directory.",
-            serde_json::json!({"type":"object", "required":["path"], "properties":{"path":{"type":"string"}}, "additionalProperties":false}),
+            serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": false,
+            }),
         ),
         ToolDefinition::new(
             "read_file",
             "Read a UTF-8 file.",
-            serde_json::json!({"type":"object", "required":["path"], "properties":{"path":{"type":"string"}}, "additionalProperties":false}),
+            serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": false,
+            }),
         ),
         ToolDefinition::new(
             "run_command",
             "Run a local command without a shell.",
-            serde_json::json!({"type":"object", "required":["command"], "properties":{"command":{"type":"string"}, "args":{"type":"array", "items":{"type":"string"}}, "cwd":{"type":"string"}}, "additionalProperties":false}),
+            serde_json::json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {"type": "string"},
+                    "args": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                },
+                "additionalProperties": false,
+            }),
         ),
         ToolDefinition::new(
             "write_file",
             "Write UTF-8 content to a file.",
-            serde_json::json!({"type":"object", "required":["path", "content"], "properties":{"path":{"type":"string"}, "content":{"type":"string"}}, "additionalProperties":false}),
+            serde_json::json!({
+                "type": "object",
+                "required": ["path", "content"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "additionalProperties": false,
+            }),
         ),
     ]
 }
@@ -387,9 +444,9 @@ fn command_result(
     call_id: &str,
     kind: &str,
     status: Option<ExitStatus>,
-    stdout: CapturedStream,
-    stderr: CapturedStream,
-    message: Option<String>,
+    stdout: &CapturedStream,
+    stderr: &CapturedStream,
+    message: Option<&str>,
 ) -> ToolResult {
     let content = serde_json::json!({
         "kind": kind,

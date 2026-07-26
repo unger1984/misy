@@ -1,14 +1,11 @@
 use crate::{
-    Config, ConfigError, ConfigStore, CredentialError, CredentialStore, Message, MisyPaths,
-    ModelId, ModelInfo, ModelRef, ProviderCatalog, ProviderDiscoveryError, ProviderError,
-    ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolCall, ToolDispatcher,
-    ToolRegistry, ToolResult,
+    Config, ConfigStore, CredentialStore, Message, MisyPaths, ModelId, ModelInfo, ModelRef,
+    ProviderCatalog, ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolDispatcher,
+    ToolRegistry,
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    error::Error,
-    fmt,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -19,173 +16,19 @@ use std::{
 };
 
 mod agent;
+mod contracts;
 mod events;
+use contracts::strip_credentials;
+// These established names are the public core-client contract.
+#[allow(clippy::module_name_repetitions)]
+pub use contracts::{
+    AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
+};
 use events::LosslessSubscribers;
 
-/// A stable handle for one asynchronous agent submission.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SubmissionId(u64);
-
-impl SubmissionId {
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// A canonical history item retained by the Rust core. Provider metadata stays opaque.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HistoryEntry {
-    pub message: Message,
-    pub tool_calls: Vec<ToolCall>,
-    pub tool_results: Vec<ToolResult>,
-    pub provider_metadata: Value,
-}
-
-/// Observable changes emitted by the headless runtime.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CoreEvent {
-    ProviderDiscovered {
-        provider: ProviderId,
-    },
-    AuthenticationChanged {
-        provider: ProviderId,
-        authenticated: bool,
-    },
-    ModelsListed {
-        provider: ProviderId,
-        models: Vec<ModelInfo>,
-    },
-    ModelSelected {
-        model: ModelRef,
-    },
-    SubmissionStarted {
-        submission: SubmissionId,
-        model: ModelRef,
-    },
-    TextDelta {
-        submission: SubmissionId,
-        delta: String,
-        provider_metadata: Value,
-    },
-    ToolCall {
-        submission: SubmissionId,
-        call: ToolCall,
-        provider_metadata: Value,
-    },
-    ToolResult {
-        submission: SubmissionId,
-        result: ToolResult,
-    },
-    Completed {
-        submission: SubmissionId,
-    },
-    Cancelled {
-        submission: SubmissionId,
-    },
-    Failed {
-        submission: SubmissionId,
-        message: String,
-    },
-    Shutdown,
-}
-
-/// Errors from core configuration, provider operations, and agent lifecycle checks.
-#[derive(Debug)]
-pub enum CoreError {
-    Config(ConfigError),
-    Credentials(CredentialError),
-    Discovery(ProviderDiscoveryError),
-    Provider(ProviderError),
-    InvalidModels(String),
-    UnknownModel(ModelRef),
-    NoModelSelected,
-    UnknownSubmission(SubmissionId),
-    Shutdown,
-}
-
-impl fmt::Display for CoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(error) => write!(formatter, "configuration error: {error}"),
-            Self::Credentials(error) => write!(formatter, "credential error: {error}"),
-            Self::Discovery(error) => write!(formatter, "provider discovery error: {error}"),
-            Self::Provider(error) => write!(formatter, "provider error: {error}"),
-            Self::InvalidModels(message) => write!(formatter, "invalid models response: {message}"),
-            Self::UnknownModel(model) => {
-                write!(formatter, "unknown model `{}`", model.model.as_str())
-            }
-            Self::NoModelSelected => formatter.write_str("no model is selected"),
-            Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
-            Self::Shutdown => formatter.write_str("misy core has shut down"),
-        }
-    }
-}
-
-impl Error for CoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Config(error) => Some(error),
-            Self::Credentials(error) => Some(error),
-            Self::Discovery(error) => Some(error),
-            Self::Provider(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<ConfigError> for CoreError {
-    fn from(error: ConfigError) -> Self {
-        Self::Config(error)
-    }
-}
-impl From<CredentialError> for CoreError {
-    fn from(error: CredentialError) -> Self {
-        Self::Credentials(error)
-    }
-}
-impl From<ProviderDiscoveryError> for CoreError {
-    fn from(error: ProviderDiscoveryError) -> Self {
-        Self::Discovery(error)
-    }
-}
-impl From<ProviderError> for CoreError {
-    fn from(error: ProviderError) -> Self {
-        Self::Provider(match error {
-            ProviderError::Remote {
-                provider,
-                code,
-                message,
-                data,
-            } => ProviderError::Remote {
-                provider,
-                code,
-                message,
-                data: data.map(strip_credentials),
-            },
-            error => error,
-        })
-    }
-}
-
-fn strip_credentials(mut value: Value) -> Value {
-    match &mut value {
-        Value::Object(object) => {
-            object.remove("credentials");
-            for child in object.values_mut() {
-                *child = strip_credentials(std::mem::take(child));
-            }
-        }
-        Value::Array(values) => {
-            for child in values {
-                *child = strip_credentials(std::mem::take(child));
-            }
-        }
-        _ => {}
-    }
-    value
-}
-
 /// Public, headless agent runtime. TUI and desktop clients consume only this contract.
+// The established public runtime name is the crate's primary client contract.
+#[allow(clippy::module_name_repetitions)]
 #[derive(Clone)]
 pub struct MisyCore {
     inner: Arc<CoreInner>,
@@ -219,6 +62,10 @@ struct ActiveSubmission {
 
 impl MisyCore {
     /// Discovers bundled and user-installed providers without launching either set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider discovery or persisted configuration loading fails.
     pub fn discover(
         paths: MisyPaths,
         bundled_providers: impl AsRef<Path>,
@@ -229,6 +76,10 @@ impl MisyCore {
     }
 
     /// Creates a core from an already-discovered provider catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted configuration cannot be loaded.
     pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
@@ -256,13 +107,14 @@ impl MisyCore {
         let core = Self { inner };
         core.start_provider_event_router(host.subscribe_lossless());
         for package in core.inner.catalog.packages() {
-            core.emit(CoreEvent::ProviderDiscovered {
+            core.emit(&CoreEvent::ProviderDiscovered {
                 provider: package.manifest().id.clone(),
             });
         }
         Ok(core)
     }
 
+    /// Returns discovered provider manifests without launching provider subprocesses.
     pub fn providers(&self) -> Vec<ProviderManifest> {
         self.inner
             .catalog
@@ -271,14 +123,51 @@ impl MisyCore {
             .collect()
     }
 
+    /// Reports whether opaque credentials exist for `provider`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the credential store cannot be read.
     pub fn has_credentials(&self, provider: &ProviderId) -> Result<bool, CoreError> {
         Ok(self.inner.credential_store.load(provider)?.is_some())
     }
 
+    /// Returns the saved authentication method without starting the provider process.
+    ///
+    /// Credentials stay opaque to the core; this exposes only the provider-owned `type` label
+    /// required to describe an existing login in clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the credential store cannot be read.
+    pub fn credential_method(&self, provider: &ProviderId) -> Result<Option<String>, CoreError> {
+        Ok(self
+            .inner
+            .credential_store
+            .load(provider)?
+            .and_then(|credentials| {
+                credentials
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            }))
+    }
+
+    /// Returns the number of provider processes that are currently healthy and running.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal lifecycle mutex is poisoned, which indicates a previous core thread
+    /// panicked while mutating lifecycle state.
     pub fn running_provider_count(&self) -> usize {
         self.inner.host.running_provider_count()
     }
 
+    /// Returns the selected direct-interaction model, if one exists.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the selected-model mutex is poisoned by an earlier core-thread panic.
     pub fn selected_model(&self) -> Option<ModelRef> {
         self.inner
             .selected_model
@@ -287,6 +176,11 @@ impl MisyCore {
             .clone()
     }
 
+    /// Returns a snapshot of the normalized in-memory conversation history.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the history mutex is poisoned by an earlier core-thread panic.
     pub fn history(&self) -> Vec<HistoryEntry> {
         self.inner
             .history
@@ -296,6 +190,10 @@ impl MisyCore {
     }
 
     /// Subscribes to bounded, non-blocking core events. Slow listeners may miss events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the subscriber mutex is poisoned by an earlier core-thread panic.
     pub fn subscribe(&self) -> Receiver<CoreEvent> {
         let snapshot_capacity = self.inner.catalog.len().max(128);
         let (sender, receiver) = mpsc::sync_channel(snapshot_capacity);
@@ -327,13 +225,18 @@ impl MisyCore {
             )
     }
 
+    /// Queries and sanitizes a provider's authentication state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the core is shut down or the provider request fails.
     pub fn auth_status(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         let result = self.sanitize_auth_response(self.provider_request(
             provider,
             "auth.status",
             json!({}),
         )?);
-        self.emit(CoreEvent::AuthenticationChanged {
+        self.emit(&CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
             authenticated: result
                 .get("authenticated")
@@ -342,15 +245,73 @@ impl MisyCore {
         });
         Ok(result)
     }
+    /// Starts a provider-owned authentication flow without exposing credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the core is shut down or the provider cannot start authentication.
     pub fn start_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        Ok(
-            self.sanitize_auth_response(self.provider_request(
-                provider,
-                "auth.start",
-                json!({}),
-            )?),
-        )
+        let package =
+            self.inner.catalog.get(provider.as_str()).ok_or_else(|| {
+                crate::ProviderError::UnknownProvider(provider.as_str().to_owned())
+            })?;
+        let method = package
+            .manifest()
+            .auth_methods
+            .first()
+            .map(|method| method.id.clone())
+            .ok_or_else(|| CoreError::UnsupportedAuthMethod {
+                provider: provider.clone(),
+                method: "default".to_owned(),
+            })?;
+        self.start_auth_with_method(provider, &method)
     }
+
+    /// Starts one provider-declared authentication method without exposing credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `method` is not declared by the provider, the core is shut down, or
+    /// the provider cannot start authentication.
+    pub fn start_auth_with_method(
+        &self,
+        provider: &ProviderId,
+        method: &str,
+    ) -> Result<Value, CoreError> {
+        let package =
+            self.inner.catalog.get(provider.as_str()).ok_or_else(|| {
+                crate::ProviderError::UnknownProvider(provider.as_str().to_owned())
+            })?;
+        if !package
+            .manifest()
+            .auth_methods
+            .iter()
+            .any(|candidate| candidate.id == method)
+        {
+            return Err(CoreError::UnsupportedAuthMethod {
+                provider: provider.clone(),
+                method: method.to_owned(),
+            });
+        }
+        Ok(self.sanitize_auth_response(self.provider_request(
+            provider,
+            "auth.start",
+            json!({ "method": method }),
+        )?))
+    }
+    /// Completes a provider-owned authentication flow and persists returned credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider completion or private credential persistence fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
+    /// earlier core-thread panic.
+    // Consuming the JSON completion preserves the established public API and avoids cloning an
+    // opaque, potentially large provider payload merely to construct the JSON-RPC request.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn complete_auth(
         &self,
         provider: &ProviderId,
@@ -371,12 +332,22 @@ impl MisyCore {
             .lock()
             .expect("credential operation mutex must not be poisoned");
         self.store_returned_credentials(provider, &mut result)?;
-        self.emit(CoreEvent::AuthenticationChanged {
+        self.emit(&CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
             authenticated: true,
         });
         Ok(self.sanitize_auth_response(result))
     }
+    /// Refreshes provider credentials and persists the provider's returned replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider refresh or private credential persistence fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
+    /// earlier core-thread panic.
     pub fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         let operation = self.auth_operation(provider);
         let _operation = operation
@@ -391,6 +362,16 @@ impl MisyCore {
         self.store_returned_credentials(provider, &mut result)?;
         Ok(self.sanitize_auth_response(result))
     }
+    /// Logs out a provider and removes its stored opaque credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when logout or credential removal fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal authentication or credential-operation mutex is poisoned by an
+    /// earlier core-thread panic.
     pub fn logout(&self, provider: &ProviderId) -> Result<(), CoreError> {
         let operation = self.auth_operation(provider);
         let _operation = operation
@@ -403,46 +384,83 @@ impl MisyCore {
             .lock()
             .expect("credential operation mutex must not be poisoned");
         self.inner.credential_store.remove(provider)?;
-        self.emit(CoreEvent::AuthenticationChanged {
+        self.emit(&CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
             authenticated: false,
         });
         Ok(())
     }
+    /// Fetches a provider's models and emits a [`CoreEvent::ModelsListed`] event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider request fails or its model payload is invalid.
     pub fn list_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
         let models = self.fetch_models(provider)?;
-        self.emit(CoreEvent::ModelsListed {
+        self.emit(&CoreEvent::ModelsListed {
             provider: provider.clone(),
             models: models.clone(),
         });
         Ok(models)
     }
-    /// Lists every discovered provider's models in provider and provider-model order
-    /// without publishing intermediate list events.
-    pub fn available_models(&self) -> Result<Vec<ModelInfo>, CoreError> {
-        let mut models = Vec::new();
+    /// Lists models from every provider with stored credentials.
+    ///
+    /// A provider failure is recorded in [`AvailableModels::errors`] so another provider can
+    /// still be selected. Local credential-store failures are returned directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when local credential-store access fails.
+    pub fn available_models(&self) -> Result<AvailableModels, CoreError> {
+        let mut available = AvailableModels::default();
         for provider in self.providers() {
-            models.extend(self.fetch_models(&provider.id)?);
+            if !self.has_credentials(&provider.id)? {
+                continue;
+            }
+            match self.fetch_models(&provider.id) {
+                Ok(models) => available.models.extend(models),
+                Err(error) => available.errors.push(ProviderModelError {
+                    provider: provider.id,
+                    provider_display_name: provider.display_name,
+                    message: error.to_string(),
+                }),
+            }
         }
-        Ok(models)
+        Ok(available)
     }
 
-    /// Selects the first model returned by the provider as its default.
+    /// Selects the provider-declared default model, falling back to its first model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider has no valid models or the selected model cannot be
+    /// persisted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the model-operation mutex is poisoned by an earlier core-thread panic.
     pub fn select_default_model(&self, provider: &ProviderId) -> Result<ModelRef, CoreError> {
         let _operation = self
             .inner
             .model_operations
             .lock()
             .expect("model operation mutex must not be poisoned");
-        let model = self
-            .fetch_models(provider)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| CoreError::InvalidModels("provider returned no models".to_owned()))?
-            .model;
+        let response = self.provider_request(provider, "models.list", json!({}))?;
+        let models = parse_models(provider, &response)?;
+        let model = select_catalog_default(provider, &response, &models)?;
         self.persist_selected_model(model.clone())?;
         Ok(model)
     }
+    /// Validates and persists a provider-scoped model selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider model list fails, does not include `model`, or the
+    /// selection cannot be persisted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the model-operation mutex is poisoned by an earlier core-thread panic.
     pub fn select_model(&self, model: ModelRef) -> Result<(), CoreError> {
         let _operation = self
             .inner
@@ -474,9 +492,19 @@ impl MisyCore {
             .selected_model
             .lock()
             .expect("selected model mutex must not be poisoned") = Some(model.clone());
-        self.emit(CoreEvent::ModelSelected { model });
+        self.emit(&CoreEvent::ModelSelected { model });
         Ok(())
     }
+    /// Starts asynchronous processing of one user or system message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::NoModelSelected`] when no direct-interaction model is selected, or
+    /// [`CoreError::Shutdown`] after shutdown.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the active-submission mutex is poisoned by an earlier core-thread panic.
     pub fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
         self.ensure_running()?;
         let model = self.selected_model().ok_or(CoreError::NoModelSelected)?;
@@ -491,9 +519,18 @@ impl MisyCore {
             .expect("active submissions mutex must not be poisoned")
             .insert(id.get(), Arc::clone(&active));
         let core = self.clone();
-        thread::spawn(move || core.run_submission(id, model, message, active));
+        thread::spawn(move || core.run_submission(id, &model, message, &active));
         Ok(id)
     }
+    /// Requests cancellation of an active submission and forwards provider cancellation when set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::UnknownSubmission`] when the submission is no longer active.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an active-submission mutex is poisoned by an earlier core-thread panic.
     pub fn cancel(&self, submission: SubmissionId) -> Result<(), CoreError> {
         let active = self
             .inner
@@ -514,6 +551,15 @@ impl MisyCore {
         }
         Ok(())
     }
+    /// Cancels active work, terminates provider processes, and emits [`CoreEvent::Shutdown`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if provider process shutdown fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an active-submission mutex is poisoned by an earlier core-thread panic.
     pub fn shutdown(&self) -> Result<(), CoreError> {
         if self.inner.is_shutdown.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -538,7 +584,7 @@ impl MisyCore {
             }
         }
         self.inner.host.shutdown()?;
-        self.emit(CoreEvent::Shutdown);
+        self.emit(&CoreEvent::Shutdown);
         Ok(())
     }
     fn ensure_running(&self) -> Result<(), CoreError> {
@@ -623,4 +669,30 @@ fn parse_models(provider: &ProviderId, response: &Value) -> Result<Vec<ModelInfo
             ))
         })
         .collect()
+}
+
+fn select_catalog_default(
+    provider: &ProviderId,
+    response: &Value,
+    models: &[ModelInfo],
+) -> Result<ModelRef, CoreError> {
+    let Some(default_id) = response.get("default_model") else {
+        return models
+            .first()
+            .map(|model| model.model.clone())
+            .ok_or_else(|| CoreError::InvalidModels("provider returned no models".to_owned()));
+    };
+    let default_id = default_id.as_str().ok_or_else(|| {
+        CoreError::InvalidModels("default_model must be a string when present".to_owned())
+    })?;
+    models
+        .iter()
+        .find(|model| model.model.model.as_str() == default_id)
+        .map(|model| model.model.clone())
+        .ok_or_else(|| {
+            CoreError::InvalidModels(format!(
+                "provider `{}` default_model `{default_id}` is not in its model catalog",
+                provider.as_str()
+            ))
+        })
 }

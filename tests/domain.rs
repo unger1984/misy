@@ -1,3 +1,5 @@
+//! Domain-contract integration tests.
+
 use misy::{
     Message, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition, ToolResult,
 };
@@ -24,7 +26,10 @@ fn normalized_domain_types_round_trip_through_json() {
     assert_eq!(call.arguments["path"], "README.md");
     assert!(!result.is_error);
     assert_eq!(
-        serde_json::from_str::<ModelRef>(&serde_json::to_string(&model).unwrap()).unwrap(),
+        serde_json::from_str::<ModelRef>(
+            &serde_json::to_string(&model).expect("serialize model reference"),
+        )
+        .expect("deserialize model reference"),
         model
     );
 }

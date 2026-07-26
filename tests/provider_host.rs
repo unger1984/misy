@@ -1,3 +1,5 @@
+//! Provider-host integration tests.
+
 use misy::{
     PROVIDER_PROTOCOL_VERSION, ProviderCatalog, ProviderDiscoveryError, ProviderError,
     ProviderHost, ProviderId,
@@ -13,6 +15,7 @@ fn write_manifest(root: &Path, id: &str, protocol_version: u32) {
         format!(
             r#"{{
   "id": "{id}",
+  "display_name": "{id} fixture",
   "version": "1.2.3",
   "kind": "provider",
   "protocol_version": {protocol_version},
@@ -22,7 +25,8 @@ fn write_manifest(root: &Path, id: &str, protocol_version: u32) {
   "repository": "https://example.test/repository",
   "license": "MIT",
   "command": "fixture-provider",
-  "args": []
+  "args": [],
+  "auth_methods": [{{"id": "oauth", "display_name": "Fixture OAuth"}}]
 }}"#
         ),
     )
@@ -89,6 +93,47 @@ fn discovery_rejects_manifest_without_required_metadata() {
 }
 
 #[test]
+fn discovery_requires_display_name_and_authentication_methods() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    write_manifest(&bundled, "missing-display-name", PROVIDER_PROTOCOL_VERSION);
+    let manifest = bundled.join("missing-display-name/misy-plugin.json");
+    let contents = fs::read_to_string(&manifest).expect("manifest");
+    fs::write(
+        &manifest,
+        contents.replace(
+            "  \"display_name\": \"missing-display-name fixture\",\n",
+            "",
+        ),
+    )
+    .expect("missing display name");
+
+    assert!(matches!(
+        ProviderCatalog::discover(&bundled, &installed),
+        Err(ProviderDiscoveryError::InvalidManifest { .. })
+    ));
+
+    fs::remove_dir_all(bundled.join("missing-display-name")).expect("remove invalid manifest");
+    write_manifest(&bundled, "missing-auth-methods", PROVIDER_PROTOCOL_VERSION);
+    let manifest = bundled.join("missing-auth-methods/misy-plugin.json");
+    let contents = fs::read_to_string(&manifest).expect("manifest");
+    fs::write(
+        &manifest,
+        contents.replace(
+            "  \"auth_methods\": [{\"id\": \"oauth\", \"display_name\": \"Fixture OAuth\"}]\n",
+            "  \"auth_methods\": []\n",
+        ),
+    )
+    .expect("empty auth methods");
+
+    assert!(matches!(
+        ProviderCatalog::discover(&bundled, &installed),
+        Err(ProviderDiscoveryError::InvalidManifestValue { .. })
+    ));
+}
+
+#[test]
 fn discovery_rejects_manifest_without_args() {
     let temporary = tempfile::tempdir().expect("temporary root");
     let bundled = temporary.path().join("bundled");
@@ -99,8 +144,8 @@ fn discovery_rejects_manifest_without_args() {
     fs::write(
         &manifest,
         contents.replace(
-            "  \"command\": \"fixture-provider\",\n  \"args\": []\n",
-            "  \"command\": \"fixture-provider\"\n",
+            "  \"command\": \"fixture-provider\",\n  \"args\": [],\n",
+            "  \"command\": \"fixture-provider\",\n",
         ),
     )
     .expect("missing args");
@@ -121,6 +166,7 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, log_file: &Path
         format!(
             r#"{{
   "id": "{id}",
+  "display_name": "{id} fixture",
   "version": "1.0.0",
   "kind": "provider",
   "protocol_version": 1,
@@ -130,7 +176,8 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, log_file: &Path
   "repository": "https://example.test/repository",
   "license": "MIT",
   "command": "{fixture}",
-  "args": ["{log_file}"]
+  "args": ["{log_file}"],
+  "auth_methods": [{{"id": "oauth", "display_name": "Fixture OAuth"}}]
 }}"#
         ),
     )

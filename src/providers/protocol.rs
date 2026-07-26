@@ -26,8 +26,11 @@ pub const CHAT_CANCEL_REQUEST_ID_FIELD: &str = "request_id";
 /// A JSON-RPC notification received from a provider subprocess.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProviderEvent {
+    /// Provider process that emitted this notification.
     pub provider: ProviderId,
+    /// Provider-defined JSON-RPC notification method.
     pub method: String,
+    /// Notification payload.
     pub params: Value,
 }
 
@@ -36,6 +39,7 @@ pub struct ProviderEvent {
 pub struct ProviderRequestId(pub(crate) u64);
 
 impl ProviderRequestId {
+    /// Returns the numeric JSON-RPC request identifier.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -44,26 +48,43 @@ impl ProviderRequestId {
 /// Errors returned by provider discovery, transport, or a remote JSON-RPC method.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderError {
+    /// No discovered package has the requested provider ID.
     UnknownProvider(String),
+    /// Launching a provider subprocess failed.
     Spawn {
+        /// Provider that could not be launched.
         provider: String,
+        /// Platform error description.
         message: String,
     },
+    /// Provider-process I/O failed.
     Transport {
+        /// Provider whose transport failed.
         provider: String,
+        /// Transport error description.
         message: String,
     },
+    /// A provider violated the JSON-RPC contract.
     Protocol {
+        /// Provider that sent invalid data.
         provider: String,
+        /// Protocol violation description.
         message: String,
     },
+    /// A provider returned a JSON-RPC error response.
     Remote {
+        /// Provider that returned the error.
         provider: String,
+        /// JSON-RPC error code.
         code: i64,
+        /// Provider-supplied error message.
         message: String,
+        /// Optional provider-supplied structured details.
         data: Option<Value>,
     },
+    /// The request was cancelled before its response arrived.
     Cancelled(ProviderRequestId),
+    /// The host has been shut down and accepts no new work.
     Shutdown,
 }
 

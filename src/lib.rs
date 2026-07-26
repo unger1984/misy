@@ -1,11 +1,13 @@
 //! Public contracts and runtime services for misy.
 
 pub mod config;
+pub mod core;
 pub mod domain;
 pub mod providers;
 pub mod tools;
 
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, CredentialStore, MisyPaths};
+pub use core::{CoreError, CoreEvent, HistoryEntry, MisyCore, SubmissionId};
 pub use domain::{
     Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition,
     ToolResult,

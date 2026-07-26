@@ -205,6 +205,14 @@ impl CredentialStore {
         write_atomic_private(&self.paths.credentials_file(), &contents).map_err(CredentialError::Io)
     }
 
+    /// Removes one provider's opaque credential record after a successful logout.
+    pub fn remove(&self, provider: &crate::domain::ProviderId) -> Result<(), CredentialError> {
+        let mut document = self.read_file()?;
+        document.providers.remove(provider.as_str());
+        let contents = serde_json::to_vec_pretty(&document).map_err(CredentialError::Serialize)?;
+        write_atomic_private(&self.paths.credentials_file(), &contents).map_err(CredentialError::Io)
+    }
+
     fn read_file(&self) -> Result<CredentialsFile, CredentialError> {
         let path = self.paths.credentials_file();
         let contents = match fs::read(path) {

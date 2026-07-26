@@ -1,10 +1,11 @@
 use super::{ProviderCatalog, ProviderError, ProviderEvent, ProviderPackage, ProviderRequestId};
 use crate::ProviderId;
+use command_group::{CommandGroup, GroupChild};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Write},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -196,7 +197,7 @@ struct ProviderProcess {
 
 #[derive(Debug)]
 struct ProcessIo {
-    child: Child,
+    child: GroupChild,
     stdin: Option<ChildStdin>,
 }
 
@@ -262,18 +263,28 @@ impl ProviderProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = command.spawn().map_err(|error| ProviderError::Spawn {
-            provider: provider.as_str().to_owned(),
-            message: error.to_string(),
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| ProviderError::Spawn {
-            provider: provider.as_str().to_owned(),
-            message: "child stdout was not piped".to_owned(),
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| ProviderError::Spawn {
-            provider: provider.as_str().to_owned(),
-            message: "child stdin was not piped".to_owned(),
-        })?;
+        let mut child = command
+            .group_spawn()
+            .map_err(|error| ProviderError::Spawn {
+                provider: provider.as_str().to_owned(),
+                message: error.to_string(),
+            })?;
+        let stdout = child
+            .inner()
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::Spawn {
+                provider: provider.as_str().to_owned(),
+                message: "child stdout was not piped".to_owned(),
+            })?;
+        let stdin = child
+            .inner()
+            .stdin
+            .take()
+            .ok_or_else(|| ProviderError::Spawn {
+                provider: provider.as_str().to_owned(),
+                message: "child stdin was not piped".to_owned(),
+            })?;
         let process = Self {
             provider: provider.clone(),
             io: Arc::new(Mutex::new(ProcessIo {

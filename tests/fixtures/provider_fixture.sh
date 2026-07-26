@@ -32,6 +32,12 @@ while IFS= read -r line; do
             printf '%s\n' 'not JSON'
             while :; do sleep 1; done
             ;;
+        *'"method":"test.malformed_descendant"'*)
+            sleep 30 &
+            printf 'descendant:%s\n' "$!" >> "$log_file"
+            printf '%s\n' 'not JSON'
+            while :; do sleep 1; done
+            ;;
         *'"method":"test.flood"'*)
             count=0
             while [ "$count" -lt 128 ]; do

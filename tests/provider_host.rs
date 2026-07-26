@@ -342,6 +342,53 @@ fn malformed_provider_is_terminated_and_reaped() {
 }
 
 #[test]
+fn malformed_provider_termination_reaps_long_lived_descendants() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+
+    assert!(matches!(
+        host.request(
+            &ProviderId::new("fixture"),
+            "test.malformed_descendant",
+            json!({})
+        ),
+        Err(ProviderError::Protocol { .. })
+    ));
+    let descendant = (0..20)
+        .find_map(|_| {
+            let pid = fs::read_to_string(&log_file)
+                .ok()?
+                .lines()
+                .find_map(|line| line.strip_prefix("descendant:")?.parse::<u32>().ok());
+            if pid.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            pid
+        })
+        .expect("fixture descendant pid");
+    let output = std::process::Command::new("kill")
+        .args(["-0", &descendant.to_string()])
+        .output()
+        .expect("check descendant liveness");
+    assert!(
+        !output.status.success(),
+        "provider descendants must be terminated with their process group"
+    );
+    host.shutdown().expect("shutdown");
+}
+
+#[test]
 fn unread_subscriber_does_not_block_flooded_provider() {
     let temporary = tempfile::tempdir().expect("temporary root");
     let bundled = temporary.path().join("bundled");

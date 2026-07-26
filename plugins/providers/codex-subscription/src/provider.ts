@@ -12,6 +12,7 @@ export type ProviderConfig = {
   clientId: string;
   codexBaseUrl: string;
   scopes: string[];
+  originator: string;
 };
 
 export type AuthSession = { id: string; url: string; session: { id: string } };
@@ -36,6 +37,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
   clientId: process.env.MISY_CODEX_CLIENT_ID ?? "app_EMoamEEZ73f0CkXaXp7hrann",
   codexBaseUrl: process.env.MISY_CODEX_BASE_URL ?? "https://chatgpt.com/backend-api/codex",
   scopes: (process.env.MISY_CODEX_OAUTH_SCOPES ?? "openid profile email offline_access api.connectors.read api.connectors.invoke").split(" ").filter(Boolean),
+  originator: process.env.MISY_CODEX_ORIGINATOR ?? "codex_cli_rs",
 };
 
 /** Stateless API adapter; temporary OAuth callbacks are retained only in memory. */
@@ -55,25 +57,21 @@ export class CodexSubscriptionProvider {
       resolveCode = resolve;
     });
     let server: ReturnType<typeof Bun.serve> | undefined;
-    server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: (request) => {
-        const callback = new URL(request.url);
-        if (callback.pathname !== "/callback") return new Response("Not found", { status: 404 });
-        if (callback.searchParams.get("state") !== state) {
-          return new Response("OAuth state did not match", { status: 400 });
-        }
-        const authorizationCode = callback.searchParams.get("code");
-        if (!authorizationCode) {
-          resolveCode({ error: "OAuth callback did not include an authorization code" });
-          return new Response("OAuth code is missing", { status: 400 });
-        }
-        resolveCode({ code: authorizationCode });
-        return new Response("Authentication completed. You may close this window.");
-      },
+    server = bindCallbackServer((request) => {
+      const callback = new URL(request.url);
+      if (callback.pathname !== "/auth/callback") return new Response("Not found", { status: 404 });
+      if (callback.searchParams.get("state") !== state) {
+        return new Response("OAuth state did not match", { status: 400 });
+      }
+      const authorizationCode = callback.searchParams.get("code");
+      if (!authorizationCode) {
+        resolveCode({ error: "OAuth callback did not include an authorization code" });
+        return new Response("OAuth code is missing", { status: 400 });
+      }
+      resolveCode({ code: authorizationCode });
+      return new Response("Authentication completed. You may close this window.");
     });
-    const redirectUri = `http://127.0.0.1:${server.port}/callback`;
+    const redirectUri = `http://localhost:${server.port}/auth/callback`;
     const url = new URL("/oauth/authorize", this.config.issuer);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", this.config.clientId);
@@ -84,6 +82,7 @@ export class CodexSubscriptionProvider {
     url.searchParams.set("code_challenge_method", "S256");
     url.searchParams.set("id_token_add_organizations", "true");
     url.searchParams.set("codex_cli_simplified_flow", "true");
+    url.searchParams.set("originator", this.config.originator);
     const id = randomUrlToken(18);
     this.pending.set(id, { verifier, redirectUri, code, stop: () => server?.stop(true) });
     return { id, url: url.toString(), session: { id } };
@@ -213,6 +212,17 @@ export class CodexSubscriptionProvider {
 }
 
 function withSlash(url: string) { return url.endsWith("/") ? url : `${url}/`; }
+function bindCallbackServer(fetch: (request: Request) => Response): ReturnType<typeof Bun.serve> {
+  try {
+    return Bun.serve({ hostname: "127.0.0.1", port: 1455, fetch });
+  } catch (error) {
+    if (!isAddressInUse(error)) throw error;
+    return Bun.serve({ hostname: "127.0.0.1", port: 1457, fetch });
+  }
+}
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
+}
 function bearer(credentials: Credentials) { return { authorization: `Bearer ${credentials.access_token}` }; }
 function randomUrlToken(bytes: number) { return Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("base64url"); }
 async function pkceChallenge(verifier: string) { return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString("base64url"); }

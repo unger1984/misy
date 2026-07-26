@@ -2,8 +2,10 @@
 
 This is a standalone Bun/TypeScript provider package for a ChatGPT Codex
 subscription. It implements Misy provider protocol v1 over JSON-RPC 2.0 NDJSON.
-It uses an OAuth Authorization Code flow with PKCE and an ephemeral
-`127.0.0.1` callback; it never reads, writes, or reuses `~/.codex`, and it does
+It uses an OAuth Authorization Code flow with PKCE and a short-lived
+`127.0.0.1` listener on Codex's registered callback ports (1455, then 1457); it
+advertises the registered `http://localhost:<port>/auth/callback` redirect. It
+never reads, writes, or reuses `~/.codex`, and it does
 not invoke the Codex CLI.
 
 ## Install locally
@@ -38,6 +40,7 @@ network access:
 - `MISY_CODEX_BASE_URL`
 - `MISY_CODEX_CLIENT_ID`
 - `MISY_CODEX_OAUTH_SCOPES`
+- `MISY_CODEX_ORIGINATOR`
 
 The provider accepts current model lists from `GET /models` and streams
 `POST /responses` with `Accept: text/event-stream`. Tool definitions become

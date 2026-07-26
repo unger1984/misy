@@ -40,13 +40,14 @@ test("exchanges a localhost PKCE callback for opaque credentials", async () => {
   const started = await provider.startAuth();
   const authorization = new URL(started.url);
   const callback = authorization.searchParams.get("redirect_uri");
-  expect(callback).toStartWith("http://127.0.0.1:");
+  expect(callback).toBe("http://localhost:1455/auth/callback");
   expect(authorization.searchParams.get("response_type")).toBe("code");
   expect(authorization.searchParams.get("client_id")).toBe("test-client");
   expect(authorization.searchParams.get("scope")).toBe("openid profile email offline_access api.connectors.read api.connectors.invoke");
   expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
   expect(authorization.searchParams.get("id_token_add_organizations")).toBe("true");
   expect(authorization.searchParams.get("codex_cli_simplified_flow")).toBe("true");
+  expect(authorization.searchParams.get("originator")).toBe("codex_cli_rs");
   await fetch(`${callback}?code=browser-code&state=${authorization.searchParams.get("state")}`);
 
   const completed = await provider.completeAuth(started.session, {});
@@ -58,6 +59,24 @@ test("exchanges a localhost PKCE callback for opaque credentials", async () => {
     redirect_uri: callback,
   });
   expect(tokenBody?.code_verifier.length).toBeGreaterThanOrEqual(43);
+});
+
+test("falls back to the registered callback port when 1455 is in use", async () => {
+  const occupied = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 1455,
+    fetch: () => new Response("occupied"),
+  });
+  servers.push(occupied);
+  const issuer = fakeServer(({ pathname }) => pathname === "/oauth/token"
+    ? Response.json({ access_token: "access", refresh_token: "refresh" })
+    : new Response("not found", { status: 404 }));
+  const provider = new CodexSubscriptionProvider({ issuer, clientId: "test-client", codexBaseUrl: issuer });
+
+  const started = await provider.startAuth();
+  expect(new URL(started.url).searchParams.get("redirect_uri"))
+    .toBe("http://localhost:1457/auth/callback");
+  await provider.completeAuth(started.session, { code: "manual-code" });
 });
 
 test("refreshes, lists dynamic models, and maps response streaming tool events", async () => {

@@ -124,3 +124,38 @@ Final remediation verification:
 - `git diff --check` — passed.
 - No Rust files changed in this remediation wave, so the previously green
   Rust credential-handoff regression was not rerun.
+
+## Registered Hydra callback remediation
+
+The real-browser `authorize_hydra_invalid_request` failure was traced to a
+redirect URI outside the Codex OAuth client's registered loopback contract.
+The provider now mirrors current official Codex behavior:
+
+- bind `127.0.0.1:1455`, falling back to `127.0.0.1:1457` only when the
+  preferred address is already in use;
+- advertise `http://localhost:<port>/auth/callback` exactly;
+- accept the browser callback only at `/auth/callback`;
+- send the required `originator=codex_cli_rs`, derived from the current
+  `codex-rs/login/src/auth/default_client.rs` `DEFAULT_ORIGINATOR` value;
+- retain issuer, client ID, scopes, API base URL, and originator injection for
+  local fake-server testing.
+
+### Hydra remediation TDD evidence
+
+RED — `bun test tests/provider.test.ts`:
+
+- `exchanges a localhost PKCE callback for opaque credentials` failed because
+  the redirect was `http://127.0.0.1:<random>/callback`, not
+  `http://localhost:1455/auth/callback`.
+- `falls back to the registered callback port when 1455 is in use` failed
+  because another random port was selected instead of 1457.
+- Result: **5 pass, 2 fail, 15 assertions**.
+
+GREEN — `bun test tests/provider.test.ts`: **7 pass, 0 fail, 25 assertions**.
+
+Final Hydra remediation verification:
+
+- `bun test` — **9 pass, 0 fail, 31 assertions**.
+- `bunx tsc --noEmit` — passed with no diagnostics.
+- `git diff --check` — passed.
+- Plugin-only change; no Rust/TUI files were touched.

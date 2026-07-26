@@ -303,11 +303,25 @@ impl UiState {
 
     fn set_selected_model(&mut self, model: ModelRef) {
         self.selected_model = Some(model.clone());
-        self.transcript.push(TranscriptRow::Model {
-            provider: model.provider.as_str().to_owned(),
-            id: model.model.as_str().to_owned(),
-            selected: true,
-        });
+        let mut found = false;
+        for row in &mut self.transcript {
+            if let TranscriptRow::Model {
+                provider,
+                id,
+                selected,
+            } = row
+            {
+                *selected = provider == model.provider.as_str() && id == model.model.as_str();
+                found |= *selected;
+            }
+        }
+        if !found {
+            self.transcript.push(TranscriptRow::Model {
+                provider: model.provider.as_str().to_owned(),
+                id: model.model.as_str().to_owned(),
+                selected: true,
+            });
+        }
     }
 
     fn apply_core_event(&mut self, event: CoreEvent) {

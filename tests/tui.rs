@@ -164,6 +164,15 @@ fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
             .state()
             .transcript()
             .iter()
+            .filter(|row| matches!(row, TranscriptRow::Model { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        client
+            .state()
+            .transcript()
+            .iter()
             .filter(|row| matches!(row, TranscriptRow::Model { selected: true, .. }))
             .count(),
         1

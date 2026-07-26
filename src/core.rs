@@ -388,10 +388,7 @@ impl MisyCore {
         Ok(())
     }
     pub fn list_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
-        let models = parse_models(
-            provider,
-            &self.provider_request(provider, "models.list", json!({}))?,
-        )?;
+        let models = self.fetch_models(provider)?;
         self.emit(CoreEvent::ModelsListed {
             provider: provider.clone(),
             models: models.clone(),
@@ -405,7 +402,7 @@ impl MisyCore {
             .lock()
             .expect("model operation mutex must not be poisoned");
         if !self
-            .list_models(&model.provider)?
+            .fetch_models(&model.provider)?
             .iter()
             .any(|available| available.model == model)
         {
@@ -421,6 +418,13 @@ impl MisyCore {
             .expect("selected model mutex must not be poisoned") = Some(model.clone());
         self.emit(CoreEvent::ModelSelected { model });
         Ok(())
+    }
+
+    fn fetch_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
+        parse_models(
+            provider,
+            &self.provider_request(provider, "models.list", json!({}))?,
+        )
     }
     pub fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
         self.ensure_running()?;

@@ -90,7 +90,8 @@ fn dispatcher_runs_a_command_without_a_shell() {
 #[cfg(unix)]
 #[test]
 fn dispatcher_reports_command_timeout_after_killing_and_reaping_the_child() {
-    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new())
+        .with_command_limits(std::time::Duration::from_millis(50));
 
     let result = dispatcher.dispatch(&ToolCall::new(
         "command-timeout",

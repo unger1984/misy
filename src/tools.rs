@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Definitions available to providers. Built-ins are installed on construction.
@@ -118,11 +118,22 @@ impl Error for ToolRegistryError {}
 #[derive(Clone, Debug)]
 pub struct ToolDispatcher {
     registry: ToolRegistry,
+    command_timeout: Duration,
 }
 
 impl ToolDispatcher {
     pub fn new(registry: ToolRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            command_timeout: COMMAND_TIMEOUT,
+        }
+    }
+
+    pub fn with_command_limits(self, command_timeout: Duration) -> Self {
+        Self {
+            command_timeout,
+            ..self
+        }
     }
 
     pub fn dispatch(&self, call: &ToolCall) -> ToolResult {
@@ -230,7 +241,7 @@ impl ToolDispatcher {
                 .take()
                 .expect("piped stderr is available after spawn"),
         );
-        let status = match wait_for_command(&mut child) {
+        let status = match wait_for_command(&mut child, self.command_timeout) {
             Ok(Some(status)) => status,
             Ok(None) => {
                 let termination_error = terminate_and_reap(&mut child)
@@ -348,8 +359,11 @@ fn join_capture(handle: JoinHandle<io::Result<CapturedStream>>) -> CapturedStrea
     handle.join().ok().and_then(Result::ok).unwrap_or_default()
 }
 
-fn wait_for_command(child: &mut GroupChild) -> io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
+fn wait_for_command(
+    child: &mut GroupChild,
+    command_timeout: Duration,
+) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + command_timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));

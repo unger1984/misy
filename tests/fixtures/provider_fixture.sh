@@ -11,7 +11,7 @@ while IFS= read -r line; do
 
     case "$line" in
         *'"method":"chat.start"'*)
-            printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"fixture"}}'
+            printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"fixture"}}\n' "$id"
             case "$line" in
                 *'"delay":"slow"'*)
                     (sleep 1; printf '{"jsonrpc":"2.0","id":%s,"result":{"reply":"slow"}}\n' "$id") &
@@ -41,7 +41,7 @@ while IFS= read -r line; do
         *'"method":"test.flood"'*)
             count=0
             while [ "$count" -lt 128 ]; do
-                printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"flood"}}'
+                printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"flood"}}\n' "$id"
                 count=$((count + 1))
             done
             printf '{"jsonrpc":"2.0","id":%s,"result":{"flooded":true}}\n' "$id"

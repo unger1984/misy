@@ -183,12 +183,7 @@ impl MisyCore {
             }
             match events.recv_timeout(Duration::from_millis(20)) {
                 Ok(event) => {
-                    if event
-                        .params
-                        .get("request_id")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|event_request_id| event_request_id != request_id)
-                    {
+                    if event.params.get("request_id").and_then(Value::as_u64) != Some(request_id) {
                         continue;
                     }
                     match event.method.as_str() {

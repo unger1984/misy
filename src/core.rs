@@ -149,8 +149,39 @@ impl From<ProviderDiscoveryError> for CoreError {
 }
 impl From<ProviderError> for CoreError {
     fn from(error: ProviderError) -> Self {
-        Self::Provider(error)
+        Self::Provider(match error {
+            ProviderError::Remote {
+                provider,
+                code,
+                message,
+                data,
+            } => ProviderError::Remote {
+                provider,
+                code,
+                message,
+                data: data.map(strip_credentials),
+            },
+            error => error,
+        })
     }
+}
+
+fn strip_credentials(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            object.remove("credentials");
+            for child in object.values_mut() {
+                *child = strip_credentials(std::mem::take(child));
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                *child = strip_credentials(std::mem::take(child));
+            }
+        }
+        _ => {}
+    }
+    value
 }
 
 /// Public, headless agent runtime. TUI and desktop clients consume only this contract.
@@ -253,7 +284,8 @@ impl MisyCore {
 
     /// Subscribes to bounded, non-blocking core events. Slow listeners may miss events.
     pub fn subscribe(&self) -> Receiver<CoreEvent> {
-        let (sender, receiver) = mpsc::sync_channel(128);
+        let snapshot_capacity = self.inner.catalog.len().max(128);
+        let (sender, receiver) = mpsc::sync_channel(snapshot_capacity);
         for package in self.inner.catalog.packages() {
             let _ = sender.try_send(CoreEvent::ProviderDiscovered {
                 provider: package.manifest().id.clone(),

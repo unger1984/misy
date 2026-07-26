@@ -157,6 +157,24 @@ fn core_sanitizes_all_public_auth_responses() {
 }
 
 #[test]
+fn core_sanitizes_credentials_from_remote_auth_errors() {
+    let (_temporary, core, _) = test_core("remote-auth-error");
+    let provider = ProviderId::new("fixture");
+    let error = core
+        .complete_auth(&provider, json!({"code":"remote-error"}))
+        .expect_err("remote auth failure");
+    let misy::CoreError::Provider(misy::ProviderError::Remote { data, .. }) = error else {
+        panic!("expected remote provider error");
+    };
+    assert!(
+        !serde_json::to_string(&data)
+            .expect("error data")
+            .contains("secret")
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn subscription_replays_the_discovered_provider_snapshot() {
     let (_temporary, core, _) = test_core("provider-snapshot");
     let events = core.subscribe();
@@ -164,6 +182,36 @@ fn subscription_replays_the_discovered_provider_snapshot() {
         events.recv_timeout(Duration::from_secs(1)).expect("provider snapshot"),
         CoreEvent::ProviderDiscovered { provider } if provider.as_str() == "fixture"
     ));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn subscription_snapshot_includes_more_than_the_default_event_buffer() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let target = temporary.path().join("target.txt");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    for index in 0..129 {
+        write_fixture_manifest(&bundled, &format!("fixture-{index}"), &fixture, &target);
+    }
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core discovery");
+    let events = core.subscribe();
+    let mut providers = std::collections::BTreeSet::new();
+    for _ in 0..129 {
+        let CoreEvent::ProviderDiscovered { provider } = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("snapshot event")
+        else {
+            panic!("only provider snapshot events are expected");
+        };
+        providers.insert(provider.as_str().to_owned());
+    }
+    assert_eq!(providers.len(), 129);
     core.shutdown().expect("shutdown");
 }
 

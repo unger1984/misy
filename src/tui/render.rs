@@ -1,4 +1,4 @@
-//! Ratatui widgets for the inline bottom pane and terminal-history cells.
+//! Ratatui widgets for the fullscreen transcript and interaction surfaces.
 
 use super::{
     action::UiMode,
@@ -18,27 +18,28 @@ use std::time::Instant;
 const MAX_VIEW_ROWS: usize = 8;
 const POPUP_TOP_SPACE: u16 = 1;
 
-/// Renders the small, changing pane below scrollback history.
+/// Renders the complete fullscreen client.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
+    render_with_composer_area(frame, state);
+}
+
+pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiState) -> Rect {
     let area = frame.area();
     let popup_rows = state.command_popup_rows_for_render();
     let modal = state.modal_presentation(MAX_VIEW_ROWS);
-    let live_rows = state.live_transcript();
-    let live_height = text_height(live_rows, area.width);
     let composer_height = composer_height(state);
     let surface_height = surface_height(&popup_rows, modal.as_ref());
     let busy = state.busy_label(Instant::now());
     let areas = Layout::vertical([
-        Constraint::Length(live_height),
+        Constraint::Min(0),
         Constraint::Length(u16::from(busy.is_some())),
         Constraint::Length(composer_height),
         Constraint::Length(surface_height),
         Constraint::Length(1),
-        Constraint::Min(0),
     ])
     .split(area);
 
-    render_transcript(frame, areas[0], live_rows);
+    render_transcript(frame, areas[0], state);
     if let Some(label) = busy {
         frame.render_widget(
             Paragraph::new(Line::styled(label, style::accent())),
@@ -49,19 +50,12 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
     render_surface(frame, areas[3], &popup_rows, modal.as_ref());
     render_footer(frame, areas[4], state);
     render_cursor(frame, areas[2], state);
+    areas[2]
 }
 
-/// Converts finalized or live transcript rows into styled terminal lines.
+/// Converts transcript rows into styled terminal lines.
 pub(super) fn transcript_lines(rows: &[TranscriptRow]) -> Vec<Line<'static>> {
     rows.iter().flat_map(row_lines).collect()
-}
-
-fn text_height(rows: &[TranscriptRow], width: u16) -> u16 {
-    if rows.is_empty() || width == 0 {
-        return 0;
-    }
-    let paragraph = Paragraph::new(Text::from(transcript_lines(rows))).wrap(Wrap { trim: false });
-    u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX)
 }
 
 fn composer_height(state: &UiState) -> u16 {
@@ -86,14 +80,16 @@ fn surface_height(popup_rows: &[CommandPopupRow], modal: Option<&ModalPresentati
     u16::try_from(2 + row_count + back_hint).unwrap_or(u16::MAX)
 }
 
-fn render_transcript(frame: &mut ratatui::Frame, area: Rect, rows: &[TranscriptRow]) {
-    if rows.is_empty() || area.is_empty() {
+fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
+    if area.is_empty() {
         return;
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(transcript_lines(rows))).wrap(Wrap { trim: false }),
-        area,
-    );
+    let mut lines = state.startup_header.lines(area.width);
+    lines.extend(transcript_lines(state.transcript()));
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    let total_height = u16::try_from(paragraph.line_count(area.width)).unwrap_or(u16::MAX);
+    let scroll = total_height.saturating_sub(area.height);
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
 fn row_lines(row: &TranscriptRow) -> Vec<Line<'static>> {

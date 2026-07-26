@@ -115,6 +115,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             .collect();
         let (operation_sender, operation_results) = mpsc::channel();
         let mut state = UiState::default();
+        let working_directory = std::env::current_dir().ok();
+        state.set_startup_header(selected_model.as_ref(), working_directory.as_deref());
         if let Some(history) = &prompt_history {
             match history.load() {
                 Ok(entries) => state.composer = super::composer::Composer::with_history(entries),
@@ -159,6 +161,23 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
     }
 
+    /// Inserts one terminal paste without interpreting embedded newlines as submissions.
+    pub fn paste_text(&mut self, text: &str) {
+        let normalized = normalize_paste(text);
+        if self.state.mode() == UiMode::Input {
+            self.state.composer.insert_str(&normalized);
+        } else {
+            self.state
+                .insert_filter(&normalized.replace(['\n', '\t'], " "));
+        }
+    }
+
+    pub(super) fn position_composer_cursor(&mut self, row: u16, column: u16) {
+        if self.state.mode() == UiMode::Input {
+            self.state.composer.position_cursor(row, column);
+        }
+    }
+
     /// Inserts a newline without submitting the composer.
     pub fn insert_newline(&mut self) {
         if self.state.mode() == UiMode::Input {
@@ -173,6 +192,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
         } else {
             self.state.backspace_filter();
         }
+    }
+
+    pub(super) fn report_terminal_error(&mut self, error: impl fmt::Display) {
+        self.state.add_error(error);
     }
 
     /// Submits the composer or accepts its slash-command completion.
@@ -590,4 +613,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
         Ok(())
     }
+}
+
+fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect()
 }

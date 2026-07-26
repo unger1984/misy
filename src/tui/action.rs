@@ -56,9 +56,9 @@ pub enum UiKey {
     Up,
     /// Down arrow.
     Down,
-    /// Page-up key delegated to terminal scrollback.
+    /// Page-up key reserved for transcript navigation.
     PageUp,
-    /// Page-down key delegated to terminal scrollback.
+    /// Page-down key reserved for transcript navigation.
     PageDown,
     /// Left arrow.
     Left,

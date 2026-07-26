@@ -4,6 +4,7 @@ use super::{
     action::{UiAction, UiMode},
     composer::Composer,
     list::{ListRow, ListView},
+    startup_header::StartupHeader,
 };
 use crate::{
     AvailableModels, CoreEvent, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId, ToolResult,
@@ -115,9 +116,9 @@ impl ProviderOperationKind {
 }
 
 /// State rendered by Ratatui. Rendering depends only on this value.
-#[derive(Default)]
 pub struct UiState {
     pub(super) composer: Composer,
+    pub(super) startup_header: StartupHeader,
     transcript: Vec<TranscriptRow>,
     providers: BTreeMap<String, ProviderChoice>,
     provider_names: BTreeMap<String, String>,
@@ -127,6 +128,24 @@ pub struct UiState {
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
     pub(super) provider_operation: Option<(ProviderId, ProviderOperationKind)>,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            composer: Composer::default(),
+            startup_header: StartupHeader::new(None, None),
+            transcript: Vec::new(),
+            providers: BTreeMap::new(),
+            provider_names: BTreeMap::new(),
+            selected_model: None,
+            active_submission: None,
+            submission_started_at: None,
+            should_exit: false,
+            view: None,
+            provider_operation: None,
+        }
+    }
 }
 
 impl UiState {
@@ -268,6 +287,14 @@ impl UiState {
 
     pub(super) fn set_selected_model(&mut self, model: Option<ModelRef>) {
         self.selected_model = model;
+    }
+
+    pub(super) fn set_startup_header(
+        &mut self,
+        model: Option<&ModelRef>,
+        directory: Option<&std::path::Path>,
+    ) {
+        self.startup_header = StartupHeader::new(model, directory);
     }
 
     pub(super) fn open_providers(&mut self, providers: Vec<ProviderChoice>) {
@@ -481,34 +508,6 @@ impl UiState {
             "{frame} Working… ({}s · esc to interrupt)",
             elapsed.as_secs()
         ))
-    }
-
-    /// Returns the contiguous finalized prefix suitable for terminal scrollback.
-    ///
-    /// The active response and tool activity remain in the inline viewport until the core marks
-    /// the submission complete, preventing a delta-by-delta trail in terminal history.
-    pub(super) fn finalized_transcript_len(&self) -> usize {
-        let Some(_) = self.active_submission else {
-            return self.transcript.len();
-        };
-        let prompt_end = self
-            .transcript
-            .iter()
-            .rposition(|row| matches!(row, TranscriptRow::UserPrompt(_)))
-            .map_or(0, |index| index + 1);
-        self.transcript[prompt_end..]
-            .iter()
-            .rposition(|row| matches!(row, TranscriptRow::ToolResult { .. }))
-            .map_or(prompt_end, |index| prompt_end + index + 1)
-    }
-
-    /// Returns only the currently changing response/tool rows for the inline viewport.
-    pub(super) fn live_transcript(&self) -> &[TranscriptRow] {
-        if self.active_submission.is_none() {
-            return &[];
-        }
-        let first_live = self.finalized_transcript_len();
-        &self.transcript[first_live..]
     }
 
     fn provider_list(&self) -> ListView<ProviderId> {

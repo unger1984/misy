@@ -1,66 +1,75 @@
-//! Crossterm event loop for the inline terminal client.
+//! Crossterm event loop for the fullscreen terminal client.
 
 use super::{
     action::UiKey,
     browser::SystemBrowser,
     client::TuiClient,
-    render::{render, transcript_lines},
+    clipboard::{Clipboard, SystemClipboard, write_osc52_copy},
+    render::render_with_composer_area,
+    screen_selection::ScreenSelection,
 };
 use crate::{MisyCore, MisyPaths};
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
+    Terminal,
     backend::CrosstermBackend,
-    text::Text,
-    widgets::{Paragraph, Widget, Wrap},
+    layout::{Position, Rect},
 };
 use std::{io, io::Write, time::Duration};
 
-const INLINE_VIEWPORT_HEIGHT: u16 = 18;
 const ENABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4m";
 
-/// Starts the interactive client without replacing the user's terminal screen.
-///
-/// Finalized rows are inserted ahead of Ratatui's inline viewport, making them ordinary terminal
-/// scrollback that remains visible after exit. The fixed viewport is deliberately modest; widgets
-/// occupy only their content-driven prefix inside it.
+/// Starts the fullscreen interactive client and restores the prior terminal screen on exit.
 ///
 /// # Errors
 ///
-/// Returns terminal setup, event-read, history-insertion, or draw failures.
+/// Returns terminal setup, event-read, clipboard-transfer, or draw failures.
 pub fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
     let stdout = io::stdout();
     let mut guard = TerminalGuard::enter()?;
     let mut client = TuiClient::with_persistent_history(core, SystemBrowser, paths);
     let result = (|| {
         let backend = CrosstermBackend::new(stdout.lock());
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-            },
-        )?;
-        let mut printed_rows = 0;
+        let mut terminal = Terminal::new(backend)?;
+        let mut clipboard = SystemClipboard::default();
+        let mut selection = ScreenSelection::default();
+        let mut composer_area = Rect::default();
+        let mut composer_click_started = false;
         while !client.state().should_exit() {
-            insert_finalized_history(&mut terminal, client.state(), &mut printed_rows)?;
-            terminal.draw(|frame| render(frame, client.state()))?;
-            if event::poll(Duration::from_millis(50))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                route_key(&mut client, key);
+            terminal.draw(|frame| {
+                composer_area = render_with_composer_area(frame, client.state());
+                selection.render(frame.buffer_mut());
+            })?;
+            if event::poll(Duration::from_millis(50))? {
+                let copied = route_event(
+                    &mut client,
+                    &mut clipboard,
+                    &mut selection,
+                    composer_area,
+                    &mut composer_click_started,
+                    event::read()?,
+                );
+                if let Some(text) = copied
+                    && let Err(error) = write_osc52_copy(terminal.backend_mut(), &text)
+                {
+                    client.report_terminal_error(error);
+                }
             }
             client.pump_events();
         }
-        insert_finalized_history(&mut terminal, client.state(), &mut printed_rows)?;
         Ok(())
     })();
     client.handle_ctrl_c();
@@ -68,32 +77,84 @@ pub fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
     result
 }
 
-fn insert_finalized_history(
-    terminal: &mut Terminal<CrosstermBackend<std::io::StdoutLock<'_>>>,
-    state: &super::state::UiState,
-    printed_rows: &mut usize,
-) -> Result<(), io::Error> {
-    let finalized = state.finalized_transcript_len();
-    if finalized <= *printed_rows {
-        return Ok(());
+fn route_event(
+    client: &mut TuiClient<SystemBrowser>,
+    clipboard: &mut impl Clipboard,
+    selection: &mut ScreenSelection,
+    composer_area: Rect,
+    composer_click_started: &mut bool,
+    event: Event,
+) -> Option<String> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            route_key(client, clipboard, key);
+            None
+        }
+        Event::Paste(text) => {
+            client.paste_text(&text);
+            None
+        }
+        Event::Mouse(mouse) => route_mouse(
+            client,
+            selection,
+            composer_area,
+            composer_click_started,
+            mouse,
+        ),
+        _ => None,
     }
-    let lines = transcript_lines(&state.transcript()[*printed_rows..finalized]);
-    let width = terminal.size()?.width;
-    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    let height = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
-    terminal.insert_before(height, |buffer| paragraph.render(buffer.area, buffer))?;
-    *printed_rows = finalized;
-    Ok(())
 }
 
-fn route_key(client: &mut TuiClient<SystemBrowser>, key: KeyEvent) {
+fn route_mouse(
+    client: &mut TuiClient<SystemBrowser>,
+    selection: &mut ScreenSelection,
+    composer_area: Rect,
+    composer_click_started: &mut bool,
+    mouse: MouseEvent,
+) -> Option<String> {
+    let position = Position::new(mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            selection.begin(position);
+            *composer_click_started = composer_area.contains(position);
+            None
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            selection.drag(position);
+            None
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let copied = selection.finish(position);
+            if copied.is_none() && *composer_click_started && composer_area.contains(position) {
+                let row = mouse.row.saturating_sub(composer_area.y.saturating_add(1));
+                let column = mouse
+                    .column
+                    .saturating_sub(composer_area.x.saturating_add(3));
+                client.position_composer_cursor(row, column);
+            }
+            *composer_click_started = false;
+            copied
+        }
+        _ => None,
+    }
+}
+
+fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboard, key: KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         client.handle_ctrl_c();
+        return;
+    }
+    if key.modifiers.contains(KeyModifiers::SUPER) && key.code == KeyCode::Char('v') {
+        match clipboard.paste() {
+            Ok(text) => client.paste_text(&text),
+            Err(error) => client.report_terminal_error(error),
+        }
         return;
     }
     if let KeyCode::Char(character) = key.code
         && !key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SUPER)
     {
         if client.state().mode() != super::action::UiMode::Input
             && let Some(index) = character.to_digit(10)
@@ -136,6 +197,9 @@ struct TerminalGuard {
     restored: bool,
     keyboard_enhancement_enabled: bool,
     modify_other_keys_enabled: bool,
+    bracketed_paste_enabled: bool,
+    alternate_screen_enabled: bool,
+    mouse_capture_enabled: bool,
 }
 
 impl TerminalGuard {
@@ -145,8 +209,17 @@ impl TerminalGuard {
             restored: false,
             keyboard_enhancement_enabled: false,
             modify_other_keys_enabled: false,
+            bracketed_paste_enabled: false,
+            alternate_screen_enabled: false,
+            mouse_capture_enabled: false,
         };
         let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        guard.alternate_screen_enabled = true;
+        execute!(stdout, EnableMouseCapture)?;
+        guard.mouse_capture_enabled = true;
+        execute!(stdout, EnableBracketedPaste)?;
+        guard.bracketed_paste_enabled = true;
         if supports_keyboard_enhancement().unwrap_or(false) {
             execute!(
                 stdout,
@@ -170,6 +243,15 @@ impl TerminalGuard {
         }
         if self.modify_other_keys_enabled {
             let _ = write_escape(&mut stdout, DISABLE_MODIFY_OTHER_KEYS);
+        }
+        if self.bracketed_paste_enabled {
+            let _ = execute!(stdout, DisableBracketedPaste);
+        }
+        if self.mouse_capture_enabled {
+            let _ = execute!(stdout, DisableMouseCapture);
+        }
+        if self.alternate_screen_enabled {
+            let _ = execute!(stdout, LeaveAlternateScreen);
         }
         let _ = disable_raw_mode();
         self.restored = true;

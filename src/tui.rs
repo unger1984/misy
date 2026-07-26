@@ -3,10 +3,13 @@
 mod action;
 mod browser;
 mod client;
+mod clipboard;
 mod composer;
 mod history;
 mod list;
 mod render;
+mod screen_selection;
+mod startup_header;
 mod state;
 mod style;
 mod terminal;

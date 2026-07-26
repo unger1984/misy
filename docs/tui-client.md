@@ -22,22 +22,29 @@ authentication, session, and tool orchestration remain in the core.
 
 ## Interaction Model
 
-- The interface uses Ratatui's inline viewport, never the alternate screen. Finalized transcript
-  cells are inserted into native terminal scrollback, so mouse selection, copying, and scrollback
-  navigation continue to work after Misy exits. Only active response and tool rows are redrawn in
-  the inline pane; they move to scrollback as one finalized block.
-- The content-driven lower pane is ordered active transcript, optional one-line busy indicator,
+- The interface uses Ratatui's fullscreen alternate screen. The complete conversation remains in
+  application-owned render state while Misy is open, with the newest transcript rows above the
+  composer. Leaving Misy restores the terminal screen and scrollback that existed before startup.
+- The fullscreen layout is ordered transcript, optional one-line busy indicator,
   persistent bordered composer, then either a slash-command popup or a modal list, and a footer.
   The popup and modal surface are mutually exclusive; the composer remains visible for both.
+- A responsive startup card is the first item in the transcript flow. It shows the Misy version,
+  initial model, working directory, and brief input hints; it scrolls off the top with earlier
+  conversation content and is never a persistent header.
 - An empty composer renders the dimmed `Ask anything, / for commands` placeholder. The footer
   always shows `? for shortcuts` on the left and the selected provider/model or `model not selected`
   on the right.
 - The composer uses a rounded border and an explicit `> ` prompt inside it, supports
   cursor-relative editing and multiline drafts, and keeps bounded submitted-input history.
   `Shift+Enter` inserts a newline and grows the border immediately; `Ctrl+J` is the fallback for
-  terminals that cannot report modified Enter. `Up`/`Down` navigate history at text boundaries;
-  transcript scrolling belongs to the terminal. The latest 100 accepted prompts and slash commands
-  are retained across Misy processes in the user's Misy data directory.
+  terminals that cannot report modified Enter. `Up`/`Down` navigate history at text boundaries.
+  The latest 100 accepted prompts and slash commands are retained across Misy processes in the
+  user's Misy data directory.
+- A plain left click in composer text moves its cursor. Dragging across any visible Misy content
+  renders an application-owned selection; releasing the mouse sends the selected text over OSC 52
+  and immediately clears the highlight. This lets a terminal host such as Herdr own clipboard
+  access and display its normal copy feedback. Bracketed paste and forwarded `Cmd+V` insert text
+  atomically at the cursor and never submit embedded newlines.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
   without taking focus from it. `Enter` or `Tab` accepts a command, clears the composer, and opens
   the requested surface; `Esc` dismisses the popup without changing the draft.

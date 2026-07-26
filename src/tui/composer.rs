@@ -282,6 +282,22 @@ impl Composer {
         )
     }
 
+    pub(super) fn position_cursor(&mut self, row: u16, column: u16) {
+        let target_row = usize::from(row);
+        let mut offset = 0;
+        let line = self.text.split('\n').nth(target_row);
+        let Some(line) = line else {
+            self.cursor = self.text.len();
+            return;
+        };
+        for preceding in self.text.split('\n').take(target_row) {
+            offset += preceding.len() + 1;
+        }
+        self.cursor = offset + byte_at_display_column(line, usize::from(column));
+        self.detach_history();
+        self.sync_popup_after_edit();
+    }
+
     fn detach_history(&mut self) {
         self.history_index = None;
         self.history_draft = None;
@@ -333,6 +349,18 @@ fn next_boundary(text: &str, cursor: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+fn byte_at_display_column(line: &str, column: usize) -> usize {
+    let mut display_column: usize = 0;
+    for (byte, character) in line.char_indices() {
+        let width = Line::from(character.to_string()).width();
+        if display_column.saturating_add(width) > column {
+            return byte;
+        }
+        display_column = display_column.saturating_add(width);
+    }
+    line.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Composer;
@@ -374,5 +402,23 @@ mod tests {
         assert_eq!(composer.history_len(), 100);
         composer.history_previous();
         assert_eq!(composer.text(), "prompt-104");
+    }
+
+    #[test]
+    fn mouse_position_maps_display_cells_to_unicode_boundaries() {
+        let mut composer = Composer::default();
+        composer.insert_str("a界b\nnext");
+
+        composer.position_cursor(0, 2);
+        composer.insert_str("!");
+        assert_eq!(composer.text(), "a!界b\nnext");
+
+        composer.position_cursor(1, 2);
+        composer.insert_str("!");
+        assert_eq!(composer.text(), "a!界b\nne!xt");
+
+        composer.position_cursor(9, 0);
+        composer.insert_str("!");
+        assert_eq!(composer.text(), "a!界b\nne!xt!");
     }
 }

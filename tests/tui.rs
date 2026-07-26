@@ -176,9 +176,23 @@ fn composer_edits_at_a_unicode_cursor_and_supports_multiline_input() {
         .iter()
         .position(|line| line.contains("? for shortcuts"))
         .expect("multiline footer");
-    assert_eq!(multiline_footer, single_line_footer + 1);
+    assert_eq!(multiline_footer, single_line_footer);
     client.insert_text("next");
     assert_eq!(client.state().composer_input(), "bc\nnext");
+}
+
+#[test]
+fn bracketed_paste_is_atomic_multiline_input_at_the_cursor() {
+    let (_temporary, mut client, _) = test_client();
+    client.insert_text("beforeafter");
+    for _ in 0..5 {
+        client.handle_key(UiKey::Left).expect("move paste cursor");
+    }
+
+    client.paste_text("one\r\ntwo\0");
+
+    assert_eq!(client.state().composer_input(), "beforeone\ntwoafter");
+    assert!(client.state().transcript().is_empty());
 }
 
 #[test]
@@ -417,7 +431,7 @@ fn composer_input_is_preserved_while_stream_events_arrive() {
 }
 
 #[test]
-fn active_response_stays_in_the_inline_pane_until_it_finishes() {
+fn completed_response_remains_in_the_fullscreen_transcript() {
     let (_temporary, mut client, _) = test_client();
     select_first_model(&mut client);
     client.handle_input("late-next").expect("submit response");
@@ -435,7 +449,7 @@ fn active_response_stays_in_the_inline_pane_until_it_finishes() {
         client.state().active_submission().is_none()
     });
     let finalized = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
-    assert!(!finalized.iter().any(|line| line.contains("next")));
+    assert!(finalized.iter().any(|line| line.contains("next")));
 }
 
 #[test]
@@ -538,15 +552,44 @@ fn renderer_shows_transcript_status_popup_and_cursor() {
 }
 
 #[test]
+fn startup_header_scrolls_away_with_earlier_transcript_content() {
+    let mut state = UiState::default();
+    let initial = buffer_lines(&render_buffer(&state, 72, 16), 72);
+    assert!(initial.iter().any(|line| line.contains("Misy v")));
+    assert!(initial.iter().any(|line| line.contains("Welcome back!")));
+
+    state.reduce(UiAction::AppendAssistantText(
+        (0..24)
+            .map(|index| format!("response line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    let scrolled = buffer_lines(&render_buffer(&state, 72, 16), 72);
+    assert!(!scrolled.iter().any(|line| line.contains("Misy v")));
+    assert!(
+        scrolled
+            .iter()
+            .any(|line| line.contains("response line 23"))
+    );
+}
+
+#[test]
 fn renderer_matches_composer_popup_and_footer_layout() {
     let (_temporary, mut client, _) = test_client();
     let empty = render_buffer(client.state(), 60, 12);
     let empty_lines = buffer_lines(&empty, 60);
-    assert!(empty_lines[1].contains("> Ask anything, / for commands"));
-    assert!(empty_lines[3].starts_with("  ? for shortcuts"));
-    assert!(empty_lines[3].ends_with("model not selected"));
-    assert!(empty_lines[0].contains('╭'));
-    assert!(empty_lines[2].contains('╰'));
+    let composer = empty_lines
+        .iter()
+        .position(|line| line.contains("> Ask anything, / for commands"))
+        .expect("empty composer row");
+    let footer = empty_lines
+        .iter()
+        .position(|line| line.starts_with("  ? for shortcuts"))
+        .expect("footer row");
+    assert!(empty_lines[composer - 1].contains('╭'));
+    assert!(empty_lines[composer + 1].contains('╰'));
+    assert_eq!(footer, empty_lines.len() - 1);
+    assert!(empty_lines[footer].ends_with("model not selected"));
 
     client.insert_text("/mo");
     let popup = render_buffer(client.state(), 60, 12);

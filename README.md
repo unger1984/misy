@@ -2,9 +2,9 @@ English | [Русский](README-RU.md)
 
 # misy
 
-Project documentation: [docs/README.md](docs/README.md).
-
 Misy is a fast, minimal agent harness written in Rust. It is designed around a terminal user interface, with planned support for MCP, explicit permissions, and TypeScript plugins powered by Bun.
+
+Project documentation: [docs/README.md](docs/README.md).
 
 ## Configuration directory
 

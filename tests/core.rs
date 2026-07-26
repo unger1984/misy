@@ -157,6 +157,30 @@ fn core_sanitizes_all_public_auth_responses() {
 }
 
 #[test]
+fn core_recursively_sanitizes_successful_auth_results_after_persisting_top_level_credentials() {
+    let (temporary, core, _) = test_core("nested-auth");
+    let provider = ProviderId::new("fixture");
+
+    for response in [
+        core.auth_status(&provider).expect("status"),
+        core.start_auth(&provider).expect("start"),
+        core.complete_auth(&provider, json!({"code":"nested"}))
+            .expect("complete"),
+        core.refresh_auth(&provider).expect("refresh"),
+    ] {
+        assert!(
+            !serde_json::to_string(&response)
+                .expect("public response")
+                .contains("secret")
+        );
+    }
+    let credentials = fs::read_to_string(temporary.path().join("misy/credentials.json"))
+        .expect("stored credentials");
+    assert!(credentials.contains("refreshed-opaque"));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_sanitizes_credentials_from_remote_auth_errors() {
     let (_temporary, core, _) = test_core("remote-auth-error");
     let provider = ProviderId::new("fixture");
@@ -573,6 +597,25 @@ fn late_stream_events_from_a_cancelled_request_do_not_reach_the_next_request() {
     ));
     assert!(!received.iter().any(
         |event| matches!(event, CoreEvent::TextDelta { delta, submission, .. } if *submission == next && delta == "late")
+    ));
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn stream_terminal_event_without_request_id_fails_the_active_submission_promptly() {
+    let (_temporary, core, _) = test_core("missing-terminal-id");
+    core.select_model(fixture_model()).expect("select model");
+    let events = core.subscribe();
+    let submission = core
+        .submit(Message::user("no-id-terminal"))
+        .expect("submission");
+    let received = receive_until(
+        &events,
+        submission,
+        |event| matches!(event, CoreEvent::Failed { submission: id, message } if *id == submission && message.contains("request_id")),
+    );
+    assert!(received.iter().any(
+        |event| matches!(event, CoreEvent::Failed { message, .. } if message.contains("request_id"))
     ));
     core.shutdown().expect("shutdown");
 }

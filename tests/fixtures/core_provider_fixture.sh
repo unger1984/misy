@@ -10,11 +10,11 @@ call_write() { printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_
 while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"method":"auth.status"'*) reply '{"authenticated":false,"credentials":{"access":"status-secret"}}' ;;
-    *'"method":"auth.start"'*) reply '{"url":"https://example.test/auth","credentials":{"access":"start-secret"}}' ;;
+    *'"method":"auth.status"'*) reply '{"authenticated":false,"credentials":{"access":"status-secret"},"nested":{"credentials":{"access":"status-nested-secret"}}}' ;;
+    *'"method":"auth.start"'*) reply '{"url":"https://example.test/auth","credentials":{"access":"start-secret"},"nested":{"credentials":{"access":"start-nested-secret"}}}' ;;
     *'"method":"auth.complete"'*'"remote-error"'*) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":401,"message":"denied","data":{"nested":{"credentials":{"access":"secret"}}}}}\n' "$id" ;;
-    *'"method":"auth.complete"'*) reply '{"credentials":{"access":"opaque"}}' ;;
-    *'"method":"auth.refresh"'*) sleep 1; reply '{"credentials":{"access":"refreshed-opaque"}}' ;;
+    *'"method":"auth.complete"'*) reply '{"credentials":{"access":"opaque"},"nested":{"credentials":{"access":"complete-secret"}}}' ;;
+    *'"method":"auth.refresh"'*) sleep 1; reply '{"credentials":{"access":"refreshed-opaque"},"nested":{"credentials":{"access":"refresh-secret"}}}' ;;
     *'"method":"auth.logout"'*) reply '{}' ;;
     *'"method":"models.list"'*) reply '{"models":[{"id":"fixture-model","display_name":"Fixture","context_window":4096},{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}' ;;
     *'"method":"chat.start"'*)
@@ -24,6 +24,7 @@ while IFS= read -r line; do
         *'"tool_call_id":"bad-1"'*|*'"tool_call_id":"unknown-1"'*) complete; reply '{}' ;;
         *'"tool_call_id":"loop-1"'*) call_read loop-1 missing; complete; reply '{}' ;;
         *'"content":"late-next"'*) text next; sleep 2; complete; reply '{}' ;;
+        *'"content":"no-id-terminal"'*) printf '%s\n' '{"jsonrpc":"2.0","method":"completed","params":{}}'; reply '{}' ;;
         *'"content":"late-cancel"'*) (sleep 1; printf '{"jsonrpc":"2.0","method":"text_delta","params":{"request_id":%s,"delta":"late"}}\n' "$id"; complete; reply '{}') & ;;
         *'"content":"tool-round-trip"'*) text writing; call_write write-1 "$target" 'written by tool'; call_read read-1 "$target"; complete; reply '{"metadata":{"turn":"one"}}' ;;
         *'"content":"bad-tool-arguments"'*) printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_id":%s,"id":"bad-1","name":"write_file","arguments":{"path":"missing-content"}}}\n' "$id"; complete; reply '{}' ;;

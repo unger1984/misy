@@ -183,7 +183,14 @@ impl MisyCore {
             }
             match events.recv_timeout(Duration::from_millis(20)) {
                 Ok(event) => {
-                    if event.params.get("request_id").and_then(Value::as_u64) != Some(request_id) {
+                    let Some(event_request_id) =
+                        event.params.get("request_id").and_then(Value::as_u64)
+                    else {
+                        return Err(
+                            "provider stream event is missing numeric request_id".to_owned()
+                        );
+                    };
+                    if event_request_id != request_id {
                         continue;
                     }
                     match event.method.as_str() {

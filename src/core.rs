@@ -343,7 +343,7 @@ impl MisyCore {
             provider: provider.clone(),
             authenticated: true,
         });
-        Ok(result)
+        Ok(self.sanitize_auth_response(result))
     }
     pub fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         let _operation = self
@@ -353,7 +353,7 @@ impl MisyCore {
             .expect("auth operation mutex must not be poisoned");
         let mut result = self.provider_request(provider, "auth.refresh", json!({}))?;
         self.store_returned_credentials(provider, &mut result)?;
-        Ok(result)
+        Ok(self.sanitize_auth_response(result))
     }
     pub fn logout(&self, provider: &ProviderId) -> Result<(), CoreError> {
         let _operation = self
@@ -501,11 +501,8 @@ impl MisyCore {
         Ok(())
     }
 
-    fn sanitize_auth_response(&self, mut response: Value) -> Value {
-        if let Some(object) = response.as_object_mut() {
-            object.remove("credentials");
-        }
-        response
+    fn sanitize_auth_response(&self, response: Value) -> Value {
+        strip_credentials(response)
     }
 }
 

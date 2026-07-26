@@ -10,10 +10,10 @@ call_write() { printf '{"jsonrpc":"2.0","method":"tool_call","params":{"request_
 while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
-    *'"method":"auth.status"'*) case "$line" in *'"credentials"'*) reply '{"authenticated":true}' ;; *) reply '{"authenticated":false,"credentials":{"access":"status-secret"},"nested":{"credentials":{"access":"status-nested-secret"}}}' ;; esac ;;
-    *'"method":"auth.start"'*) reply '{"url":"https://example.test/auth","session":{"id":"fixture-session"},"credentials":{"access":"start-secret"},"nested":{"credentials":{"access":"start-nested-secret"}}}' ;;
+    *'"method":"auth.status"'*) case "$target" in *slow-status*) sleep 2 ;; esac; case "$line" in *'"credentials"'*) reply '{"authenticated":true}' ;; *) reply '{"authenticated":false,"credentials":{"access":"status-secret"},"nested":{"credentials":{"access":"status-nested-secret"}}}' ;; esac ;;
+    *'"method":"auth.start"'*) case "$target" in *slow-start*) sleep 2 ;; esac; reply '{"url":"https://example.test/auth","session":{"id":"fixture-session"},"credentials":{"access":"start-secret"},"nested":{"credentials":{"access":"start-nested-secret"}}}' ;;
     *'"method":"auth.complete"'*'"remote-error"'*) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":401,"message":"denied","data":{"nested":{"credentials":{"access":"secret"}}}}}\n' "$id" ;;
-    *'"method":"auth.complete"'*) case "$line" in *'"id":"fixture-session"'*|*'"code"'*) reply '{"credentials":{"access":"opaque"},"nested":{"credentials":{"access":"complete-secret"}}}' ;; *) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":400,"message":"missing opaque auth session"}}\n' "$id" ;; esac ;;
+    *'"method":"auth.complete"'*) case "$line" in *'"id":"pending-a"'*) sleep 2; reply '{"credentials":{"access":"opaque"}}' ;; *'"id":"fixture-session"'*|*'"code"'*) reply '{"credentials":{"access":"opaque"},"nested":{"credentials":{"access":"complete-secret"}}}' ;; *) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":400,"message":"missing opaque auth session"}}\n' "$id" ;; esac ;;
     *'"method":"auth.refresh"'*) sleep 1; reply '{"credentials":{"access":"refreshed-opaque"},"nested":{"credentials":{"access":"refresh-secret"}}}' ;;
     *'"method":"auth.logout"'*) reply '{}' ;;
     *'"method":"models.list"'*) reply '{"models":[{"id":"fixture-model","display_name":"Fixture","context_window":4096},{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}' ;;

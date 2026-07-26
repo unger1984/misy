@@ -470,6 +470,48 @@ fn concurrent_auth_mutations_do_not_lose_or_resurrect_credentials() {
 }
 
 #[test]
+fn pending_auth_for_one_provider_does_not_block_logout_for_another() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        &fixture,
+        &temporary.path().join("first"),
+    );
+    write_fixture_manifest(
+        &bundled,
+        "fixture-two",
+        &fixture,
+        &temporary.path().join("second"),
+    );
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core discovery");
+    let first = ProviderId::new("fixture");
+    let second = ProviderId::new("fixture-two");
+    core.complete_auth(&second, json!({"code":"b"}))
+        .expect("authenticate second provider");
+
+    let pending = {
+        let core = core.clone();
+        let provider = first.clone();
+        std::thread::spawn(move || core.complete_auth(&provider, json!({"id":"pending-a"})))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    core.logout(&second).expect("logout second provider");
+    assert!(started.elapsed() < Duration::from_millis(500));
+
+    pending.join().expect("pending auth thread").expect("auth");
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
 fn core_returns_tool_errors_to_the_provider_for_malformed_and_unknown_calls() {
     for prompt in ["bad-tool-arguments", "unknown-tool"] {
         let (_temporary, core, _) = test_core(prompt);

@@ -204,7 +204,8 @@ struct CoreInner {
     routes: Mutex<BTreeMap<String, Sender<crate::ProviderEvent>>>,
     provider_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
-    auth_operations: Mutex<()>,
+    auth_operations: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    credential_operations: Mutex<()>,
     model_operations: Mutex<()>,
     session_operation: Mutex<()>,
     next_submission: AtomicU64,
@@ -245,7 +246,8 @@ impl MisyCore {
             routes: Mutex::new(BTreeMap::new()),
             provider_gates: Mutex::new(BTreeMap::new()),
             active: Mutex::new(BTreeMap::new()),
-            auth_operations: Mutex::new(()),
+            auth_operations: Mutex::new(BTreeMap::new()),
+            credential_operations: Mutex::new(()),
             model_operations: Mutex::new(()),
             session_operation: Mutex::new(()),
             next_submission: AtomicU64::new(1),
@@ -354,16 +356,20 @@ impl MisyCore {
         provider: &ProviderId,
         completion: Value,
     ) -> Result<Value, CoreError> {
-        let _operation = self
-            .inner
-            .auth_operations
+        let operation = self.auth_operation(provider);
+        let _operation = operation
             .lock()
-            .expect("auth operation mutex must not be poisoned");
+            .expect("provider auth operation mutex must not be poisoned");
         let mut result = self.provider_request(
             provider,
             "auth.complete",
             json!({ "completion": completion }),
         )?;
+        let _credentials = self
+            .inner
+            .credential_operations
+            .lock()
+            .expect("credential operation mutex must not be poisoned");
         self.store_returned_credentials(provider, &mut result)?;
         self.emit(CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
@@ -372,22 +378,30 @@ impl MisyCore {
         Ok(self.sanitize_auth_response(result))
     }
     pub fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
-        let _operation = self
-            .inner
-            .auth_operations
+        let operation = self.auth_operation(provider);
+        let _operation = operation
             .lock()
-            .expect("auth operation mutex must not be poisoned");
+            .expect("provider auth operation mutex must not be poisoned");
         let mut result = self.provider_request(provider, "auth.refresh", json!({}))?;
+        let _credentials = self
+            .inner
+            .credential_operations
+            .lock()
+            .expect("credential operation mutex must not be poisoned");
         self.store_returned_credentials(provider, &mut result)?;
         Ok(self.sanitize_auth_response(result))
     }
     pub fn logout(&self, provider: &ProviderId) -> Result<(), CoreError> {
-        let _operation = self
-            .inner
-            .auth_operations
+        let operation = self.auth_operation(provider);
+        let _operation = operation
             .lock()
-            .expect("auth operation mutex must not be poisoned");
+            .expect("provider auth operation mutex must not be poisoned");
         self.provider_request(provider, "auth.logout", json!({}))?;
+        let _credentials = self
+            .inner
+            .credential_operations
+            .lock()
+            .expect("credential operation mutex must not be poisoned");
         self.inner.credential_store.remove(provider)?;
         self.emit(CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
@@ -403,6 +417,32 @@ impl MisyCore {
         });
         Ok(models)
     }
+    /// Lists every discovered provider's models in provider and provider-model order
+    /// without publishing intermediate list events.
+    pub fn available_models(&self) -> Result<Vec<ModelInfo>, CoreError> {
+        let mut models = Vec::new();
+        for provider in self.providers() {
+            models.extend(self.fetch_models(&provider.id)?);
+        }
+        Ok(models)
+    }
+
+    /// Selects the first model returned by the provider as its default.
+    pub fn select_default_model(&self, provider: &ProviderId) -> Result<ModelRef, CoreError> {
+        let _operation = self
+            .inner
+            .model_operations
+            .lock()
+            .expect("model operation mutex must not be poisoned");
+        let model = self
+            .fetch_models(provider)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CoreError::InvalidModels("provider returned no models".to_owned()))?
+            .model;
+        self.persist_selected_model(model.clone())?;
+        Ok(model)
+    }
     pub fn select_model(&self, model: ModelRef) -> Result<(), CoreError> {
         let _operation = self
             .inner
@@ -416,6 +456,16 @@ impl MisyCore {
         {
             return Err(CoreError::UnknownModel(model));
         }
+        self.persist_selected_model(model)
+    }
+
+    fn fetch_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
+        parse_models(
+            provider,
+            &self.provider_request(provider, "models.list", json!({}))?,
+        )
+    }
+    fn persist_selected_model(&self, model: ModelRef) -> Result<(), CoreError> {
         self.inner
             .config_store
             .save(&Config::with_default_model(model.clone()))?;
@@ -426,13 +476,6 @@ impl MisyCore {
             .expect("selected model mutex must not be poisoned") = Some(model.clone());
         self.emit(CoreEvent::ModelSelected { model });
         Ok(())
-    }
-
-    fn fetch_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
-        parse_models(
-            provider,
-            &self.provider_request(provider, "models.list", json!({}))?,
-        )
     }
     pub fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
         self.ensure_running()?;
@@ -516,6 +559,18 @@ impl MisyCore {
             params["credentials"] = credentials;
         }
         Ok(self.inner.host.request(provider, method, params)?)
+    }
+    fn auth_operation(&self, provider: &ProviderId) -> Arc<Mutex<()>> {
+        let mut operations = self
+            .inner
+            .auth_operations
+            .lock()
+            .expect("auth operations mutex must not be poisoned");
+        Arc::clone(
+            operations
+                .entry(provider.as_str().to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
     fn store_returned_credentials(
         &self,

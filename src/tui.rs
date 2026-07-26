@@ -153,7 +153,6 @@ pub enum UiAction {
     Noop,
     ShowProviders,
     StartAuth(ProviderId),
-    CompleteAuth(ProviderId, Value),
     ShowModels,
     SelectModel(ModelRef),
     SubmitPrompt(String),
@@ -190,6 +189,29 @@ pub enum UiMode {
     ModelList,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderOperationKind {
+    Status,
+    Start,
+    Complete,
+}
+
+impl ProviderOperationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Checking status…",
+            Self::Start => "Starting authorization…",
+            Self::Complete => "Waiting for browser…",
+        }
+    }
+}
+
+enum ProviderOperationResult {
+    Status(ProviderId, Result<bool, String>),
+    Start(ProviderId, Result<Value, String>),
+    Complete(ProviderId, Result<ModelRef, String>),
+}
+
 pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     if mode == UiMode::Input {
         return match key {
@@ -224,36 +246,11 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
     if input == "/model" {
         return Ok(UiAction::ShowModels);
     }
-    if let Some(rest) = input.strip_prefix("/provider ") {
-        let mut parts = rest.splitn(3, ' ');
-        let provider = parts.next().filter(|part| !part.is_empty());
-        let command = parts.next();
-        let remainder = parts.next();
-        let Some(provider) = provider else {
-            return Err("provider id is required".to_owned());
-        };
-        return match (command, remainder) {
-            (Some("auth"), None) => Ok(UiAction::StartAuth(ProviderId::new(provider))),
-            (Some("complete"), Some(completion)) => serde_json::from_str(completion)
-                .map(|value| UiAction::CompleteAuth(ProviderId::new(provider), value))
-                .map_err(|error| format!("invalid auth completion JSON: {error}")),
-            _ => Err(
-                "use `/provider`, `/provider <id> auth`, or `/provider <id> complete <json>`"
-                    .to_owned(),
-            ),
-        };
+    if input.starts_with("/provider ") {
+        return Err("use `/provider` and choose from the picker".to_owned());
     }
-    if let Some(reference) = input.strip_prefix("/model ") {
-        let Some((provider, model)) = reference.split_once('/') else {
-            return Err("model must be written as <provider>/<model>".to_owned());
-        };
-        if provider.is_empty() || model.is_empty() || model.contains('/') {
-            return Err("model must be written as <provider>/<model>".to_owned());
-        }
-        return Ok(UiAction::SelectModel(ModelRef::new(
-            ProviderId::new(provider),
-            crate::ModelId::new(model),
-        )));
+    if input.starts_with("/model ") {
+        return Err("use `/model` and choose from the picker".to_owned());
     }
     Err(format!("unknown command `{input}`"))
 }
@@ -273,7 +270,7 @@ pub struct UiState {
     provider_choices: Vec<(ProviderId, bool)>,
     detail_provider: Option<ProviderId>,
     model_choices: Vec<ModelInfo>,
-    auth_pending: Option<ProviderId>,
+    provider_operation: Option<(ProviderId, ProviderOperationKind)>,
     input_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
@@ -326,8 +323,12 @@ impl UiState {
                 .detail_provider
                 .as_ref()
                 .map(|provider| {
-                    vec![if self.auth_pending.as_ref() == Some(provider) {
-                        "Waiting for browser…".to_owned()
+                    vec![if let Some((_, operation)) = self
+                        .provider_operation
+                        .as_ref()
+                        .filter(|(pending, _)| pending == provider)
+                    {
+                        operation.label().to_owned()
                     } else if self.provider_is_authenticated(provider) {
                         "Log out".to_owned()
                     } else {
@@ -383,7 +384,6 @@ impl UiState {
             UiAction::CancelAndExit => self.should_exit = true,
             UiAction::ShowProviders
             | UiAction::StartAuth(_)
-            | UiAction::CompleteAuth(_, _)
             | UiAction::ShowModels
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
@@ -570,6 +570,19 @@ impl UiState {
             .push(TranscriptRow::Error(error.to_string()));
     }
 
+    fn finish_provider_operation(
+        &mut self,
+        provider: &ProviderId,
+        kind: ProviderOperationKind,
+    ) -> bool {
+        if self.provider_operation.as_ref() == Some(&(provider.clone(), kind)) {
+            self.provider_operation = None;
+            true
+        } else {
+            false
+        }
+    }
+
     fn add_provider(&mut self, provider: ProviderId, authenticated: bool) {
         let id = provider.as_str().to_owned();
         self.provider_auth.insert(id, authenticated);
@@ -582,9 +595,11 @@ impl UiState {
         }
     }
 
-    fn add_models(&mut self, models: Vec<ModelInfo>) {
+    fn add_models(&mut self, provider: ProviderId, models: Vec<ModelInfo>) {
         if self.mode == UiMode::ModelList {
-            self.model_choices = models;
+            self.model_choices
+                .retain(|model| model.model.provider != provider);
+            self.model_choices.extend(models);
             self.highlighted_index = self
                 .highlighted_index
                 .min(self.model_choices.len().saturating_sub(1));
@@ -606,7 +621,7 @@ impl UiState {
                 provider,
                 authenticated,
             } => self.add_provider(provider, authenticated),
-            CoreEvent::ModelsListed { models, .. } => self.add_models(models),
+            CoreEvent::ModelsListed { provider, models } => self.add_models(provider, models),
             CoreEvent::ModelSelected { model } => self.set_selected_model(model),
             CoreEvent::SubmissionStarted { submission, .. } => {
                 self.active_submission = Some(submission)
@@ -705,14 +720,14 @@ pub struct TuiClient<B> {
     events: Receiver<CoreEvent>,
     browser: B,
     state: UiState,
-    auth_sender: Sender<(ProviderId, Result<(), String>)>,
-    auth_results: Receiver<(ProviderId, Result<(), String>)>,
+    provider_operation_sender: Sender<ProviderOperationResult>,
+    provider_operation_results: Receiver<ProviderOperationResult>,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
     pub fn new(core: MisyCore, browser: B) -> Self {
         let selected_model = core.selected_model();
-        let (auth_sender, auth_results) = mpsc::channel();
+        let (provider_operation_sender, provider_operation_results) = mpsc::channel();
         Self {
             events: core.subscribe_lossless(),
             core,
@@ -721,8 +736,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 selected_model,
                 ..UiState::default()
             },
-            auth_sender,
-            auth_results,
+            provider_operation_sender,
+            provider_operation_results,
         }
     }
 
@@ -800,11 +815,51 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        while let Ok((provider, result)) = self.auth_results.try_recv() {
-            self.state.auth_pending = None;
+        while let Ok(result) = self.provider_operation_results.try_recv() {
             match result {
-                Ok(()) => self.state.add_provider(provider, true),
-                Err(error) => self.state.add_error(error),
+                ProviderOperationResult::Status(provider, result) => {
+                    if !self
+                        .state
+                        .finish_provider_operation(&provider, ProviderOperationKind::Status)
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(authenticated) => self.state.add_provider(provider, authenticated),
+                        Err(error) => self.state.add_error(error),
+                    }
+                }
+                ProviderOperationResult::Start(provider, result) => {
+                    if !self
+                        .state
+                        .finish_provider_operation(&provider, ProviderOperationKind::Start)
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(result) => {
+                            if let Err(error) = self.open_authorization(provider, result) {
+                                self.state.add_error(error);
+                            }
+                        }
+                        Err(error) => self.state.add_error(error),
+                    }
+                }
+                ProviderOperationResult::Complete(provider, result) => {
+                    if !self
+                        .state
+                        .finish_provider_operation(&provider, ProviderOperationKind::Complete)
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(model) => {
+                            self.state.add_provider(provider, true);
+                            self.state.set_selected_model(model);
+                        }
+                        Err(error) => self.state.add_error(error),
+                    }
+                }
             }
         }
         received
@@ -824,6 +879,34 @@ impl<B: BrowserHandoff> TuiClient<B> {
         TuiControl::Exit
     }
 
+    fn open_authorization(&mut self, provider: ProviderId, result: Value) -> Result<(), TuiError> {
+        let url = result
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or(TuiError::AuthStartMissingUrl)?;
+        let session = result
+            .get("session")
+            .cloned()
+            .ok_or(TuiError::AuthStartMissingSession)?;
+        validate_authorization_url(url).map_err(TuiError::InvalidAuthUrl)?;
+        self.browser.open(url).map_err(TuiError::Browser)?;
+        self.state.provider_operation = Some((provider.clone(), ProviderOperationKind::Complete));
+        self.state.transcript.push(TranscriptRow::Info(format!(
+            "authorization opened for {}",
+            provider.as_str()
+        )));
+        let core = self.core.clone();
+        let sender = self.provider_operation_sender.clone();
+        thread::spawn(move || {
+            let result = core
+                .complete_auth(&provider, session)
+                .and_then(|_| core.select_default_model(&provider))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::Complete(provider, result));
+        });
+        Ok(())
+    }
+
     fn execute(&mut self, action: UiAction) -> Result<TuiControl, TuiError> {
         match action {
             UiAction::Noop => Ok(TuiControl::Continue),
@@ -837,45 +920,20 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 Ok(TuiControl::Continue)
             }
             UiAction::StartAuth(provider) => {
-                let result = self.core.start_auth(&provider)?;
-                let url = result
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .ok_or(TuiError::AuthStartMissingUrl)?;
-                let session = result
-                    .get("session")
-                    .cloned()
-                    .ok_or(TuiError::AuthStartMissingSession)?;
-                validate_authorization_url(url).map_err(TuiError::InvalidAuthUrl)?;
-                self.browser.open(url).map_err(TuiError::Browser)?;
-                self.state.auth_pending = Some(provider.clone());
+                self.state.provider_operation =
+                    Some((provider.clone(), ProviderOperationKind::Start));
                 let core = self.core.clone();
-                let sender = self.auth_sender.clone();
-                let provider_for_completion = provider.clone();
+                let sender = self.provider_operation_sender.clone();
                 thread::spawn(move || {
                     let result = core
-                        .complete_auth(&provider_for_completion, session)
-                        .map(|_| ())
+                        .start_auth(&provider)
                         .map_err(|error| error.to_string());
-                    let _ = sender.send((provider_for_completion, result));
+                    let _ = sender.send(ProviderOperationResult::Start(provider, result));
                 });
-                self.state.transcript.push(TranscriptRow::Info(format!(
-                    "authorization opened for {}",
-                    provider.as_str()
-                )));
-                Ok(TuiControl::Continue)
-            }
-            UiAction::CompleteAuth(provider, completion) => {
-                self.core.complete_auth(&provider, completion)?;
-                self.state.add_provider(provider, true);
                 Ok(TuiControl::Continue)
             }
             UiAction::ShowModels => {
-                let mut choices = Vec::new();
-                for provider in self.core.providers() {
-                    choices.extend(self.core.list_models(&provider.id)?);
-                }
-                self.state.open_model_list(choices);
+                self.state.open_model_list(self.core.available_models()?);
                 Ok(TuiControl::Continue)
             }
             UiAction::SelectModel(model) => {
@@ -919,13 +977,22 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     .get(self.state.highlighted_index)
                     .map(|(provider, _)| provider.clone())
                 {
-                    let authenticated = self
-                        .core
-                        .auth_status(&provider)?
-                        .get("authenticated")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    self.state.add_provider(provider, authenticated);
+                    self.state.provider_operation =
+                        Some((provider.clone(), ProviderOperationKind::Status));
+                    let core = self.core.clone();
+                    let sender = self.provider_operation_sender.clone();
+                    thread::spawn(move || {
+                        let result = core
+                            .auth_status(&provider)
+                            .map(|result| {
+                                result
+                                    .get("authenticated")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false)
+                            })
+                            .map_err(|error| error.to_string());
+                        let _ = sender.send(ProviderOperationResult::Status(provider, result));
+                    });
                 }
                 self.state.open_provider_detail();
                 Ok(TuiControl::Continue)
@@ -934,7 +1001,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 let Some(provider) = self.state.detail_provider.clone() else {
                     return Ok(TuiControl::Continue);
                 };
-                if self.state.auth_pending.as_ref() == Some(&provider) {
+                if self
+                    .state
+                    .provider_operation
+                    .as_ref()
+                    .is_some_and(|(pending, _)| pending == &provider)
+                {
                     return Ok(TuiControl::Continue);
                 }
                 if self.state.provider_is_authenticated(&provider) {

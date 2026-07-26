@@ -25,14 +25,14 @@ impl BrowserHandoff for RecordingBrowser {
     }
 }
 
-fn write_fixture_manifest(root: &Path, fixture: &Path, target: &Path) {
-    let package = root.join("fixture");
+fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) {
+    let package = root.join(id);
     fs::create_dir_all(&package).expect("package directory");
     fs::write(
         package.join("misy-plugin.json"),
         format!(
             r#"{{
-  "id": "fixture",
+  "id": "{id}",
   "version": "1.0.0",
   "kind": "provider",
   "protocol_version": 1,
@@ -57,7 +57,7 @@ fn test_client() -> (tempfile::TempDir, TuiClient<RecordingBrowser>, PathBuf) {
     let target = temporary.path().join("tool-output.txt");
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
-    write_fixture_manifest(&bundled, &fixture, &target);
+    write_fixture_manifest(&bundled, "fixture", &fixture, &target);
     let core = MisyCore::discover(
         MisyPaths::from_root(temporary.path().join("misy")),
         &bundled,
@@ -70,18 +70,27 @@ fn test_client() -> (tempfile::TempDir, TuiClient<RecordingBrowser>, PathBuf) {
     )
 }
 
+fn select_first_model(client: &mut TuiClient<RecordingBrowser>) {
+    client.handle_input("/model").expect("open model picker");
+    client.handle_key(UiKey::Enter).expect("select first model");
+}
+
 #[test]
 fn input_mapping_and_reducer_keep_rendering_state_explicit() {
-    assert_eq!(
-        map_input("/provider fixture auth").expect("provider auth command"),
-        UiAction::StartAuth(ProviderId::new("fixture"))
+    assert!(
+        map_input("/provider fixture auth")
+            .unwrap_err()
+            .contains("/provider")
     );
-    assert_eq!(
-        map_input("/model fixture/fixture-model").expect("model command"),
-        UiAction::SelectModel(ModelRef::new(
-            ProviderId::new("fixture"),
-            ModelId::new("fixture-model"),
-        ))
+    assert!(
+        map_input(r#"/provider fixture complete {"code":"x"}"#)
+            .unwrap_err()
+            .contains("/provider")
+    );
+    assert!(
+        map_input("/model fixture/fixture-model")
+            .unwrap_err()
+            .contains("/model")
     );
     assert_eq!(
         misy::tui::map_key(UiMode::Input, UiKey::Up),
@@ -118,6 +127,34 @@ fn input_mapping_and_reducer_keep_rendering_state_explicit() {
 }
 
 #[test]
+fn model_picker_merges_models_from_two_providers_without_overwrite() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(&bundled, "fixture", &fixture, &temporary.path().join("one"));
+    write_fixture_manifest(
+        &bundled,
+        "fixture-two",
+        &fixture,
+        &temporary.path().join("two"),
+    );
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+
+    client.handle_input("/model").expect("model picker");
+    client.pump_events();
+
+    assert_eq!(client.state().picker_labels().len(), 4);
+    assert_eq!(client.state().mode(), UiMode::ModelList);
+    client.handle_ctrl_c();
+}
+
+#[test]
 fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
     let (_temporary, mut client, target) = test_client();
 
@@ -129,19 +166,33 @@ fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
     client.handle_key(UiKey::Enter).expect("provider detail");
     assert_eq!(client.state().mode(), UiMode::ProviderDetail);
     assert!(client.browser().opened.is_empty());
+    assert_eq!(client.state().picker_labels(), ["Checking status…"]);
+    let status_deadline = Instant::now() + Duration::from_secs(2);
+    while client.state().picker_labels() != ["Authorize"] && Instant::now() < status_deadline {
+        client.pump_events();
+        thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(client.running_provider_count(), 1);
     assert_eq!(client.state().picker_labels(), ["Authorize"]);
     client.handle_key(UiKey::Enter).expect("start auth");
-    assert_eq!(
-        client.browser().opened,
-        vec!["https://example.test/auth".to_owned()]
-    );
+    assert_eq!(client.state().picker_labels(), ["Starting authorization…"]);
     let auth_deadline = Instant::now() + Duration::from_secs(2);
     while client.state().picker_labels() != ["Log out"] && Instant::now() < auth_deadline {
         client.pump_events();
         thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(
+        client.browser().opened,
+        vec!["https://example.test/auth".to_owned()]
+    );
     assert_eq!(client.state().picker_labels(), ["Log out"]);
+    assert_eq!(
+        client.state().selected_model(),
+        Some(ModelRef::new(
+            ProviderId::new("fixture"),
+            ModelId::new("fixture-model")
+        ))
+    );
     client.handle_key(UiKey::Enter).expect("log out");
     client.pump_events();
     assert_eq!(client.state().picker_labels(), ["Authorize"]);
@@ -204,6 +255,71 @@ fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
 }
 
 #[test]
+fn slow_provider_detail_status_does_not_block_ctrl_c() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        &fixture,
+        &temporary.path().join("slow-status"),
+    );
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/provider").expect("provider picker");
+
+    let started = Instant::now();
+    client.handle_key(UiKey::Enter).expect("start status check");
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert_eq!(client.state().picker_labels(), ["Checking status…"]);
+    assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
+    assert!(client.state().should_exit());
+}
+
+#[test]
+fn slow_auth_start_does_not_block_ctrl_c() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        &fixture,
+        &temporary.path().join("slow-start"),
+    );
+    let core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+    )
+    .expect("core");
+    let mut client = TuiClient::new(core, RecordingBrowser::default());
+    client.handle_input("/provider").expect("provider picker");
+    client.handle_key(UiKey::Enter).expect("start status check");
+    let status_deadline = Instant::now() + Duration::from_secs(1);
+    while client.state().picker_labels() != ["Authorize"] && Instant::now() < status_deadline {
+        client.pump_events();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
+
+    let started = Instant::now();
+    client
+        .handle_key(UiKey::Enter)
+        .expect("start authorization");
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert_eq!(client.state().picker_labels(), ["Starting authorization…"]);
+    assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
+    assert!(client.state().should_exit());
+}
+
+#[test]
 fn picker_escape_navigation_never_triggers_provider_side_effects() {
     let (_temporary, mut client, _) = test_client();
 
@@ -220,9 +336,7 @@ fn picker_escape_navigation_never_triggers_provider_side_effects() {
 #[test]
 fn ctrl_c_cancels_an_active_submission_and_exits_even_when_provider_is_busy() {
     let (_temporary, mut client, _) = test_client();
-    client
-        .handle_input("/model fixture/fixture-model")
-        .expect("select model");
+    select_first_model(&mut client);
     client.handle_input("cancel-me").expect("submit prompt");
 
     assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
@@ -230,29 +344,26 @@ fn ctrl_c_cancels_an_active_submission_and_exits_even_when_provider_is_busy() {
 }
 
 #[test]
-fn client_records_core_action_errors_in_the_transcript() {
+fn client_records_picker_help_for_obsolete_commands_in_the_transcript() {
     let (_temporary, mut client, _) = test_client();
 
-    let error = client
+    client
         .handle_input("/provider missing auth")
-        .expect_err("unknown provider must fail");
+        .expect("obsolete form reports inline help");
 
-    assert!(error.to_string().contains("missing"));
     assert!(
         client
             .state()
             .transcript()
             .iter()
-            .any(|row| matches!(row, TranscriptRow::Error(message) if message.contains("missing")))
+            .any(|row| matches!(row, TranscriptRow::Error(message) if message.contains("/provider") && message.contains("picker")))
     );
 }
 
 #[test]
 fn tui_client_keeps_burst_streams_and_their_terminal_event() {
     let (_temporary, mut client, _) = test_client();
-    client
-        .handle_input("/model fixture/fixture-model")
-        .expect("select model");
+    select_first_model(&mut client);
     client.handle_input("burst").expect("submit burst");
 
     thread::sleep(Duration::from_millis(250));
@@ -377,9 +488,7 @@ fn windows_browser_command_passes_the_url_as_a_direct_argument() {
 #[test]
 fn event_pump_is_bounded_so_continuous_streaming_cannot_block_ctrl_c() {
     let (_temporary, mut client, _) = test_client();
-    client
-        .handle_input("/model fixture/fixture-model")
-        .expect("select model");
+    select_first_model(&mut client);
     client
         .handle_input("continuous-stream")
         .expect("continuous submission");

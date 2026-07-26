@@ -49,6 +49,8 @@ pub enum Action {
     Delete,
     MoveCursorLeft,
     MoveCursorRight,
+    MoveCursorUp,
+    MoveCursorDown,
     ScrollComposerUp,
     ScrollComposerDown,
     InsertImage {
@@ -237,6 +239,22 @@ impl AppState {
                 let cursor = next_scalar_boundary(&self.composer.text, self.composer.cursor);
                 self.composer.cursor = image_token_range_at(&self.composer.text, cursor)
                     .map_or(cursor, |(_, end, _)| end);
+                Outcome::Continue
+            }
+            Action::MoveCursorUp => {
+                self.composer.cursor = cursor_on_adjacent_line(
+                    &self.composer.text,
+                    self.composer.cursor,
+                    LineDirection::Up,
+                );
+                Outcome::Continue
+            }
+            Action::MoveCursorDown => {
+                self.composer.cursor = cursor_on_adjacent_line(
+                    &self.composer.text,
+                    self.composer.cursor,
+                    LineDirection::Down,
+                );
                 Outcome::Continue
             }
             Action::ScrollComposerUp => {
@@ -440,6 +458,73 @@ fn next_scalar_boundary(text: &str, cursor: usize) -> usize {
     cursor + ch.len_utf8()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineDirection {
+    Up,
+    Down,
+}
+
+fn line_start(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .rfind('\n')
+        .map_or(0, |newline| newline.saturating_add(1))
+}
+
+fn line_end(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |newline| cursor + newline)
+}
+
+fn scalar_offset_in_line(text: &str, line_start: usize, cursor: usize) -> usize {
+    text[line_start..cursor].chars().count()
+}
+
+fn cursor_at_scalar_offset(
+    text: &str,
+    line_start: usize,
+    line_end: usize,
+    scalar_offset: usize,
+) -> usize {
+    let mut cursor = line_start;
+    for _ in 0..scalar_offset {
+        let next = next_scalar_boundary(text, cursor);
+        if next > line_end {
+            return line_end;
+        }
+        cursor = next;
+        if cursor == line_end {
+            return line_end;
+        }
+    }
+    cursor
+}
+
+fn cursor_on_adjacent_line(text: &str, cursor: usize, direction: LineDirection) -> usize {
+    let current_start = line_start(text, cursor);
+    let current_end = line_end(text, cursor);
+    let scalar_offset = scalar_offset_in_line(text, current_start, cursor.min(current_end));
+
+    match direction {
+        LineDirection::Up => {
+            if current_start == 0 {
+                return cursor;
+            }
+            let previous_end = current_start.saturating_sub(1);
+            let previous_start = line_start(text, previous_end);
+            cursor_at_scalar_offset(text, previous_start, previous_end, scalar_offset)
+        }
+        LineDirection::Down => {
+            if current_end == text.len() {
+                return cursor;
+            }
+            let next_start = current_end.saturating_add(1);
+            let next_end = line_end(text, next_start);
+            cursor_at_scalar_offset(text, next_start, next_end, scalar_offset)
+        }
+    }
+}
+
 fn image_token(id: u64) -> String {
     format!("[Image #{id}]")
 }
@@ -627,6 +712,17 @@ mod tests {
 
         state.apply(Action::MoveCursorLeft);
         assert_eq!(state.composer_cursor(), 1);
+    }
+    #[test]
+    fn composer_cursor_up_and_down_follow_multiline_text() {
+        let mut state = AppState::new(fixture_sections());
+        state.apply(Action::InsertText("ab\ncd".into()));
+
+        state.apply(Action::MoveCursorUp);
+        assert_eq!(state.composer_cursor(), 2);
+
+        state.apply(Action::MoveCursorDown);
+        assert_eq!(state.composer_cursor(), 5);
     }
 
     #[test]

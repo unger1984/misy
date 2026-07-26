@@ -1,4 +1,8 @@
-use std::io;
+use std::{
+    env,
+    io::{self, Write},
+    process::Command,
+};
 
 use arboard::Clipboard;
 use crossterm::{
@@ -37,6 +41,7 @@ struct SetupState {
     cursor_hidden: bool,
     bracketed_paste_enabled: bool,
     keyboard_enhancement_enabled: bool,
+    modify_other_keys_enabled: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanupStep {
@@ -45,6 +50,7 @@ enum CleanupStep {
     LeaveAlternateScreen,
     DisableBracketedPaste,
     PopKeyboardEnhancement,
+    DisableModifyOtherKeys,
     DisableRawMode,
 }
 
@@ -86,6 +92,54 @@ struct ViewState {
     notification: Option<String>,
 }
 
+fn requested_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+}
+
+fn tmux_extended_keys_format() -> Option<String> {
+    env::var_os("TMUX")?;
+    let output = Command::new("tmux")
+        .args(["show-options", "-gqv", "extended-keys-format"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let format = String::from_utf8(output.stdout).ok()?;
+    let format = format.trim();
+    (!format.is_empty()).then(|| format.to_owned())
+}
+
+fn composer_notification_for_terminal(
+    tmux: Option<&str>,
+    extended_keys_format: Option<&str>,
+) -> Option<String> {
+    (tmux.is_some() && extended_keys_format == Some("xterm"))
+        .then_some("Shift+Enter unavailable here; use Ctrl+J for newline".into())
+}
+
+fn initial_composer_notification() -> Option<String> {
+    composer_notification_for_terminal(
+        env::var("TMUX").ok().as_deref(),
+        tmux_extended_keys_format().as_deref(),
+    )
+}
+
+fn enable_modify_other_keys_escape() -> &'static str {
+    "\u{1b}[>4;2m"
+}
+
+fn disable_modify_other_keys_escape() -> &'static str {
+    "\u{1b}[>4m"
+}
+
+fn write_terminal_escape(stdout: &mut io::Stdout, sequence: &str) -> io::Result<()> {
+    stdout.write_all(sequence.as_bytes())?;
+    stdout.flush()
+}
+
 pub fn run_app() -> io::Result<()> {
     let mut setup = SetupState::default();
     let mut stdout = io::stdout();
@@ -117,11 +171,16 @@ pub fn run_app() -> io::Result<()> {
     if keyboard_enhancement_supported {
         if let Err(error) = execute!(
             stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(requested_keyboard_enhancement_flags())
         ) {
             return Err(merge_cleanup_error(error, restore_terminal(setup)));
         }
         setup.keyboard_enhancement_enabled = true;
+    } else if let Err(error) = write_terminal_escape(&mut stdout, enable_modify_other_keys_escape())
+    {
+        return Err(merge_cleanup_error(error, restore_terminal(setup)));
+    } else {
+        setup.modify_other_keys_enabled = true;
     }
 
     let backend = CrosstermBackend::new(stdout);
@@ -135,7 +194,10 @@ pub fn run_app() -> io::Result<()> {
     }
 
     let mut state = AppState::new(fixture_sections());
-    let mut view = ViewState::default();
+    let mut view = ViewState {
+        notification: initial_composer_notification(),
+        ..ViewState::default()
+    };
     let mut last_ui_areas = UiAreas::default();
 
     let runtime_result = (|| -> io::Result<()> {
@@ -173,7 +235,7 @@ fn merge_cleanup_error(primary: io::Error, cleanup: io::Result<()>) -> io::Error
 }
 
 fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
-    let mut steps = Vec::with_capacity(6);
+    let mut steps = Vec::with_capacity(7);
     if state.cursor_hidden {
         steps.push(CleanupStep::ShowCursor);
     }
@@ -189,6 +251,10 @@ fn restoration_plan(state: SetupState) -> Vec<CleanupStep> {
     if state.keyboard_enhancement_enabled {
         steps.push(CleanupStep::PopKeyboardEnhancement);
     }
+    if state.modify_other_keys_enabled {
+        steps.push(CleanupStep::DisableModifyOtherKeys);
+    }
+
     if state.raw_mode_enabled {
         steps.push(CleanupStep::DisableRawMode);
     }
@@ -206,6 +272,9 @@ fn restore_terminal(state: SetupState) -> io::Result<()> {
             CleanupStep::LeaveAlternateScreen => execute!(stdout, LeaveAlternateScreen),
             CleanupStep::DisableBracketedPaste => execute!(stdout, DisableBracketedPaste),
             CleanupStep::PopKeyboardEnhancement => execute!(stdout, PopKeyboardEnhancementFlags),
+            CleanupStep::DisableModifyOtherKeys => {
+                write_terminal_escape(&mut stdout, disable_modify_other_keys_escape())
+            }
             CleanupStep::DisableRawMode => disable_raw_mode(),
         };
 
@@ -303,6 +372,13 @@ fn handle_clipboard_paste(state: &mut AppState, view: &mut ViewState) {
     }
 }
 
+fn quit_action_from_key(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        _ => None,
+    }
+}
+
 fn composer_action_from_key(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Tab => Some(Action::CycleFocus),
@@ -310,6 +386,9 @@ fn composer_action_from_key(key: KeyEvent) -> Option<Action> {
             Some(Action::InsertLineBreak)
         }
         KeyCode::Enter => Some(Action::SubmitComposer),
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::InsertLineBreak)
+        }
         KeyCode::Char(ch)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
@@ -328,7 +407,8 @@ fn composer_action_from_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Action::ScrollComposerDown)
         }
-        KeyCode::Up | KeyCode::Down => None,
+        KeyCode::Up => Some(Action::MoveCursorUp),
+        KeyCode::Down => Some(Action::MoveCursorDown),
         _ => None,
     }
 }
@@ -340,12 +420,16 @@ fn handle_terminal_event(
     last_ui_areas: &UiAreas,
 ) {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
             if state.focused_pane == FocusedPane::Composer
                 && key.code == KeyCode::Char('v')
                 && key.modifiers.contains(KeyModifiers::CONTROL)
             {
                 handle_clipboard_paste(state, view);
+                return;
+            }
+            if let Some(action) = quit_action_from_key(key) {
+                state.apply(action);
                 return;
             }
 
@@ -912,6 +996,64 @@ mod tests {
         );
     }
     #[test]
+    fn composer_key_events_map_up_and_down_to_cursor_movement() {
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(KeyCode::Up, event::KeyModifiers::NONE)),
+            Some(Action::MoveCursorUp)
+        );
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(KeyCode::Down, event::KeyModifiers::NONE)),
+            Some(Action::MoveCursorDown)
+        );
+    }
+    #[test]
+    fn composer_key_events_map_ctrl_j_to_line_break_fallback() {
+        assert_eq!(
+            composer_action_from_key(KeyEvent::new(
+                KeyCode::Char('j'),
+                event::KeyModifiers::CONTROL
+            )),
+            Some(Action::InsertLineBreak)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_any_focused_pane() {
+        let mut composer_state = AppState::new(fixture_sections());
+        composer_state.focused_pane = FocusedPane::Composer;
+        let mut composer_view = ViewState::default();
+        handle_terminal_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &mut composer_state,
+            &mut composer_view,
+            &UiAreas::default(),
+        );
+        assert!(!composer_state.running);
+
+        let mut sections_state = AppState::new(fixture_sections());
+        let mut sections_view = ViewState::default();
+        handle_terminal_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &mut sections_state,
+            &mut sections_view,
+            &UiAreas::default(),
+        );
+        assert!(!sections_state.running);
+    }
+
+    #[test]
+    fn ctrl_c_repeat_also_quits() {
+        let mut state = AppState::new(fixture_sections());
+        let mut view = ViewState::default();
+        let mut key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        key.kind = KeyEventKind::Repeat;
+
+        handle_terminal_event(Event::Key(key), &mut state, &mut view, &UiAreas::default());
+
+        assert!(!state.running);
+    }
+
+    #[test]
     fn composer_key_events_insert_plain_q_instead_of_quitting() {
         assert_eq!(
             composer_action_from_key(KeyEvent::new(KeyCode::Char('q'), event::KeyModifiers::NONE)),
@@ -989,6 +1131,7 @@ mod tests {
                 cursor_hidden: true,
                 bracketed_paste_enabled: true,
                 keyboard_enhancement_enabled: true,
+                ..SetupState::default()
             }),
             vec![
                 CleanupStep::ShowCursor,
@@ -1109,6 +1252,7 @@ mod tests {
                 cursor_hidden: true,
                 keyboard_enhancement_enabled: false,
                 bracketed_paste_enabled: true,
+                ..SetupState::default()
             }),
             vec![
                 CleanupStep::ShowCursor,
@@ -1117,6 +1261,37 @@ mod tests {
                 CleanupStep::DisableBracketedPaste,
                 CleanupStep::DisableRawMode,
             ]
+        );
+    }
+    #[test]
+    fn keyboard_enhancement_flags_request_modified_plain_keys_and_event_types() {
+        assert_eq!(
+            requested_keyboard_enhancement_flags(),
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        );
+    }
+    #[test]
+    fn modify_other_keys_fallback_uses_xterm_mode_2_sequences() {
+        assert_eq!(enable_modify_other_keys_escape(), "\u{1b}[>4;2m");
+        assert_eq!(disable_modify_other_keys_escape(), "\u{1b}[>4m");
+    }
+
+    #[test]
+    fn multiline_composer_increases_layout_height() {
+        let areas = ui_areas(Rect::new(0, 0, 40, 12), composer_content_height("a\nb", 38));
+        assert_eq!(areas.composer.height, 4);
+    }
+    #[test]
+    fn tmux_xterm_enables_shift_enter_fallback_hint() {
+        assert_eq!(
+            composer_notification_for_terminal(Some("tmux"), Some("xterm")),
+            Some("Shift+Enter unavailable here; use Ctrl+J for newline".into())
+        );
+        assert_eq!(
+            composer_notification_for_terminal(Some("tmux"), Some("csi-u")),
+            None
         );
     }
 

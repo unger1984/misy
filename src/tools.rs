@@ -1,35 +1,74 @@
 use crate::{ToolCall, ToolDefinition, ToolResult};
+use command_group::{CommandGroup, GroupChild};
+use jsonschema::{Draft, Validator};
 use serde_json::Value;
-use std::{collections::BTreeMap, error::Error, fmt, fs, process::Command};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    io::{self, Read},
+    process::{Command, ExitStatus, Stdio},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Definitions available to providers. Built-ins are installed on construction.
 #[derive(Clone, Debug)]
 pub struct ToolRegistry {
-    definitions: BTreeMap<String, ToolDefinition>,
+    definitions: BTreeMap<String, RegisteredTool>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredTool {
+    definition: ToolDefinition,
+    validator: Validator,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         let definitions = builtin_definitions()
             .into_iter()
-            .map(|definition| (definition.name.clone(), definition))
+            .map(|definition| {
+                let validator = compile_schema(&definition.input_schema)
+                    .expect("built-in tool schemas must be valid JSON Schema draft 2020-12");
+                (
+                    definition.name.clone(),
+                    RegisteredTool {
+                        definition,
+                        validator,
+                    },
+                )
+            })
             .collect();
         Self { definitions }
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.definitions.values().cloned().collect()
+        self.definitions
+            .values()
+            .map(|tool| tool.definition.clone())
+            .collect()
     }
 
     pub fn get(&self, name: &str) -> Option<&ToolDefinition> {
-        self.definitions.get(name)
+        self.definitions.get(name).map(|tool| &tool.definition)
     }
 
     pub fn register(&mut self, definition: ToolDefinition) -> Result<(), ToolRegistryError> {
         if self.definitions.contains_key(&definition.name) {
             return Err(ToolRegistryError::DuplicateTool(definition.name));
         }
-        self.definitions.insert(definition.name.clone(), definition);
+        let validator = compile_schema(&definition.input_schema)?;
+        self.definitions.insert(
+            definition.name.clone(),
+            RegisteredTool {
+                definition,
+                validator,
+            },
+        );
         Ok(())
     }
 
@@ -38,10 +77,13 @@ impl ToolRegistry {
         name: &str,
         arguments: &Value,
     ) -> Result<(), ToolRegistryError> {
-        let definition = self
+        let tool = self
+            .definitions
             .get(name)
             .ok_or_else(|| ToolRegistryError::UnknownTool(name.to_owned()))?;
-        validate_schema(&definition.input_schema, arguments, "arguments")
+        tool.validator
+            .validate(arguments)
+            .map_err(|error| ToolRegistryError::InvalidArguments(error.to_string()))
     }
 }
 
@@ -54,6 +96,7 @@ impl Default for ToolRegistry {
 #[derive(Debug, Eq, PartialEq)]
 pub enum ToolRegistryError {
     DuplicateTool(String),
+    InvalidSchema(String),
     UnknownTool(String),
     InvalidArguments(String),
 }
@@ -62,6 +105,7 @@ impl fmt::Display for ToolRegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateTool(name) => write!(formatter, "tool `{name}` is already registered"),
+            Self::InvalidSchema(message) => write!(formatter, "invalid JSON Schema: {message}"),
             Self::UnknownTool(name) => write!(formatter, "unknown tool `{name}`"),
             Self::InvalidArguments(message) => formatter.write_str(message),
         }
@@ -155,26 +199,77 @@ impl ToolDispatcher {
         if let Some(working_directory) = call.arguments.get("cwd").and_then(Value::as_str) {
             command.current_dir(working_directory);
         }
-        let output = match command.output() {
-            Ok(output) => output,
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match command.group_spawn() {
+            Ok(child) => child,
             Err(error) => {
-                return ToolResult::error(
+                return command_result(
                     &call.id,
-                    format!("could not run {command_name}: {error}"),
+                    "spawn_error",
+                    None,
+                    CapturedStream::default(),
+                    CapturedStream::default(),
+                    Some(format!("could not run {command_name}: {error}")),
                 );
             }
         };
-        let content = serde_json::json!({
-            "exit_code": output.status.code(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
-        })
-        .to_string();
-        if output.status.success() {
-            ToolResult::success(&call.id, content)
+        let stdout = capture_stream(
+            child
+                .inner()
+                .stdout
+                .take()
+                .expect("piped stdout is available after spawn"),
+        );
+        let stderr = capture_stream(
+            child
+                .inner()
+                .stderr
+                .take()
+                .expect("piped stderr is available after spawn"),
+        );
+        let status = match wait_for_command(&mut child) {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                let termination_error = terminate_and_reap(&mut child)
+                    .err()
+                    .map(|error| error.to_string());
+                return command_result(
+                    &call.id,
+                    "timeout",
+                    None,
+                    join_capture(stdout),
+                    join_capture(stderr),
+                    termination_error,
+                );
+            }
+            Err(error) => {
+                let termination_error = terminate_and_reap(&mut child)
+                    .err()
+                    .map(|error| error.to_string());
+                return command_result(
+                    &call.id,
+                    "wait_error",
+                    None,
+                    join_capture(stdout),
+                    join_capture(stderr),
+                    Some(format!("could not wait for {command_name}: {error}"))
+                        .or(termination_error),
+                );
+            }
+        };
+        let stdout = join_capture(stdout);
+        let stderr = join_capture(stderr);
+        let kind = if stdout.truncated || stderr.truncated {
+            "truncated"
+        } else if status.success() {
+            "success"
         } else {
-            ToolResult::error(&call.id, content)
-        }
+            "nonzero_exit"
+        };
+        command_result(&call.id, kind, Some(status), stdout, stderr, None)
     }
 
     fn write_file(&self, call: &ToolCall) -> ToolResult {
@@ -216,71 +311,85 @@ fn builtin_definitions() -> [ToolDefinition; 4] {
     ]
 }
 
-fn validate_schema(schema: &Value, value: &Value, path: &str) -> Result<(), ToolRegistryError> {
-    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-        let matches = match expected {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            unsupported => {
-                return Err(ToolRegistryError::InvalidArguments(format!(
-                    "{path} uses unsupported JSON Schema type `{unsupported}`"
-                )));
+fn compile_schema(schema: &Value) -> Result<Validator, ToolRegistryError> {
+    jsonschema::options()
+        .with_draft(Draft::Draft202012)
+        .build(schema)
+        .map_err(|error| ToolRegistryError::InvalidSchema(error.to_string()))
+}
+
+#[derive(Default)]
+struct CapturedStream {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn capture_stream<R>(mut reader: R) -> JoinHandle<io::Result<CapturedStream>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut captured = CapturedStream::default();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(captured);
             }
-        };
-        if !matches {
-            return Err(ToolRegistryError::InvalidArguments(format!(
-                "{path} must be a {expected}"
-            )));
+            let available = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(captured.bytes.len());
+            let kept = available.min(read);
+            captured.bytes.extend_from_slice(&buffer[..kept]);
+            captured.truncated |= kept < read;
         }
+    })
+}
+
+fn join_capture(handle: JoinHandle<io::Result<CapturedStream>>) -> CapturedStream {
+    handle.join().ok().and_then(Result::ok).unwrap_or_default()
+}
+
+fn wait_for_command(child: &mut GroupChild) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(10));
     }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array)
-        && !values.contains(value)
-    {
-        return Err(ToolRegistryError::InvalidArguments(format!(
-            "{path} must be one of the declared enum values"
-        )));
+}
+
+fn terminate_and_reap(child: &mut GroupChild) -> io::Result<ExitStatus> {
+    match child.kill() {
+        Ok(()) => child.wait(),
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => child.wait(),
+        Err(error) => Err(error),
     }
-    if let Some(object) = value.as_object() {
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for field in required.iter().filter_map(Value::as_str) {
-                if !object.contains_key(field) {
-                    return Err(ToolRegistryError::InvalidArguments(format!(
-                        "{path}.{field} is required"
-                    )));
-                }
-            }
-        }
-        let properties = schema.get("properties").and_then(Value::as_object);
-        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
-            && let Some(properties) = properties
-        {
-            for field in object.keys() {
-                if !properties.contains_key(field) {
-                    return Err(ToolRegistryError::InvalidArguments(format!(
-                        "{path}.{field} is not allowed"
-                    )));
-                }
-            }
-        }
-        if let Some(properties) = properties {
-            for (field, field_schema) in properties {
-                if let Some(field_value) = object.get(field) {
-                    validate_schema(field_schema, field_value, &format!("{path}.{field}"))?;
-                }
-            }
-        }
+}
+
+fn command_result(
+    call_id: &str,
+    kind: &str,
+    status: Option<ExitStatus>,
+    stdout: CapturedStream,
+    stderr: CapturedStream,
+    message: Option<String>,
+) -> ToolResult {
+    let content = serde_json::json!({
+        "kind": kind,
+        "exit_code": status.and_then(|status| status.code()),
+        "stdout": String::from_utf8_lossy(&stdout.bytes),
+        "stderr": String::from_utf8_lossy(&stderr.bytes),
+        "stdout_truncated": stdout.truncated,
+        "stderr_truncated": stderr.truncated,
+        "message": message,
+    })
+    .to_string();
+    if kind == "success" {
+        ToolResult::success(call_id, content)
+    } else {
+        ToolResult::error(call_id, content)
     }
-    if let Some(values) = value.as_array()
-        && let Some(item_schema) = schema.get("items")
-    {
-        for (index, item) in values.iter().enumerate() {
-            validate_schema(item_schema, item, &format!("{path}[{index}]"))?;
-        }
-    }
-    Ok(())
 }

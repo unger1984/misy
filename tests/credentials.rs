@@ -61,3 +61,29 @@ fn credential_store_rejects_an_unsupported_format_version() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn credential_store_replaces_existing_provider_credentials() {
+    let root = test_root("credentials-overwrite");
+    let paths = MisyPaths::from_root(&root);
+    let store = CredentialStore::new(paths.clone());
+    let provider = ProviderId::new("codex-subscription");
+
+    store
+        .save(&provider, json!({"access_token": "old-token"}))
+        .unwrap();
+    store
+        .save(&provider, json!({"access_token": "replacement-token"}))
+        .unwrap();
+
+    assert_eq!(
+        store.load(&provider).unwrap(),
+        Some(json!({"access_token": "replacement-token"}))
+    );
+    assert!(
+        !fs::read_to_string(paths.credentials_file())
+            .unwrap()
+            .contains("old-token")
+    );
+    fs::remove_dir_all(root).unwrap();
+}

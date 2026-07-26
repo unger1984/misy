@@ -1,14 +1,13 @@
 use crate::domain::ModelRef;
+use atomicwrites::{AllowOverwrite, AtomicFile};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env,
     error::Error,
-    fmt,
-    fs::{self, File},
+    fmt, fs,
     io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// Paths owned by misy. `from_root` keeps filesystem tests independent from the user home directory.
@@ -270,37 +269,23 @@ fn write_atomic_with_mode(path: &Path, contents: &[u8], private: bool) -> std::i
         )
     })?;
     fs::create_dir_all(parent)?;
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary_path = parent.join(format!(".{file_name}.{unique}.tmp"));
-    let mut temporary_file = File::options()
-        .create_new(true)
-        .write(true)
-        .open(&temporary_path)?;
-    if private {
-        set_private_permissions(&temporary_path)?;
-    }
-    let result = (|| {
-        temporary_file.write_all(contents)?;
-        temporary_file.sync_all()?;
-        fs::rename(&temporary_path, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    result
+    AtomicFile::new(path, AllowOverwrite)
+        .write(|temporary_file| {
+            if private {
+                set_private_permissions(temporary_file)?;
+            }
+            temporary_file.write_all(contents)
+        })
+        .map_err(Into::into)
 }
 
 #[cfg(unix)]
-fn set_private_permissions(path: &Path) -> std::io::Result<()> {
+fn set_private_permissions(file: &fs::File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    file.set_permissions(fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> std::io::Result<()> {
+fn set_private_permissions(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }

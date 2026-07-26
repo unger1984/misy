@@ -86,3 +86,84 @@ fn dispatcher_runs_a_command_without_a_shell() {
     assert_eq!(output["exit_code"], 0);
     assert_eq!(output["stdout"], "hello");
 }
+
+#[cfg(unix)]
+#[test]
+fn dispatcher_reports_command_timeout_after_killing_and_reaping_the_child() {
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher.dispatch(&ToolCall::new(
+        "command-timeout",
+        "run_command",
+        json!({"command": "sleep", "args": ["10"]}),
+    ));
+
+    assert!(result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(output["kind"], "timeout");
+    assert_eq!(output["exit_code"], serde_json::Value::Null);
+}
+
+#[cfg(unix)]
+#[test]
+fn dispatcher_marks_command_output_that_exceeds_its_bound() {
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher.dispatch(&ToolCall::new(
+        "command-truncated",
+        "run_command",
+        json!({"command": "sh", "args": ["-c", "yes x | head -c 70000"]}),
+    ));
+
+    assert!(result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(output["kind"], "truncated");
+    assert_eq!(output["stdout_truncated"], true);
+    assert!(output["stdout"].as_str().unwrap().len() < 70000);
+}
+
+#[cfg(unix)]
+#[test]
+fn dispatcher_marks_stderr_that_exceeds_its_bound() {
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher.dispatch(&ToolCall::new(
+        "command-stderr-truncated",
+        "run_command",
+        json!({"command": "sh", "args": ["-c", "yes x | head -c 70000 >&2"]}),
+    ));
+
+    assert!(result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(output["kind"], "truncated");
+    assert_eq!(output["stderr_truncated"], true);
+    assert!(output["stderr"].as_str().unwrap().len() < 70000);
+}
+
+#[cfg(unix)]
+#[test]
+fn dispatcher_labels_nonzero_exit_and_spawn_failures() {
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let nonzero = dispatcher.dispatch(&ToolCall::new(
+        "command-nonzero",
+        "run_command",
+        json!({"command": "sh", "args": ["-c", "exit 7"]}),
+    ));
+    assert!(nonzero.is_error);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&nonzero.content).unwrap()["kind"],
+        "nonzero_exit"
+    );
+
+    let spawn = dispatcher.dispatch(&ToolCall::new(
+        "command-spawn",
+        "run_command",
+        json!({"command": "misy-command-that-does-not-exist"}),
+    ));
+    assert!(spawn.is_error);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&spawn.content).unwrap()["kind"],
+        "spawn_error"
+    );
+}

@@ -61,3 +61,29 @@ fn config_store_refuses_to_write_an_unsupported_format_version() {
     assert!(error.to_string().contains("unsupported config version 2"));
     assert!(!root.join("config.toml").exists());
 }
+
+#[test]
+fn config_store_replaces_an_existing_config_file() {
+    let root = test_root("config-overwrite");
+    let paths = MisyPaths::from_root(&root);
+    let store = ConfigStore::new(paths.clone());
+    let first = Config::with_default_model(ModelRef::new(
+        ProviderId::new("first-provider"),
+        ModelId::new("first-model"),
+    ));
+    let replacement = Config::with_default_model(ModelRef::new(
+        ProviderId::new("replacement-provider"),
+        ModelId::new("replacement-model"),
+    ));
+
+    store.save(&first).unwrap();
+    store.save(&replacement).unwrap();
+
+    assert_eq!(store.load().unwrap(), replacement);
+    assert!(
+        !fs::read_to_string(paths.config_file())
+            .unwrap()
+            .contains("first-provider")
+    );
+    fs::remove_dir_all(root).unwrap();
+}

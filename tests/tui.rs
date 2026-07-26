@@ -542,6 +542,9 @@ fn completed_response_remains_in_the_fullscreen_transcript() {
     wait_for(&mut client, |client| {
         client.state().active_submission().is_none()
     });
+    assert!(!client.state().transcript().iter().any(
+        |row| matches!(row, TranscriptRow::Info(message) if message == "submission completed")
+    ));
     let finalized = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
     assert!(finalized.iter().any(|line| line.contains("next")));
 }

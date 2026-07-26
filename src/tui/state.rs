@@ -428,8 +428,11 @@ impl UiState {
                 arguments: serde_json::to_string(&call.arguments).ok(),
             }),
             CoreEvent::ToolResult { result, .. } => self.add_tool_result(result),
-            CoreEvent::Completed { submission } => self.finish_submission(submission, "completed"),
-            CoreEvent::Cancelled { submission } => self.finish_submission(submission, "cancelled"),
+            CoreEvent::Completed { submission } => self.finish_submission(submission),
+            CoreEvent::Cancelled { submission } => {
+                self.finish_submission(submission);
+                self.add_info("submission cancelled");
+            }
             CoreEvent::Failed {
                 submission,
                 message,
@@ -643,11 +646,10 @@ impl UiState {
         self.transcript.push(TranscriptRow::AssistantText(text));
     }
 
-    fn finish_submission(&mut self, submission: SubmissionId, status: &str) {
+    fn finish_submission(&mut self, submission: SubmissionId) {
         if self.active_submission == Some(submission) {
             self.set_active_submission(None);
         }
-        self.add_info(format!("submission {status}"));
     }
 }
 

@@ -46,14 +46,19 @@ authentication, session, and tool orchestration remain in the core.
   access and display its normal copy feedback. Bracketed paste and forwarded `Cmd+V` insert text
   atomically at the cursor and never submit embedded newlines.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
-  without taking focus from it. `Enter` or `Tab` accepts a command, clears the composer, and opens
-  the requested surface; `Esc` dismisses the popup without changing the draft.
+  without taking focus from it. The popup shows at most eight commands; `Up` and `Down` scroll its
+  window and wrap between the first and last matching commands. `Tab` completes the selected
+  command with its canonical name and a trailing space, then hides the popup without executing it.
+  `Enter` executes the selected or completed command; `Esc` dismisses the popup without changing
+  the draft.
 - `/usage` fetches the selected model provider's account limits in the background and appends a
   normalized, display-safe usage report to the transcript. It takes no arguments. The report shows
   provider-wide and per-limit notes, consumed and remaining amounts, exhausted limits, and known
   reset timing. If no model is selected, the provider does not declare usage capability version 1,
   authentication fails, the request times out, or the report is invalid, the TUI renders the error
   without changing the selected model.
+- `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
+  terminal-restoration path as `Ctrl+C`.
 - `/provider` opens an interactive provider list. `/model` opens one model list across configured
   providers. Both lists show a dim heading, an empty separator line, eight scrollable numbered
   rows, aligned dim second-column descriptions, and an accent-highlighted selection. Digits select
@@ -66,6 +71,11 @@ authentication, session, and tool orchestration remain in the core.
 - Transcript rows use semantic styling: dim user prompts and service messages, normal assistant
   text, structured tool calls with indented results, and red failures. An active submission adds an
   animated one-line spinner with elapsed time and the `esc to interrupt` hint above the composer.
+- The first accepted prompt is shown optimistically in the transcript. Prompts submitted while a
+  turn is active remain in a bounded queue preview above the composer and enter the transcript only
+  when the core starts them. The core processes them in FIFO order, so each answer stays directly
+  after its prompt. Before the first assistant text the activity row says `Thinking…`; once text
+  begins it says `Responding…`.
 
 ## Lifecycle and Safety
 
@@ -79,9 +89,15 @@ authentication, session, and tool orchestration remain in the core.
   directly to the OS opener without a shell. Unknown authentication kinds are reported as errors.
 - Authentication completion keeps the opaque provider session separate from the empty browser or
   device completion object and passes both through the core without pasted credential JSON.
-- `Ctrl+C` always cancels active work, shuts down the core/provider host, restores the terminal,
-  and exits.
+- During active work, `Ctrl+C` interrupts the current operation without exiting. While idle, the
+  first press highlights `press Ctrl+C again to exit` in the footer for one second; a second press
+  inside that window shuts down the core/provider host, restores the terminal, and exits. Any
+  other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event processing is bounded per tick so continuous streaming cannot starve input handling.
+- `Esc` interrupts the active turn. When prompts are queued, the next one starts after cancellation
+  and the activity row briefly offers `esc again to stop queue`; a second press within one second
+  cancels both the active turn and every remaining queued submission. With no queued prompt, one
+  press is sufficient to stop the active turn.
 - Usage is a core operation, not a TUI-owned provider request: the TUI supplies no endpoint,
   headers, credentials, or provider-specific parsing.
 

@@ -1,5 +1,5 @@
 use crate::{
-    Config, ConfigStore, CredentialStore, Message, MisyPaths, ModelInfo, ModelRef, ProviderCatalog,
+    Config, ConfigStore, CredentialStore, MisyPaths, ModelInfo, ModelRef, ProviderCatalog,
     ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolDispatcher, ToolRegistry,
 };
 use serde_json::{Value, json};
@@ -11,7 +11,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
     },
-    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,6 +18,7 @@ mod agent;
 mod contracts;
 mod events;
 mod models;
+mod queue;
 mod usage;
 use contracts::strip_credentials;
 // These established names are the public core-client contract.
@@ -28,6 +28,7 @@ pub use contracts::{
 };
 use events::LosslessSubscribers;
 use models::{parse_models, select_catalog_default};
+use queue::SubmissionQueue;
 
 /// Public, headless agent runtime. TUI and desktop clients consume only this contract.
 // The established public runtime name is the crate's primary client contract.
@@ -53,7 +54,7 @@ struct CoreInner {
     auth_operations: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     credential_operations: Mutex<()>,
     model_operations: Mutex<()>,
-    session_operation: Mutex<()>,
+    submission_queue: Mutex<SubmissionQueue>,
     next_submission: AtomicU64,
     is_shutdown: AtomicBool,
 }
@@ -103,7 +104,7 @@ impl MisyCore {
             auth_operations: Mutex::new(BTreeMap::new()),
             credential_operations: Mutex::new(()),
             model_operations: Mutex::new(()),
-            session_operation: Mutex::new(()),
+            submission_queue: Mutex::new(SubmissionQueue::default()),
             next_submission: AtomicU64::new(1),
             is_shutdown: AtomicBool::new(false),
         });
@@ -503,33 +504,6 @@ impl MisyCore {
         self.emit(&CoreEvent::ModelSelected { model });
         Ok(())
     }
-    /// Starts asynchronous processing of one user or system message.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CoreError::NoModelSelected`] when no direct-interaction model is selected, or
-    /// [`CoreError::Shutdown`] after shutdown.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the active-submission mutex is poisoned by an earlier core-thread panic.
-    pub fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
-        self.ensure_running()?;
-        let model = self.selected_model().ok_or(CoreError::NoModelSelected)?;
-        let id = SubmissionId(self.inner.next_submission.fetch_add(1, Ordering::Relaxed));
-        let active = Arc::new(ActiveSubmission {
-            cancelled: AtomicBool::new(false),
-            request: Mutex::new(None),
-        });
-        self.inner
-            .active
-            .lock()
-            .expect("active submissions mutex must not be poisoned")
-            .insert(id.get(), Arc::clone(&active));
-        let core = self.clone();
-        thread::spawn(move || core.run_submission(id, &model, message, &active));
-        Ok(id)
-    }
     /// Requests cancellation of an active submission and forwards provider cancellation when set.
     ///
     /// # Errors
@@ -572,25 +546,7 @@ impl MisyCore {
         if self.inner.is_shutdown.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let active: Vec<_> = self
-            .inner
-            .active
-            .lock()
-            .expect("active submissions mutex must not be poisoned")
-            .values()
-            .cloned()
-            .collect();
-        for submission in active {
-            submission.cancelled.store(true, Ordering::Release);
-            if let Some((provider, request)) = submission
-                .request
-                .lock()
-                .expect("active request mutex must not be poisoned")
-                .clone()
-            {
-                let _ = self.inner.host.cancel_request(&provider, request);
-            }
-        }
+        self.cancel_all_submissions();
         self.inner.host.shutdown()?;
         self.emit(&CoreEvent::Shutdown);
         Ok(())

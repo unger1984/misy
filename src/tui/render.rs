@@ -16,6 +16,7 @@ use ratatui::{
 use std::time::Instant;
 
 const MAX_VIEW_ROWS: usize = 8;
+const MAX_QUEUED_PROMPT_ROWS: usize = 3;
 const POPUP_TOP_SPACE: u16 = 1;
 
 /// Renders the complete fullscreen client.
@@ -29,9 +30,11 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     let modal = state.modal_presentation(MAX_VIEW_ROWS);
     let composer_height = composer_height(state);
     let surface_height = surface_height(&popup_rows, modal.as_ref());
+    let queued_prompts = state.queued_prompt_lines(MAX_QUEUED_PROMPT_ROWS);
     let busy = state.busy_label(Instant::now());
     let areas = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(u16::try_from(queued_prompts.len()).unwrap_or(u16::MAX)),
         Constraint::Length(u16::from(busy.is_some())),
         Constraint::Length(composer_height),
         Constraint::Length(surface_height),
@@ -40,17 +43,24 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     .split(area);
 
     render_transcript(frame, areas[0], state);
+    if !queued_prompts.is_empty() {
+        let lines = queued_prompts
+            .into_iter()
+            .map(|line| Line::styled(line, style::muted()))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(Text::from(lines)), areas[1]);
+    }
     if let Some(label) = busy {
         frame.render_widget(
             Paragraph::new(Line::styled(label, style::accent())),
-            areas[1],
+            areas[2],
         );
     }
-    render_composer(frame, areas[2], state);
-    render_surface(frame, areas[3], &popup_rows, modal.as_ref());
-    render_footer(frame, areas[4], state);
-    render_cursor(frame, areas[2], state);
-    areas[2]
+    render_composer(frame, areas[3], state);
+    render_surface(frame, areas[4], &popup_rows, modal.as_ref());
+    render_footer(frame, areas[5], state);
+    render_cursor(frame, areas[3], state);
+    areas[3]
 }
 
 /// Converts transcript rows into styled terminal lines.
@@ -331,14 +341,26 @@ fn padded_line(mut spans: Vec<Span<'static>>, width: u16, style: Style) -> Line<
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
-    let left = "  ? for shortcuts";
+    let quit_hint = state.quit_shortcut_active(Instant::now());
+    let left = if quit_hint {
+        "  press Ctrl+C again to exit"
+    } else {
+        "  ? for shortcuts"
+    };
     let right = state.status_text();
     let gap = usize::from(area.width)
         .saturating_sub(Line::raw(left).width())
         .saturating_sub(Line::raw(&right).width());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(left, style::muted()),
+            Span::styled(
+                left,
+                if quit_hint {
+                    style::accent()
+                } else {
+                    style::muted()
+                },
+            ),
             Span::raw(" ".repeat(gap)),
             Span::styled(right, style::muted()),
         ])),

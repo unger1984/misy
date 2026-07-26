@@ -1,5 +1,7 @@
 //! Deterministic state rendered by the terminal client.
 
+mod turns;
+
 use super::{
     action::{UiAction, UiMode},
     composer::Composer,
@@ -10,7 +12,17 @@ use super::{
 use crate::{
     AvailableModels, CoreEvent, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId, ToolResult,
 };
-use std::{collections::BTreeMap, fmt, time::Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt,
+    time::Instant,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueuedPrompt {
+    submission: SubmissionId,
+    text: String,
+}
 
 /// A renderable, user-visible transcript item.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,7 +125,12 @@ pub struct UiState {
     provider_names: BTreeMap<String, String>,
     selected_model: Option<ModelRef>,
     active_submission: Option<SubmissionId>,
+    starting_submission: Option<SubmissionId>,
+    queued_prompts: VecDeque<QueuedPrompt>,
     submission_started_at: Option<Instant>,
+    response_started: bool,
+    escape_shortcut_expires_at: Option<Instant>,
+    quit_shortcut_expires_at: Option<Instant>,
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
     pub(super) provider_operation: Option<(ProviderId, ProviderOperationKind)>,
@@ -130,7 +147,12 @@ impl Default for UiState {
             provider_names: BTreeMap::new(),
             selected_model: None,
             active_submission: None,
+            starting_submission: None,
+            queued_prompts: VecDeque::new(),
             submission_started_at: None,
+            response_started: false,
+            escape_shortcut_expires_at: None,
+            quit_shortcut_expires_at: None,
             should_exit: false,
             view: None,
             provider_operation: None,
@@ -145,14 +167,22 @@ impl UiState {
         &self.transcript
     }
 
-    /// Returns the active submission, if a model turn is running.
-    pub fn active_submission(&self) -> Option<SubmissionId> {
-        self.active_submission
-    }
-
     /// Returns whether the terminal loop should exit.
     pub fn should_exit(&self) -> bool {
         self.should_exit
+    }
+
+    pub(super) fn arm_quit_shortcut(&mut self, expires_at: Instant) {
+        self.quit_shortcut_expires_at = Some(expires_at);
+    }
+
+    pub(super) fn clear_quit_shortcut(&mut self) {
+        self.quit_shortcut_expires_at = None;
+    }
+
+    pub(super) fn quit_shortcut_active(&self, now: Instant) -> bool {
+        self.quit_shortcut_expires_at
+            .is_some_and(|expires_at| now < expires_at)
     }
 
     /// Returns the currently visible bottom-pane surface.
@@ -269,15 +299,6 @@ impl UiState {
 
     pub(super) fn add_info(&mut self, message: impl Into<String>) {
         self.transcript.push(TranscriptRow::Info(message.into()));
-    }
-
-    pub(super) fn push_transcript(&mut self, row: TranscriptRow) {
-        self.transcript.push(row);
-    }
-
-    pub(super) fn set_active_submission(&mut self, submission: Option<SubmissionId>) {
-        self.active_submission = submission;
-        self.submission_started_at = self.active_submission.as_ref().map(|_| Instant::now());
     }
 
     pub(super) fn set_selected_model(&mut self, model: Option<ModelRef>) {
@@ -419,10 +440,14 @@ impl UiState {
                 authenticated,
             } => self.set_provider_authenticated(&provider, authenticated, None),
             CoreEvent::ModelSelected { model } => self.selected_model = Some(model),
-            CoreEvent::SubmissionStarted { submission, .. } => {
-                self.set_active_submission(Some(submission))
+            CoreEvent::SubmissionStarted { submission, .. } => self.start_submission(submission),
+            CoreEvent::TextDelta {
+                submission, delta, ..
+            } if self.active_submission == Some(submission) => {
+                self.response_started = true;
+                self.reduce(UiAction::AppendAssistantText(delta));
             }
-            CoreEvent::TextDelta { delta, .. } => self.reduce(UiAction::AppendAssistantText(delta)),
+            CoreEvent::TextDelta { .. } => {}
             CoreEvent::ToolCall { call, .. } => self.transcript.push(TranscriptRow::ToolCall {
                 id: call.id,
                 name: call.name,
@@ -431,8 +456,15 @@ impl UiState {
             CoreEvent::ToolResult { result, .. } => self.add_tool_result(result),
             CoreEvent::Completed { submission } => self.finish_submission(submission),
             CoreEvent::Cancelled { submission } => {
-                self.finish_submission(submission);
-                self.add_info("submission cancelled");
+                if self.active_submission == Some(submission) {
+                    self.finish_submission(submission);
+                    self.add_info("submission cancelled");
+                } else if self.starting_submission == Some(submission) {
+                    self.remove_queued_prompt(submission);
+                    self.add_info("submission cancelled");
+                } else {
+                    self.remove_queued_prompt(submission);
+                }
             }
             CoreEvent::Failed {
                 submission,
@@ -440,8 +472,10 @@ impl UiState {
             } => {
                 if self.active_submission == Some(submission) {
                     self.set_active_submission(None);
+                    self.add_error(message);
+                } else {
+                    self.remove_queued_prompt(submission);
                 }
-                self.add_error(message);
             }
             CoreEvent::Shutdown => self.should_exit = true,
         }
@@ -515,16 +549,6 @@ impl UiState {
             return Vec::new();
         }
         self.composer.popup_rows_for_render()
-    }
-
-    pub(super) fn busy_label(&self, now: Instant) -> Option<String> {
-        let started = self.submission_started_at?;
-        let elapsed = now.saturating_duration_since(started);
-        let frame = spinner_frame(elapsed.as_millis() / 100);
-        Some(format!(
-            "{frame} Working… ({}s · esc to interrupt)",
-            elapsed.as_secs()
-        ))
     }
 
     fn provider_list(&self) -> ListView<ProviderId> {
@@ -645,26 +669,5 @@ impl UiState {
             return;
         }
         self.transcript.push(TranscriptRow::AssistantText(text));
-    }
-
-    fn finish_submission(&mut self, submission: SubmissionId) {
-        if self.active_submission == Some(submission) {
-            self.set_active_submission(None);
-        }
-    }
-}
-
-fn spinner_frame(ticks: u128) -> &'static str {
-    match ticks % 10 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        3 => "⠸",
-        4 => "⠼",
-        5 => "⠴",
-        6 => "⠦",
-        7 => "⠧",
-        8 => "⠇",
-        _ => "⠏",
     }
 }

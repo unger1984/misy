@@ -72,7 +72,7 @@ pub fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
         }
         Ok(())
     })();
-    client.handle_ctrl_c();
+    client.shutdown();
     guard.restore();
     result
 }

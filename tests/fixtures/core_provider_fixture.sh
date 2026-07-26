@@ -170,6 +170,30 @@ chat_start() {
       ;;
   esac
   case "$line" in
+    *'"content":"queue-timeout-third"'*)
+      text two
+      complete
+      reply '{}'
+      ;;
+    *'"content":"queue-timeout-second"'*)
+      sleep 2
+      complete
+      reply '{}'
+      ;;
+    *'"content":"queue-timeout-first"'*)
+      sleep 2
+      complete
+      reply '{}'
+      ;;
+    *'"content":"stale-head-second"'*)
+      sleep 1
+      complete
+      reply '{}'
+      ;;
+    *'"content":"stale-head-first"'*)
+      complete
+      reply '{}'
+      ;;
     *'"tool_call_id":"write-1"'*)
       text done
       complete

@@ -3,6 +3,7 @@
 use ratatui::text::Line;
 
 const MAX_HISTORY_ENTRIES: usize = 100;
+const MAX_POPUP_ROWS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommandDefinition {
@@ -18,7 +19,7 @@ pub(super) struct CommandPopupRow {
     pub(super) selected: bool,
 }
 
-pub(super) const COMMANDS: [CommandDefinition; 3] = [
+pub(super) const COMMANDS: [CommandDefinition; 4] = [
     CommandDefinition {
         name: "/provider",
         description: "Configure provider authentication",
@@ -30,6 +31,10 @@ pub(super) const COMMANDS: [CommandDefinition; 3] = [
     CommandDefinition {
         name: "/usage",
         description: "Show provider usage and limits",
+    },
+    CommandDefinition {
+        name: "/exit",
+        description: "Exit Misy",
     },
 ];
 
@@ -170,10 +175,17 @@ impl Composer {
         if !self.popup_visible() {
             return Vec::new();
         }
-        self.popup
-            .matches(&self.text)
+        let matches = self.popup.matches(&self.text);
+        let scroll_top = self
+            .popup
+            .selected
+            .saturating_add(1)
+            .saturating_sub(MAX_POPUP_ROWS);
+        matches
             .iter()
             .enumerate()
+            .skip(scroll_top)
+            .take(MAX_POPUP_ROWS)
             .map(|(index, command)| CommandPopupRow {
                 name: command.name,
                 description: command.description,
@@ -205,6 +217,19 @@ impl Composer {
             .matches(&self.text)
             .get(self.popup.selected)
             .map(|command| command.name)
+    }
+
+    pub(super) fn complete_selected_command(&mut self) -> bool {
+        let Some(command) = self.selected_command() else {
+            return false;
+        };
+        let first_line_end = self.text.find('\n').unwrap_or(self.text.len());
+        let completion = format!("{command} ");
+        self.text.replace_range(..first_line_end, &completion);
+        self.cursor = completion.len();
+        self.detach_history();
+        self.popup = CommandPopup::new();
+        true
     }
 
     pub(super) fn take_text(&mut self) -> String {
@@ -386,13 +411,46 @@ mod tests {
     fn slash_popup_tracks_edits_and_dismissal() {
         let mut composer = Composer::default();
         composer.insert_str("/");
-        assert_eq!(composer.popup_rows().len(), 3);
+        assert_eq!(composer.popup_rows().len(), 4);
         composer.insert_str("mo");
         assert_eq!(composer.selected_command(), Some("/model"));
         composer.dismiss_popup();
         assert!(!composer.popup_visible());
         composer.insert_str("d");
         assert!(composer.popup_visible());
+    }
+
+    #[test]
+    fn slash_popup_wraps_selection() {
+        let mut composer = Composer::default();
+        composer.insert_str("/");
+
+        composer.popup_up();
+        assert_eq!(composer.selected_command(), Some("/exit"));
+        assert_eq!(
+            composer.popup_rows(),
+            [
+                "  /provider  Configure provider authentication",
+                "  /model  Choose a model",
+                "  /usage  Show provider usage and limits",
+                "› /exit  Exit Misy",
+            ]
+        );
+
+        composer.popup_down();
+        assert_eq!(composer.selected_command(), Some("/provider"));
+        assert!(composer.popup_rows()[0].starts_with("› /provider"));
+    }
+
+    #[test]
+    fn tab_completion_replaces_the_filter_and_hides_the_popup() {
+        let mut composer = Composer::default();
+        composer.insert_str("/mo");
+
+        assert!(composer.complete_selected_command());
+        assert_eq!(composer.text(), "/model ");
+        assert_eq!(composer.cursor(), "/model ".len());
+        assert!(!composer.popup_visible());
     }
 
     #[test]

@@ -25,10 +25,18 @@
 - Added dynamic model discovery with bundled fallbacks for OpenAI, Anthropic, and Kimi.
 - Added the `/usage` command for viewing normalized account limits from the provider of the
   currently selected model.
+- Added the `/exit` command for cancelling active work and shutting down Misy cleanly.
 - Added `-c <path>` and `--config=<path>` options for selecting the Misy configuration directory.
 
 ### Improved
 
+- Made the slash-command popup show up to eight scrollable, cyclically selectable commands, with
+  `Tab` completing the selected command in the composer without executing it.
+- Made `Ctrl+C` interrupt active work and require a highlighted, time-bounded second press before
+  exiting an idle TUI.
+- Added core-owned FIFO prompt scheduling, a bounded queued-prompt preview, explicit
+  `Thinking…`/`Responding…` activity, and single- or double-`Esc` cancellation for the active turn
+  or the whole queue.
 - Kept provider and model operations non-blocking so streaming and keyboard input remain
   responsive.
 - Hardened provider authentication, stream request correlation, cancellation, credential

@@ -79,11 +79,6 @@ impl MisyCore {
         message: Message,
         active: &ActiveSubmission,
     ) {
-        let _session = self
-            .inner
-            .session_operation
-            .lock()
-            .expect("session operation mutex must not be poisoned");
         if active.cancelled.load(Ordering::Acquire) {
             self.inner
                 .active

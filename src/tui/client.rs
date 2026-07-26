@@ -1,11 +1,13 @@
 //! Thin TUI client over the headless core.
 
+mod interrupts;
+
 use super::{
     action::{UiAction, UiKey, UiMode},
     auth_flow::{AuthFlow, parse_auth_flow},
     browser::BrowserHandoff,
     history::PromptHistoryStore,
-    state::{ProviderAction, ProviderChoice, ProviderOperationKind, TranscriptRow, UiState},
+    state::{ProviderAction, ProviderChoice, ProviderOperationKind, UiState},
 };
 use crate::{
     AvailableModels, CoreError, CoreEvent, Message, MisyCore, MisyPaths, ModelRef, ProviderId,
@@ -18,10 +20,13 @@ use std::{
     fmt,
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
+    time::{Duration, Instant},
 };
 
 const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_OPERATIONS_PER_TICK: usize = 64;
+const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);
+const ESCAPE_QUEUE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Terminal-loop control result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -147,6 +152,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     /// Inserts text into the focused composer or modal filter.
     pub fn insert_text(&mut self, text: &str) {
+        self.state.clear_quit_shortcut();
+        self.state.clear_escape_shortcut();
         if self.state.mode() == UiMode::Input {
             self.state.composer.insert_str(text);
         } else {
@@ -156,6 +163,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     /// Inserts one terminal paste without interpreting embedded newlines as submissions.
     pub fn paste_text(&mut self, text: &str) {
+        self.state.clear_quit_shortcut();
+        self.state.clear_escape_shortcut();
         let normalized = normalize_paste(text);
         if self.state.mode() == UiMode::Input {
             self.state.composer.insert_str(&normalized);
@@ -166,6 +175,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     pub(super) fn position_composer_cursor(&mut self, row: u16, column: u16) {
+        self.state.clear_quit_shortcut();
         if self.state.mode() == UiMode::Input {
             self.state.composer.position_cursor(row, column);
         }
@@ -225,6 +235,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
     ///
     /// Returns failures from core calls initiated by the resulting action.
     pub fn handle_input(&mut self, input: &str) -> Result<TuiControl, TuiError> {
+        self.state.clear_quit_shortcut();
+        self.state.clear_escape_shortcut();
         self.handle_submitted_input(input).0
     }
 
@@ -263,12 +275,20 @@ impl<B: BrowserHandoff> TuiClient<B> {
     ///
     /// Returns failures from an accepted selection or submitted prompt.
     pub fn handle_key(&mut self, key: UiKey) -> Result<TuiControl, TuiError> {
-        if key == UiKey::Escape
-            && let Some(submission) = self.state.active_submission()
-        {
-            self.core.cancel(submission)?;
-            return Ok(TuiControl::Continue);
+        self.state.clear_quit_shortcut();
+        if key == UiKey::Escape {
+            if self.state.escape_shortcut_active(Instant::now()) {
+                self.core.cancel_all_submissions();
+                self.state.clear_queued_prompts();
+                self.state.clear_escape_shortcut();
+                return Ok(TuiControl::Continue);
+            }
+            if self.state.interruptible_submission().is_some() {
+                self.handle_escape();
+                return Ok(TuiControl::Continue);
+            }
         }
+        self.state.clear_escape_shortcut();
         if self.state.mode() != UiMode::Input {
             return self.handle_view_key(key);
         }
@@ -277,7 +297,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 UiKey::Up => self.state.composer.popup_up(),
                 UiKey::Down => self.state.composer.popup_down(),
                 UiKey::Escape => self.state.composer.dismiss_popup(),
-                UiKey::Enter | UiKey::Tab => return self.submit_composer(),
+                UiKey::Enter => return self.submit_composer(),
+                UiKey::Tab => {
+                    self.state.composer.complete_selected_command();
+                }
                 _ => return self.handle_composer_key(key),
             }
             return Ok(TuiControl::Continue);
@@ -304,20 +327,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
             self.apply_operation_result(result);
         }
         received
-    }
-
-    /// Cancels active work, shuts down every provider, and requests terminal exit.
-    pub fn handle_ctrl_c(&mut self) -> TuiControl {
-        if let Some(submission) = self.state.active_submission()
-            && let Err(error) = self.core.cancel(submission)
-        {
-            self.state.add_error(error);
-        }
-        if let Err(error) = self.core.shutdown() {
-            self.state.add_error(error);
-        }
-        self.state.reduce(UiAction::CancelAndExit);
-        TuiControl::Exit
     }
 
     fn handle_view_key(&mut self, key: UiKey) -> Result<TuiControl, TuiError> {
@@ -376,9 +385,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::ShowUsage => self.show_usage()?,
             UiAction::SubmitPrompt(prompt) => {
                 let submission = self.core.submit(Message::user(prompt.clone()))?;
-                self.state
-                    .push_transcript(TranscriptRow::UserPrompt(prompt));
-                self.state.set_active_submission(Some(submission));
+                self.state.accept_submission(submission, prompt);
             }
             UiAction::SelectModel(model) => self.select_model(model),
             UiAction::StartAuth(provider) => {
@@ -393,7 +400,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 self.start_auth(provider, method);
             }
             UiAction::PickerConfirm => return self.confirm_view(),
-            UiAction::CancelAndExit => return Ok(self.handle_ctrl_c()),
+            UiAction::CancelAndExit => return Ok(self.exit_now()),
             action => self.state.reduce(action),
         }
         Ok(TuiControl::Continue)

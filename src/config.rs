@@ -32,7 +32,7 @@ impl MisyPaths {
         Ok(Self::from_root(PathBuf::from(home).join(".misy")))
     }
 
-    /// Creates paths below an explicit root, primarily for isolated clients and tests.
+    /// Creates paths below an explicit root selected by a client or command-line invocation.
     pub fn from_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }

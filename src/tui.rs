@@ -22,7 +22,8 @@ use std::{
     fmt,
     io::{self, Stdout},
     process::Command,
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread,
     time::Duration,
 };
 
@@ -160,7 +161,44 @@ pub enum UiAction {
     AppendToolResult { id: String, is_error: bool },
     ScrollUp,
     ScrollDown,
+    PickerUp,
+    PickerDown,
+    PickerConfirm,
+    PickerBack,
     CancelAndExit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiKey {
+    Up,
+    Down,
+    Enter,
+    Escape,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UiMode {
+    #[default]
+    Input,
+    ProviderList,
+    ProviderDetail,
+    ModelList,
+}
+
+pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
+    if mode == UiMode::Input {
+        return match key {
+            UiKey::Up => UiAction::ScrollUp,
+            UiKey::Down => UiAction::ScrollDown,
+            UiKey::Enter | UiKey::Escape => UiAction::Noop,
+        };
+    }
+    match key {
+        UiKey::Up => UiAction::PickerUp,
+        UiKey::Down => UiAction::PickerDown,
+        UiKey::Enter => UiAction::PickerConfirm,
+        UiKey::Escape => UiAction::PickerBack,
+    }
 }
 
 /// Converts one submitted input line into an explicit UI action.
@@ -222,6 +260,12 @@ pub struct UiState {
     active_submission: Option<SubmissionId>,
     scroll_offset: usize,
     should_exit: bool,
+    mode: UiMode,
+    highlighted_index: usize,
+    provider_choices: Vec<(ProviderId, bool)>,
+    detail_provider: Option<ProviderId>,
+    model_choices: Vec<ModelInfo>,
+    auth_pending: Option<ProviderId>,
 }
 
 impl UiState {
@@ -241,6 +285,60 @@ impl UiState {
         self.should_exit
     }
 
+    pub fn mode(&self) -> UiMode {
+        self.mode
+    }
+
+    pub fn highlighted_index(&self) -> usize {
+        self.highlighted_index
+    }
+
+    pub fn selected_model(&self) -> Option<ModelRef> {
+        self.selected_model.clone()
+    }
+
+    pub fn picker_labels(&self) -> Vec<String> {
+        match self.mode {
+            UiMode::Input => Vec::new(),
+            UiMode::ProviderList => self
+                .provider_choices
+                .iter()
+                .map(|(provider, authenticated)| {
+                    format!(
+                        "{} {}",
+                        provider.as_str(),
+                        if *authenticated { "✓" } else { "○" }
+                    )
+                })
+                .collect(),
+            UiMode::ProviderDetail => self
+                .detail_provider
+                .as_ref()
+                .map(|provider| {
+                    vec![if self.auth_pending.as_ref() == Some(provider) {
+                        "Waiting for browser…".to_owned()
+                    } else if self.provider_is_authenticated(provider) {
+                        "Log out".to_owned()
+                    } else {
+                        "Authorize".to_owned()
+                    }]
+                })
+                .unwrap_or_default(),
+            UiMode::ModelList => self
+                .model_choices
+                .iter()
+                .map(|model| {
+                    format!(
+                        "{}/{} — {}",
+                        model.model.provider.as_str(),
+                        model.model.model.as_str(),
+                        model.display_name
+                    )
+                })
+                .collect(),
+        }
+    }
+
     /// Applies a local, side-effect-free state transition.
     pub fn reduce(&mut self, action: UiAction) {
         match action {
@@ -257,6 +355,10 @@ impl UiState {
             }
             UiAction::ScrollUp => self.scroll_offset = self.scroll_offset.saturating_add(1),
             UiAction::ScrollDown => self.scroll_offset = self.scroll_offset.saturating_sub(1),
+            UiAction::PickerUp => self.move_highlight_up(),
+            UiAction::PickerDown => self.move_highlight_down(),
+            UiAction::PickerBack => self.back_from_picker(),
+            UiAction::PickerConfirm => {}
             UiAction::CancelAndExit => self.should_exit = true,
             UiAction::ShowProviders
             | UiAction::StartAuth(_)
@@ -264,6 +366,121 @@ impl UiState {
             | UiAction::ShowModels
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
+        }
+    }
+
+    fn open_provider_list(&mut self, providers: Vec<(ProviderId, bool)>) {
+        self.provider_choices = providers;
+        self.mode = UiMode::ProviderList;
+        self.highlighted_index = 0;
+        self.detail_provider = None;
+    }
+
+    fn open_provider_detail(&mut self) {
+        self.detail_provider = self
+            .provider_choices
+            .get(self.highlighted_index)
+            .map(|(provider, _)| provider.clone());
+        if self.detail_provider.is_some() {
+            self.mode = UiMode::ProviderDetail;
+            self.highlighted_index = 0;
+        }
+    }
+
+    fn open_model_list(&mut self, models: Vec<ModelInfo>) {
+        self.model_choices = models;
+        self.mode = UiMode::ModelList;
+        self.highlighted_index = 0;
+    }
+
+    fn choice_count(&self) -> usize {
+        match self.mode {
+            UiMode::ProviderList => self.provider_choices.len(),
+            UiMode::ProviderDetail => usize::from(self.detail_provider.is_some()),
+            UiMode::ModelList => self.model_choices.len(),
+            UiMode::Input => 0,
+        }
+    }
+
+    fn move_highlight_up(&mut self) {
+        let count = self.choice_count();
+        if count > 0 {
+            self.highlighted_index = (self.highlighted_index + count - 1) % count;
+        }
+    }
+
+    fn move_highlight_down(&mut self) {
+        let count = self.choice_count();
+        if count > 0 {
+            self.highlighted_index = (self.highlighted_index + 1) % count;
+        }
+    }
+
+    fn back_from_picker(&mut self) {
+        match self.mode {
+            UiMode::ProviderDetail => {
+                self.mode = UiMode::ProviderList;
+                self.detail_provider = None;
+                self.highlighted_index = 0;
+            }
+            UiMode::ProviderList | UiMode::ModelList => {
+                self.mode = UiMode::Input;
+                self.highlighted_index = 0;
+            }
+            UiMode::Input => {}
+        }
+    }
+
+    fn provider_is_authenticated(&self, provider: &ProviderId) -> bool {
+        self.provider_auth
+            .get(provider.as_str())
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn composer_text(&self) -> String {
+        if self.mode == UiMode::Input {
+            return self.input.clone();
+        }
+        let labels = self.picker_labels();
+        let rows = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                format!(
+                    "{} {label}",
+                    if index == self.highlighted_index {
+                        "›"
+                    } else {
+                        " "
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        match self.mode {
+            UiMode::ProviderList => format!("Select provider  ↑↓ Enter  Esc\n{rows}"),
+            UiMode::ProviderDetail => {
+                let provider = self
+                    .detail_provider
+                    .as_ref()
+                    .map(ProviderId::as_str)
+                    .unwrap_or("unknown");
+                let status = self
+                    .detail_provider
+                    .as_ref()
+                    .map(|provider| {
+                        if self.provider_is_authenticated(provider) {
+                            "authenticated ✓"
+                        } else {
+                            "not authenticated"
+                        }
+                    })
+                    .unwrap_or("unavailable");
+                format!("{provider}  {status}\n{rows}\nEsc back")
+            }
+            UiMode::ModelList => format!("Select model  ↑↓ Enter  Esc\n{rows}"),
+            UiMode::Input => self.input.clone(),
         }
     }
 
@@ -286,42 +503,27 @@ impl UiState {
 
     fn add_provider(&mut self, provider: ProviderId, authenticated: bool) {
         let id = provider.as_str().to_owned();
-        self.provider_auth.insert(id.clone(), authenticated);
-        self.transcript
-            .push(TranscriptRow::Provider { id, authenticated });
+        self.provider_auth.insert(id, authenticated);
+        if let Some((_, status)) = self
+            .provider_choices
+            .iter_mut()
+            .find(|(choice, _)| choice == &provider)
+        {
+            *status = authenticated;
+        }
     }
 
     fn add_models(&mut self, models: Vec<ModelInfo>) {
-        for info in models {
-            self.transcript.push(TranscriptRow::Model {
-                provider: info.model.provider.as_str().to_owned(),
-                id: info.model.model.as_str().to_owned(),
-                selected: self.selected_model.as_ref() == Some(&info.model),
-            });
+        if self.mode == UiMode::ModelList {
+            self.model_choices = models;
+            self.highlighted_index = self
+                .highlighted_index
+                .min(self.model_choices.len().saturating_sub(1));
         }
     }
 
     fn set_selected_model(&mut self, model: ModelRef) {
-        self.selected_model = Some(model.clone());
-        let mut found = false;
-        for row in &mut self.transcript {
-            if let TranscriptRow::Model {
-                provider,
-                id,
-                selected,
-            } = row
-            {
-                *selected = provider == model.provider.as_str() && id == model.model.as_str();
-                found |= *selected;
-            }
-        }
-        if !found {
-            self.transcript.push(TranscriptRow::Model {
-                provider: model.provider.as_str().to_owned(),
-                id: model.model.as_str().to_owned(),
-                selected: true,
-            });
-        }
+        self.selected_model = Some(model);
     }
 
     fn apply_core_event(&mut self, event: CoreEvent) {
@@ -390,6 +592,7 @@ pub enum TuiError {
     Core(CoreError),
     Browser(String),
     AuthStartMissingUrl,
+    AuthStartMissingSession,
     InvalidAuthUrl(String),
 }
 
@@ -401,6 +604,9 @@ impl fmt::Display for TuiError {
             Self::AuthStartMissingUrl => {
                 formatter.write_str("provider auth.start response is missing a URL")
             }
+            Self::AuthStartMissingSession => {
+                formatter.write_str("provider auth.start response is missing a session")
+            }
             Self::InvalidAuthUrl(error) => formatter.write_str(error),
         }
     }
@@ -410,7 +616,10 @@ impl Error for TuiError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Core(error) => Some(error),
-            Self::Browser(_) | Self::AuthStartMissingUrl | Self::InvalidAuthUrl(_) => None,
+            Self::Browser(_)
+            | Self::AuthStartMissingUrl
+            | Self::AuthStartMissingSession
+            | Self::InvalidAuthUrl(_) => None,
         }
     }
 }
@@ -427,11 +636,14 @@ pub struct TuiClient<B> {
     events: Receiver<CoreEvent>,
     browser: B,
     state: UiState,
+    auth_sender: Sender<(ProviderId, Result<(), String>)>,
+    auth_results: Receiver<(ProviderId, Result<(), String>)>,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
     pub fn new(core: MisyCore, browser: B) -> Self {
         let selected_model = core.selected_model();
+        let (auth_sender, auth_results) = mpsc::channel();
         Self {
             events: core.subscribe_lossless(),
             core,
@@ -440,6 +652,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 selected_model,
                 ..UiState::default()
             },
+            auth_sender,
+            auth_results,
         }
     }
 
@@ -449,6 +663,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     pub fn browser(&self) -> &B {
         &self.browser
+    }
+
+    pub fn running_provider_count(&self) -> usize {
+        self.core.running_provider_count()
     }
 
     /// Parses and executes a line after the caller has collected it from the input widget.
@@ -468,6 +686,16 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
     }
 
+    pub fn handle_key(&mut self, key: UiKey) -> Result<TuiControl, TuiError> {
+        match self.execute(map_key(self.state.mode, key)) {
+            Ok(control) => Ok(control),
+            Err(error) => {
+                self.state.add_error(&error);
+                Err(error)
+            }
+        }
+    }
+
     /// Drains received core events without blocking the terminal event loop.
     pub fn pump_events(&mut self) -> usize {
         const MAX_EVENTS_PER_TICK: usize = 256;
@@ -479,6 +707,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.state.apply_core_event(event);
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        while let Ok((provider, result)) = self.auth_results.try_recv() {
+            self.state.auth_pending = None;
+            match result {
+                Ok(()) => self.state.add_provider(provider, true),
+                Err(error) => self.state.add_error(error),
             }
         }
         received
@@ -502,9 +737,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
         match action {
             UiAction::Noop => Ok(TuiControl::Continue),
             UiAction::ShowProviders => {
+                let mut choices = Vec::new();
                 for provider in self.core.providers() {
-                    self.core.auth_status(&provider.id)?;
+                    let authenticated = self.core.has_credentials(&provider.id)?;
+                    choices.push((provider.id, authenticated));
                 }
+                self.state.open_provider_list(choices);
                 Ok(TuiControl::Continue)
             }
             UiAction::StartAuth(provider) => {
@@ -513,27 +751,45 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     .get("url")
                     .and_then(Value::as_str)
                     .ok_or(TuiError::AuthStartMissingUrl)?;
+                let session = result
+                    .get("session")
+                    .cloned()
+                    .ok_or(TuiError::AuthStartMissingSession)?;
                 validate_authorization_url(url).map_err(TuiError::InvalidAuthUrl)?;
                 self.browser.open(url).map_err(TuiError::Browser)?;
+                self.state.auth_pending = Some(provider.clone());
+                let core = self.core.clone();
+                let sender = self.auth_sender.clone();
+                let provider_for_completion = provider.clone();
+                thread::spawn(move || {
+                    let result = core
+                        .complete_auth(&provider_for_completion, session)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                    let _ = sender.send((provider_for_completion, result));
+                });
                 self.state.transcript.push(TranscriptRow::Info(format!(
-                    "authorization opened for {}; finish with /provider {} complete <json>",
-                    provider.as_str(),
+                    "authorization opened for {}",
                     provider.as_str()
                 )));
                 Ok(TuiControl::Continue)
             }
             UiAction::CompleteAuth(provider, completion) => {
                 self.core.complete_auth(&provider, completion)?;
+                self.state.add_provider(provider, true);
                 Ok(TuiControl::Continue)
             }
             UiAction::ShowModels => {
+                let mut choices = Vec::new();
                 for provider in self.core.providers() {
-                    self.core.list_models(&provider.id)?;
+                    choices.extend(self.core.list_models(&provider.id)?);
                 }
+                self.state.open_model_list(choices);
                 Ok(TuiControl::Continue)
             }
             UiAction::SelectModel(model) => {
                 self.core.select_model(model)?;
+                self.state.mode = UiMode::Input;
                 Ok(TuiControl::Continue)
             }
             UiAction::SubmitPrompt(prompt) => {
@@ -548,11 +804,65 @@ impl<B: BrowserHandoff> TuiClient<B> {
             | UiAction::AppendToolCall { .. }
             | UiAction::AppendToolResult { .. }
             | UiAction::ScrollUp
-            | UiAction::ScrollDown => {
+            | UiAction::ScrollDown
+            | UiAction::PickerUp
+            | UiAction::PickerDown
+            | UiAction::PickerBack => {
                 self.state.reduce(action);
                 Ok(TuiControl::Continue)
             }
+            UiAction::PickerConfirm => self.confirm_picker(),
             UiAction::CancelAndExit => Ok(self.handle_ctrl_c()),
+        }
+    }
+
+    fn confirm_picker(&mut self) -> Result<TuiControl, TuiError> {
+        match self.state.mode {
+            UiMode::Input => Ok(TuiControl::Continue),
+            UiMode::ProviderList => {
+                if let Some(provider) = self
+                    .state
+                    .provider_choices
+                    .get(self.state.highlighted_index)
+                    .map(|(provider, _)| provider.clone())
+                {
+                    let authenticated = self
+                        .core
+                        .auth_status(&provider)?
+                        .get("authenticated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.state.add_provider(provider, authenticated);
+                }
+                self.state.open_provider_detail();
+                Ok(TuiControl::Continue)
+            }
+            UiMode::ProviderDetail => {
+                let Some(provider) = self.state.detail_provider.clone() else {
+                    return Ok(TuiControl::Continue);
+                };
+                if self.state.auth_pending.as_ref() == Some(&provider) {
+                    return Ok(TuiControl::Continue);
+                }
+                if self.state.provider_is_authenticated(&provider) {
+                    self.core.logout(&provider)?;
+                    self.state.add_provider(provider, false);
+                    Ok(TuiControl::Continue)
+                } else {
+                    self.execute(UiAction::StartAuth(provider))
+                }
+            }
+            UiMode::ModelList => {
+                let Some(model) = self
+                    .state
+                    .model_choices
+                    .get(self.state.highlighted_index)
+                    .map(|choice| choice.model.clone())
+                else {
+                    return Ok(TuiControl::Continue);
+                };
+                self.execute(UiAction::SelectModel(model))
+            }
         }
     }
 }
@@ -574,6 +884,17 @@ pub fn run(core: MisyCore) -> Result<(), io::Error> {
             {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     client.handle_ctrl_c();
+                } else if client.state().mode != UiMode::Input {
+                    let picker_key = match key.code {
+                        KeyCode::Up => Some(UiKey::Up),
+                        KeyCode::Down => Some(UiKey::Down),
+                        KeyCode::Enter => Some(UiKey::Enter),
+                        KeyCode::Esc => Some(UiKey::Escape),
+                        _ => None,
+                    };
+                    if let Some(picker_key) = picker_key {
+                        let _ = client.handle_key(picker_key);
+                    }
                 } else {
                     match key.code {
                         KeyCode::Enter => {
@@ -624,8 +945,15 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
         format!("{WORDMARK}\nagent: misy | provider: {provider} | model: {model}\n\n{transcript}")
     };
     let transcript = Paragraph::new(content).wrap(Wrap { trim: false });
+    let composer = Paragraph::new(state.composer_text()).wrap(Wrap { trim: false });
     let rendered_lines = transcript.line_count(area.width);
-    let content_capacity = area.height.saturating_sub(2);
+    let composer_height = u16::try_from(composer.line_count(area.width))
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(1));
+    let content_capacity = area
+        .height
+        .saturating_sub(1)
+        .saturating_sub(composer_height);
     let content_height = u16::try_from(rendered_lines)
         .unwrap_or(u16::MAX)
         .min(content_capacity);
@@ -642,7 +970,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
         area.x,
         separator_area.y.saturating_add(separator_area.height),
         area.width,
-        u16::from(area.height > content_height.saturating_add(separator_area.height)),
+        composer_height,
     );
     frame.render_widget(
         transcript.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
@@ -652,7 +980,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
         Paragraph::new("─".repeat(usize::from(separator_area.width))),
         separator_area,
     );
-    frame.render_widget(Paragraph::new(state.input.as_str()), input_area);
+    frame.render_widget(composer, input_area);
 }
 
 struct TerminalGuard<'a> {

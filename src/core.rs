@@ -269,6 +269,14 @@ impl MisyCore {
             .collect()
     }
 
+    pub fn has_credentials(&self, provider: &ProviderId) -> Result<bool, CoreError> {
+        Ok(self.inner.credential_store.load(provider)?.is_some())
+    }
+
+    pub fn running_provider_count(&self) -> usize {
+        self.inner.host.running_provider_count()
+    }
+
     pub fn selected_model(&self) -> Option<ModelRef> {
         self.inner
             .selected_model

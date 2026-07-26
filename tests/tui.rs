@@ -1,8 +1,8 @@
 use misy::{
     MisyCore, MisyPaths, ModelId, ModelRef, ProviderId,
     tui::{
-        BrowserHandoff, BrowserPlatform, TranscriptRow, TuiClient, TuiControl, UiAction, UiState,
-        browser_command, map_input, render, validate_authorization_url,
+        BrowserHandoff, BrowserPlatform, TranscriptRow, TuiClient, TuiControl, UiAction, UiKey,
+        UiMode, UiState, browser_command, map_input, render, validate_authorization_url,
     },
 };
 use ratatui::{Terminal, backend::TestBackend};
@@ -110,72 +110,54 @@ fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
     let (_temporary, mut client, target) = test_client();
 
     client.handle_input("/provider").expect("list providers");
-    client.pump_events();
-    assert_eq!(
-        client.state().transcript(),
-        &[TranscriptRow::Provider {
-            id: "fixture".to_owned(),
-            authenticated: false,
-        }]
-    );
-
-    client
-        .handle_input("/provider fixture auth")
-        .expect("start auth");
+    assert_eq!(client.state().mode(), UiMode::ProviderList);
+    assert!(client.state().transcript().is_empty());
+    assert!(client.browser().opened.is_empty());
+    assert_eq!(client.running_provider_count(), 0);
+    client.handle_key(UiKey::Enter).expect("provider detail");
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    assert!(client.browser().opened.is_empty());
+    assert_eq!(client.running_provider_count(), 1);
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
+    client.handle_key(UiKey::Enter).expect("start auth");
     assert_eq!(
         client.browser().opened,
         vec!["https://example.test/auth".to_owned()]
     );
-    client
-        .handle_input(r#"/provider fixture complete {"code":"opaque"}"#)
-        .expect("complete auth");
+    let auth_deadline = Instant::now() + Duration::from_secs(2);
+    while client.state().picker_labels() != ["Log out"] && Instant::now() < auth_deadline {
+        client.pump_events();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(client.state().picker_labels(), ["Log out"]);
+    client.handle_key(UiKey::Enter).expect("log out");
     client.pump_events();
-    assert_eq!(
-        client
-            .state()
-            .transcript()
-            .iter()
-            .filter(|row| matches!(
-                row,
-                TranscriptRow::Provider {
-                    authenticated: true,
-                    ..
-                }
-            ))
-            .count(),
-        1
-    );
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
+    client.handle_key(UiKey::Escape).expect("provider list");
+    client.handle_key(UiKey::Escape).expect("normal input");
 
     client.handle_input("/model").expect("list models");
-    client.pump_events();
-    let models_before_selection = client
-        .state()
-        .transcript()
-        .iter()
-        .filter(|row| matches!(row, TranscriptRow::Model { .. }))
-        .count();
-    assert_eq!(models_before_selection, 2);
+    assert_eq!(client.state().mode(), UiMode::ModelList);
+    assert_eq!(client.state().picker_labels().len(), 2);
+    assert!(client.state().transcript().iter().all(|row| !matches!(
+        row,
+        TranscriptRow::Provider { .. } | TranscriptRow::Model { .. }
+    )));
     client
-        .handle_input("/model fixture/fixture-model")
-        .expect("select model");
+        .handle_key(UiKey::Down)
+        .expect("highlight next model");
+    assert_eq!(client.state().highlighted_index(), 1);
+    client.handle_key(UiKey::Up).expect("highlight first model");
+    assert_eq!(client.state().highlighted_index(), 0);
+    client.handle_key(UiKey::Enter).expect("select model");
+    assert_eq!(client.state().mode(), UiMode::Input);
     client.pump_events();
     assert_eq!(
-        client
-            .state()
-            .transcript()
-            .iter()
-            .filter(|row| matches!(row, TranscriptRow::Model { .. }))
-            .count(),
-        2
-    );
-    assert_eq!(
-        client
-            .state()
-            .transcript()
-            .iter()
-            .filter(|row| matches!(row, TranscriptRow::Model { selected: true, .. }))
-            .count(),
-        1
+        client.state().selected_model(),
+        Some(ModelRef::new(
+            ProviderId::new("fixture"),
+            ModelId::new("fixture-model")
+        ))
     );
     client
         .handle_input("tool-round-trip")
@@ -207,6 +189,20 @@ fn tui_client_runs_the_configure_authenticate_tool_and_shutdown_flow() {
 
     assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
     assert!(client.state().should_exit());
+}
+
+#[test]
+fn picker_escape_navigation_never_triggers_provider_side_effects() {
+    let (_temporary, mut client, _) = test_client();
+
+    client.handle_input("/provider").expect("provider picker");
+    client.handle_key(UiKey::Enter).expect("provider detail");
+    assert!(client.browser().opened.is_empty());
+    client.handle_key(UiKey::Escape).expect("provider list");
+    client.handle_key(UiKey::Escape).expect("normal input");
+
+    assert_eq!(client.state().mode(), UiMode::Input);
+    assert!(client.browser().opened.is_empty());
 }
 
 #[test]

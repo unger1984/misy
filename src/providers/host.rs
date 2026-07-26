@@ -8,10 +8,9 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver, Sender, SyncSender, TrySendError},
     },
     thread,
-    time::Duration,
 };
 
 /// A request already written to a provider. It can be cancelled while its response is pending.
@@ -43,26 +42,30 @@ impl PendingProviderRequest {
 #[derive(Debug)]
 pub struct ProviderHost {
     catalog: ProviderCatalog,
-    processes: Mutex<BTreeMap<String, Arc<ProviderProcess>>>,
-    subscribers: Arc<Mutex<Vec<Sender<ProviderEvent>>>>,
+    lifecycle: Mutex<LifecycleState>,
+    subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
     next_request_id: AtomicU64,
-    is_shutdown: Mutex<bool>,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleState {
+    processes: BTreeMap<String, Arc<ProviderProcess>>,
+    is_shutdown: bool,
 }
 
 impl ProviderHost {
     pub fn new(catalog: ProviderCatalog) -> Self {
         Self {
             catalog,
-            processes: Mutex::new(BTreeMap::new()),
+            lifecycle: Mutex::new(LifecycleState::default()),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             next_request_id: AtomicU64::new(1),
-            is_shutdown: Mutex::new(false),
         }
     }
 
     /// Registers a listener for all provider notifications.
     pub fn subscribe(&self) -> Receiver<ProviderEvent> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(64);
         self.subscribers
             .lock()
             .expect("provider subscribers mutex must not be poisoned")
@@ -118,9 +121,10 @@ impl ProviderHost {
     }
 
     pub fn running_provider_count(&self) -> usize {
-        self.processes
+        self.lifecycle
             .lock()
-            .expect("provider process mutex must not be poisoned")
+            .expect("provider lifecycle mutex must not be poisoned")
+            .processes
             .values()
             .filter(|process| !process.is_failed())
             .count()
@@ -128,22 +132,17 @@ impl ProviderHost {
 
     /// Stops every child, failing outstanding requests and closing their stdin streams.
     pub fn shutdown(&self) -> Result<(), ProviderError> {
-        {
-            let mut is_shutdown = self
-                .is_shutdown
+        let processes = {
+            let mut lifecycle = self
+                .lifecycle
                 .lock()
-                .expect("provider shutdown mutex must not be poisoned");
-            if *is_shutdown {
+                .expect("provider lifecycle mutex must not be poisoned");
+            if lifecycle.is_shutdown {
                 return Ok(());
             }
-            *is_shutdown = true;
-        }
-        let processes = std::mem::take(
-            &mut *self
-                .processes
-                .lock()
-                .expect("provider process mutex must not be poisoned"),
-        );
+            lifecycle.is_shutdown = true;
+            std::mem::take(&mut lifecycle.processes)
+        };
         let mut first_error = None;
         for process in processes.into_values() {
             if let Err(error) = process.shutdown() {
@@ -154,18 +153,14 @@ impl ProviderHost {
     }
 
     fn process_for(&self, provider: &ProviderId) -> Result<Arc<ProviderProcess>, ProviderError> {
-        if *self
-            .is_shutdown
+        let mut lifecycle = self
+            .lifecycle
             .lock()
-            .expect("provider shutdown mutex must not be poisoned")
-        {
+            .expect("provider lifecycle mutex must not be poisoned");
+        if lifecycle.is_shutdown {
             return Err(ProviderError::Shutdown);
         }
-        let mut processes = self
-            .processes
-            .lock()
-            .expect("provider process mutex must not be poisoned");
-        if let Some(process) = processes.get(provider.as_str())
+        if let Some(process) = lifecycle.processes.get(provider.as_str())
             && !process.is_failed()
         {
             return Ok(Arc::clone(process));
@@ -179,7 +174,9 @@ impl ProviderHost {
             package,
             Arc::clone(&self.subscribers),
         )?);
-        processes.insert(provider.as_str().to_owned(), Arc::clone(&process));
+        lifecycle
+            .processes
+            .insert(provider.as_str().to_owned(), Arc::clone(&process));
         Ok(process)
     }
 }
@@ -193,9 +190,8 @@ impl Drop for ProviderHost {
 #[derive(Debug)]
 struct ProviderProcess {
     provider: ProviderId,
-    io: Mutex<ProcessIo>,
-    pending: PendingRequests,
-    failure: Arc<Mutex<Option<PendingFailure>>>,
+    io: Arc<Mutex<ProcessIo>>,
+    state: TransportStateLock,
 }
 
 #[derive(Debug)]
@@ -218,7 +214,13 @@ enum PendingFailure {
 }
 
 type PendingSender = Sender<Result<Value, PendingFailure>>;
-type PendingRequests = Arc<Mutex<BTreeMap<u64, PendingSender>>>;
+type TransportStateLock = Arc<Mutex<TransportState>>;
+
+#[derive(Debug, Default)]
+struct TransportState {
+    pending: BTreeMap<u64, PendingSender>,
+    failure: Option<PendingFailure>,
+}
 
 impl PendingFailure {
     fn into_error(self, provider: ProviderId, id: ProviderRequestId) -> ProviderError {
@@ -251,7 +253,7 @@ impl ProviderProcess {
     fn start(
         provider: ProviderId,
         package: &ProviderPackage,
-        subscribers: Arc<Mutex<Vec<Sender<ProviderEvent>>>>,
+        subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
     ) -> Result<Self, ProviderError> {
         let mut command = Command::new(&package.manifest().command);
         command
@@ -274,12 +276,11 @@ impl ProviderProcess {
         })?;
         let process = Self {
             provider: provider.clone(),
-            io: Mutex::new(ProcessIo {
+            io: Arc::new(Mutex::new(ProcessIo {
                 child,
                 stdin: Some(stdin),
-            }),
-            pending: Arc::new(Mutex::new(BTreeMap::new())),
-            failure: Arc::new(Mutex::new(None)),
+            })),
+            state: Arc::new(Mutex::new(TransportState::default())),
         };
         let reader = process.reader_state();
         thread::spawn(move || reader_loop(provider, stdout, reader, subscribers));
@@ -288,15 +289,16 @@ impl ProviderProcess {
 
     fn reader_state(&self) -> ReaderState {
         ReaderState {
-            pending: self.pending.clone(),
-            failure: self.failure.clone(),
+            state: self.state.clone(),
+            io: self.io.clone(),
         }
     }
 
     fn is_failed(&self) -> bool {
-        self.failure
+        self.state
             .lock()
-            .expect("provider failure mutex must not be poisoned")
+            .expect("provider transport mutex must not be poisoned")
+            .failure
             .is_some()
     }
 
@@ -306,19 +308,17 @@ impl ProviderProcess {
         method: &str,
         params: Value,
     ) -> Result<Receiver<Result<Value, PendingFailure>>, ProviderError> {
-        if let Some(failure) = self
-            .failure
-            .lock()
-            .expect("provider failure mutex must not be poisoned")
-            .clone()
-        {
-            return Err(failure.into_error(self.provider.clone(), id));
-        }
         let (sender, receiver) = mpsc::channel();
-        self.pending
-            .lock()
-            .expect("provider pending mutex must not be poisoned")
-            .insert(id.get(), sender);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("provider transport mutex must not be poisoned");
+            if let Some(failure) = state.failure.clone() {
+                return Err(failure.into_error(self.provider.clone(), id));
+            }
+            state.pending.insert(id.get(), sender);
+        }
         let message = json!({
             "jsonrpc": "2.0",
             "id": id.get(),
@@ -326,10 +326,6 @@ impl ProviderProcess {
             "params": params,
         });
         if let Err(error) = self.write_message(&message) {
-            self.pending
-                .lock()
-                .expect("provider pending mutex must not be poisoned")
-                .remove(&id.get());
             let failure = PendingFailure::Transport(error.to_string());
             self.fail(failure.clone());
             return Err(failure.into_error(self.provider.clone(), id));
@@ -339,9 +335,10 @@ impl ProviderProcess {
 
     fn send_notification(&self, method: &str, params: Value) -> Result<(), ProviderError> {
         if let Some(failure) = self
-            .failure
+            .state
             .lock()
-            .expect("provider failure mutex must not be poisoned")
+            .expect("provider transport mutex must not be poisoned")
+            .failure
             .clone()
         {
             return Err(failure.into_error(self.provider.clone(), ProviderRequestId(0)));
@@ -356,9 +353,10 @@ impl ProviderProcess {
 
     fn cancel(&self, id: ProviderRequestId) -> Result<(), ProviderError> {
         let pending = self
-            .pending
+            .state
             .lock()
-            .expect("provider pending mutex must not be poisoned")
+            .expect("provider transport mutex must not be poisoned")
+            .pending
             .remove(&id.get());
         if let Some(sender) = pending {
             let _ = sender.send(Err(PendingFailure::Cancelled));
@@ -381,94 +379,73 @@ impl ProviderProcess {
     }
 
     fn fail(&self, failure: PendingFailure) {
-        fail_pending(&self.pending, &self.failure, failure);
+        if fail_pending(&self.state, failure) {
+            let _ = terminate_and_reap(&self.io);
+        }
     }
 
     fn shutdown(&self) -> Result<(), ProviderError> {
         let _ = self.send_notification("misy.shutdown", Value::Null);
         self.fail(PendingFailure::Shutdown);
-        let mut io = self
-            .io
-            .lock()
-            .expect("provider process IO mutex must not be poisoned");
-        io.stdin.take();
-        for _ in 0..10 {
-            match io.child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(error) => {
-                    return Err(ProviderError::Transport {
-                        provider: self.provider.as_str().to_owned(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-        io.child.kill().map_err(|error| ProviderError::Transport {
+        terminate_and_reap(&self.io).map_err(|error| ProviderError::Transport {
             provider: self.provider.as_str().to_owned(),
             message: error.to_string(),
-        })?;
-        io.child.wait().map_err(|error| ProviderError::Transport {
-            provider: self.provider.as_str().to_owned(),
-            message: error.to_string(),
-        })?;
-        Ok(())
+        })
     }
 }
 
 #[derive(Clone, Debug)]
 struct ReaderState {
-    pending: PendingRequests,
-    failure: Arc<Mutex<Option<PendingFailure>>>,
+    state: TransportStateLock,
+    io: Arc<Mutex<ProcessIo>>,
 }
 
 fn reader_loop(
     provider: ProviderId,
     stdout: impl std::io::Read,
     state: ReaderState,
-    subscribers: Arc<Mutex<Vec<Sender<ProviderEvent>>>>,
+    subscribers: Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
 ) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                fail_pending(
-                    &state.pending,
-                    &state.failure,
-                    PendingFailure::Transport(error.to_string()),
-                );
+                if fail_pending(&state.state, PendingFailure::Transport(error.to_string())) {
+                    let _ = terminate_and_reap(&state.io);
+                }
                 return;
             }
         };
         let message: Value = match serde_json::from_str(&line) {
             Ok(message) => message,
             Err(error) => {
-                fail_pending(
-                    &state.pending,
-                    &state.failure,
-                    PendingFailure::Protocol(error.to_string()),
-                );
+                if fail_pending(&state.state, PendingFailure::Protocol(error.to_string())) {
+                    let _ = terminate_and_reap(&state.io);
+                }
                 return;
             }
         };
-        if let Err(failure) = route_message(&provider, message, &state.pending, &subscribers) {
-            fail_pending(&state.pending, &state.failure, failure);
+        if let Err(failure) = route_message(&provider, message, &state.state, &subscribers) {
+            if fail_pending(&state.state, failure) {
+                let _ = terminate_and_reap(&state.io);
+            }
             return;
         }
     }
-    fail_pending(
-        &state.pending,
-        &state.failure,
+    if fail_pending(
+        &state.state,
         PendingFailure::Transport("provider closed stdout".to_owned()),
-    );
+    ) {
+        let _ = terminate_and_reap(&state.io);
+    }
 }
 
 fn route_message(
     provider: &ProviderId,
     message: Value,
-    pending: &Mutex<BTreeMap<u64, PendingSender>>,
-    subscribers: &Arc<Mutex<Vec<Sender<ProviderEvent>>>>,
+    state: &TransportStateLock,
+    subscribers: &Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>,
 ) -> Result<(), PendingFailure> {
     let object = message
         .as_object()
@@ -506,9 +483,10 @@ fn route_message(
             ));
         }
     };
-    if let Some(sender) = pending
+    if let Some(sender) = state
         .lock()
-        .expect("provider pending mutex must not be poisoned")
+        .expect("provider transport mutex must not be poisoned")
+        .pending
         .remove(&id)
     {
         let _ = sender.send(response);
@@ -535,32 +513,47 @@ fn parse_remote_error(value: &Value) -> Result<PendingFailure, PendingFailure> {
     })
 }
 
-fn broadcast(subscribers: &Arc<Mutex<Vec<Sender<ProviderEvent>>>>, event: ProviderEvent) {
+/// Subscriber delivery is bounded and non-blocking. Full queues drop the new event;
+/// disconnected subscribers are removed.
+fn broadcast(subscribers: &Arc<Mutex<Vec<SyncSender<ProviderEvent>>>>, event: ProviderEvent) {
     subscribers
         .lock()
         .expect("provider subscribers mutex must not be poisoned")
-        .retain(|sender| sender.send(event.clone()).is_ok());
+        .retain(|sender| match sender.try_send(event.clone()) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
 }
 
-fn fail_pending(
-    pending: &Mutex<BTreeMap<u64, PendingSender>>,
-    failure_slot: &Mutex<Option<PendingFailure>>,
-    failure: PendingFailure,
-) {
-    let mut slot = failure_slot
-        .lock()
-        .expect("provider failure mutex must not be poisoned");
-    if slot.is_some() {
-        return;
-    }
-    *slot = Some(failure.clone());
-    drop(slot);
-    let pending = std::mem::take(
-        &mut *pending
+fn fail_pending(state: &TransportStateLock, failure: PendingFailure) -> bool {
+    let pending = {
+        let mut state = state
             .lock()
-            .expect("provider pending mutex must not be poisoned"),
-    );
+            .expect("provider transport mutex must not be poisoned");
+        if state.failure.is_some() {
+            return false;
+        }
+        state.failure = Some(failure.clone());
+        std::mem::take(&mut state.pending)
+    };
     for sender in pending.into_values() {
         let _ = sender.send(Err(failure.clone()));
     }
+    true
+}
+
+fn terminate_and_reap(io: &Arc<Mutex<ProcessIo>>) -> std::io::Result<()> {
+    let mut io = io
+        .lock()
+        .expect("provider process IO mutex must not be poisoned");
+    io.stdin.take();
+    if io.child.try_wait()?.is_none() {
+        match io.child.kill() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+            Err(error) => return Err(error),
+        }
+        let _ = io.child.wait()?;
+    }
+    Ok(())
 }

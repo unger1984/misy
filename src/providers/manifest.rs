@@ -22,7 +22,6 @@ pub struct ProviderManifest {
     pub repository: String,
     pub license: String,
     pub command: String,
-    #[serde(default)]
     pub args: Vec<String>,
 }
 

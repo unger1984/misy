@@ -27,6 +27,19 @@ while IFS= read -r line; do
         *'"method":"test.malformed"'*)
             printf '%s\n' 'not JSON'
             ;;
+        *'"method":"test.malformed_stay_alive"'*)
+            printf 'pid:%s\n' "$$" >> "$log_file"
+            printf '%s\n' 'not JSON'
+            while :; do sleep 1; done
+            ;;
+        *'"method":"test.flood"'*)
+            count=0
+            while [ "$count" -lt 128 ]; do
+                printf '%s\n' '{"jsonrpc":"2.0","method":"text_delta","params":{"delta":"flood"}}'
+                count=$((count + 1))
+            done
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"flooded":true}}\n' "$id"
+            ;;
         *'"method":"test.exit"'*)
             exit 0
             ;;

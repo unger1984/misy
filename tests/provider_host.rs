@@ -88,6 +88,29 @@ fn discovery_rejects_manifest_without_required_metadata() {
     ));
 }
 
+#[test]
+fn discovery_rejects_manifest_without_args() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    write_manifest(&bundled, "missing-args", PROVIDER_PROTOCOL_VERSION);
+    let manifest = bundled.join("missing-args/misy-plugin.json");
+    let contents = fs::read_to_string(&manifest).expect("manifest");
+    fs::write(
+        &manifest,
+        contents.replace(
+            "  \"command\": \"fixture-provider\",\n  \"args\": []\n",
+            "  \"command\": \"fixture-provider\"\n",
+        ),
+    )
+    .expect("missing args");
+
+    assert!(matches!(
+        ProviderCatalog::discover(&bundled, &installed),
+        Err(ProviderDiscoveryError::InvalidManifest { .. })
+    ));
+}
+
 fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, log_file: &Path) {
     let package = root.join(id);
     fs::create_dir_all(&package).expect("package directory");
@@ -268,5 +291,123 @@ fn one_failed_provider_does_not_interrupt_another_provider() {
             .expect("unrelated provider remains available"),
         json!({ "models": [] })
     );
+    host.shutdown().expect("shutdown");
+}
+
+#[test]
+fn malformed_provider_is_terminated_and_reaped() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+
+    assert!(matches!(
+        host.request(
+            &ProviderId::new("fixture"),
+            "test.malformed_stay_alive",
+            json!({})
+        ),
+        Err(ProviderError::Protocol { .. })
+    ));
+    let pid = (0..20)
+        .find_map(|_| {
+            let pid = fs::read_to_string(&log_file)
+                .ok()?
+                .lines()
+                .find_map(|line| line.strip_prefix("pid:")?.parse::<u32>().ok());
+            if pid.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            pid
+        })
+        .expect("fixture pid");
+    let output = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .expect("check process liveness");
+    assert!(
+        !output.status.success(),
+        "malformed provider process must be reaped"
+    );
+    host.shutdown().expect("shutdown");
+}
+
+#[test]
+fn unread_subscriber_does_not_block_flooded_provider() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let _unread = host.subscribe();
+
+    let pending = host
+        .request_async(&ProviderId::new("fixture"), "test.flood", json!({}))
+        .expect("flood request");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(pending.wait());
+    });
+    assert_eq!(
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("provider processing must not block")
+            .expect("flood response"),
+        json!({ "flooded": true })
+    );
+    host.shutdown().expect("shutdown");
+}
+
+#[test]
+fn concurrent_requests_complete_when_provider_exits() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = std::sync::Arc::new(ProviderHost::new(
+        ProviderCatalog::discover(&bundled, &installed).expect("catalog"),
+    ));
+    let mut workers = Vec::new();
+    for _ in 0..16 {
+        let host = std::sync::Arc::clone(&host);
+        workers.push(std::thread::spawn(move || {
+            host.request(&ProviderId::new("fixture"), "test.exit", json!({}))
+        }));
+    }
+    for worker in workers {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(worker.join().expect("worker"));
+        });
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(Err(ProviderError::Transport { .. })) | Ok(Err(ProviderError::Shutdown))
+        ));
+    }
     host.shutdown().expect("shutdown");
 }

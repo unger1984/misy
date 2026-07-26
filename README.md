@@ -10,7 +10,8 @@ Providers are self-contained packages. Bundled packages belong in
 `misy-plugin.json` manifest, its executable/source, and its own documentation,
 license, and language-native build metadata. Misy discovers these manifests
 without launching their processes; duplicate IDs and protocol versions other
-than `1` are rejected.
+than `1` are rejected. `command` and `args` are both required manifest fields
+(`args` may be an empty array).
 
 ```json
 {

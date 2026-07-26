@@ -12,6 +12,8 @@ pub mod config;
 pub mod core;
 /// Versioned values exchanged across core, provider, and tool boundaries.
 pub mod domain;
+/// Persistent, best-effort cache of provider model catalogs.
+pub mod model_cache;
 /// Provider package discovery and JSON-RPC subprocess supervision.
 pub mod providers;
 /// Local tool definitions, validation, and execution.
@@ -30,6 +32,7 @@ pub use domain::{
     Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition,
     ToolResult,
 };
+pub use model_cache::{ModelCatalogError, ModelCatalogStore};
 pub use providers::{
     CHAT_CANCEL_REQUEST_ID_FIELD, PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION,
     PROVIDER_STREAM_EVENTS, PendingProviderRequest, ProviderAuthMethod, ProviderCapability,

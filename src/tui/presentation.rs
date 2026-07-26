@@ -2,6 +2,7 @@
 
 use super::{
     list::{ListRow, ListView},
+    model_picker::ModelPicker,
     state::{ActiveView, ModalPresentation, ProviderAction, ProviderChoice, ProviderOperationKind},
 };
 
@@ -26,6 +27,22 @@ pub(super) fn list_presentation<T>(
         rows: view.visible_rows(visible_rows),
         operation,
         back_hint: false,
+        tabs: Vec::new(),
+        loading: false,
+    }
+}
+
+pub(super) fn model_picker_presentation(
+    picker: &ModelPicker,
+    visible_rows: usize,
+) -> ModalPresentation {
+    ModalPresentation {
+        title: "Select model".to_owned(),
+        rows: picker.visible_rows(visible_rows),
+        operation: None,
+        back_hint: false,
+        tabs: picker.tabs(),
+        loading: picker.is_loading(),
     }
 }
 

@@ -112,6 +112,11 @@ impl<T> ListView<T> {
         self.apply_filter();
     }
 
+    pub(super) fn set_filter(&mut self, query: String) {
+        self.query = query;
+        self.apply_filter();
+    }
+
     pub(super) fn backspace_filter(&mut self) {
         self.query.pop();
         self.apply_filter();
@@ -127,6 +132,16 @@ impl<T> ListView<T> {
 
     pub(super) fn selected_value(&self) -> Option<&T> {
         self.selected_row().and_then(|row| row.value.as_ref())
+    }
+
+    pub(super) fn select_value(&mut self, value: &T)
+    where
+        T: PartialEq,
+    {
+        self.selected = self
+            .filtered
+            .iter()
+            .position(|index| self.rows[*index].value.as_ref() == Some(value));
     }
 
     pub(super) fn labels(&self) -> Vec<String> {

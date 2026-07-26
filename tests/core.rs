@@ -93,6 +93,18 @@ fn receive_until(
     panic!("did not receive expected core event");
 }
 
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "fixture did not create {}", path.display());
+}
+
+fn fixture_signal(target: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}.{suffix}", target.display()))
+}
+
 #[test]
 fn core_discovers_authenticates_lists_and_persists_the_selected_model() {
     let (temporary, core, _) = test_core("setup");
@@ -267,6 +279,140 @@ fn available_models_skips_unconfigured_providers_and_isolates_provider_failures(
     );
     assert_eq!(core.running_provider_count(), 2);
     core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn cached_available_models_returns_models_without_provider_processes() {
+    let (temporary, core, _) = test_core("cached-models");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
+    let expected = core.list_models(&provider).expect("list models");
+    core.shutdown().expect("shutdown first core");
+
+    let cached_core = MisyCore::discover(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        temporary.path().join("bundled"),
+    )
+    .expect("reopen core");
+
+    assert_eq!(
+        cached_core
+            .cached_available_models()
+            .expect("cached available models")
+            .models,
+        expected
+    );
+    assert_eq!(cached_core.running_provider_count(), 0);
+    cached_core.shutdown().expect("shutdown cached core");
+}
+
+#[test]
+fn logout_removes_the_provider_model_cache() {
+    let (_temporary, core, _) = test_core("logout-model-cache");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
+    core.list_models(&provider).expect("list models");
+    assert_eq!(
+        core.cached_available_models()
+            .expect("cached models")
+            .models
+            .len(),
+        2
+    );
+
+    core.logout(&provider).expect("logout");
+
+    assert!(
+        core.cached_available_models()
+            .expect("cached models after logout")
+            .models
+            .is_empty()
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn late_model_response_cannot_restore_cache_after_logout() {
+    let (_temporary, core, _) = test_core("slow-models");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .expect("authenticate");
+
+    let listing = {
+        let core = core.clone();
+        let provider = provider.clone();
+        std::thread::spawn(move || core.list_models(&provider))
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    core.logout(&provider).expect("logout while listing models");
+    listing
+        .join()
+        .expect("model-listing thread")
+        .expect("model listing");
+
+    assert!(
+        core.cached_available_models()
+            .expect("cached models after logout")
+            .models
+            .is_empty()
+    );
+    core.shutdown().expect("shutdown");
+}
+
+#[test]
+fn pre_logout_model_response_cannot_populate_a_reauthenticated_catalog() {
+    let (temporary, core, target) = test_core("async-gated-models");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "first"}),
+    )
+    .expect("first authentication");
+
+    let listing = {
+        let core = core.clone();
+        let provider = provider.clone();
+        std::thread::spawn(move || core.list_models(&provider))
+    };
+    let started = fixture_signal(&target, "started");
+    wait_for_file(&started);
+    core.logout(&provider).expect("logout after request starts");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "second"}),
+    )
+    .expect("second authentication");
+    fs::write(fixture_signal(&target, "release"), "release stale response")
+        .expect("release stale response");
+    listing
+        .join()
+        .expect("model-listing thread")
+        .expect("delayed model listing");
+
+    assert!(
+        core.cached_available_models()
+            .expect("cached models after reauthentication")
+            .models
+            .is_empty()
+    );
+    core.shutdown().expect("shutdown");
+    drop(temporary);
 }
 
 #[test]

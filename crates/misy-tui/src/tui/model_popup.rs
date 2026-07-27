@@ -12,9 +12,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-const MAX_POPUP_WIDTH: u16 = 66;
-const MAX_MODEL_ROWS: u16 = 8;
-const POPUP_FIXED_ROWS: u16 = 5;
+const MAX_POPUP_WIDTH: u16 = 100;
+const MAX_MODEL_ROWS: u16 = 20;
+const POPUP_FIXED_ROWS: u16 = 15;
 
 struct PopupLayout {
     area: Rect,

@@ -58,12 +58,12 @@ model, authentication, session, and tool orchestration remain in the core.
   command with its canonical name and a trailing space, then hides the popup without executing it.
   `Enter` executes the selected or completed command; `Esc` dismisses the popup without changing
   the draft.
-- `/usage` fetches the selected model provider's account limits in the background and appends a
-  normalized, display-safe usage report to the transcript. It takes no arguments. The report shows
-  provider-wide and per-limit notes, consumed and remaining amounts, exhausted limits, and known
-  reset timing. If no model is selected, the provider does not declare usage capability version 1,
-  authentication fails, the request times out, or the report is invalid, the TUI renders the error
-  without changing the selected model.
+- `/status` fetches the selected model provider's account limits in the background and appends a
+  normalized, display-safe usage report to the transcript. `/usage` is a compatibility alias; both
+  commands take no arguments. The report shows provider-wide and per-limit notes, consumed and
+  remaining amounts, exhausted limits, and known reset timing. If no model is selected, the
+  provider does not declare usage capability version 1, authentication fails, the request times
+  out, or the report is invalid, the TUI renders the error without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
 - `/provider` opens an interactive provider list in the lower panel. `/model` immediately opens a

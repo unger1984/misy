@@ -15,8 +15,13 @@ use support::tui::{
 #[tokio::test(flavor = "current_thread")]
 async fn input_mapping_and_reducer_keep_state_explicit() {
     assert_eq!(map_input("/provider"), Ok(UiAction::ShowProviders));
+    assert_eq!(map_input("/status"), Ok(UiAction::ShowUsage));
     assert_eq!(map_input("/usage"), Ok(UiAction::ShowUsage));
     assert_eq!(map_input("/exit"), Ok(UiAction::CancelAndExit));
+    assert_eq!(
+        map_input("/status now"),
+        Err("use `/status` without arguments".to_owned())
+    );
     assert!(map_input("/exit now").is_err());
     assert!(map_input("/model fixture/model").is_err());
     assert_eq!(
@@ -75,10 +80,10 @@ async fn bracketed_paste_is_atomic_multiline_input_at_the_cursor() {
 async fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     let (_temporary, mut client, _) = test_client().await;
     client.insert_text("/");
-    assert_eq!(client.state().command_popup_rows().len(), 4);
+    assert_eq!(client.state().command_popup_rows().len(), 5);
     let cursor = client.state().composer_cursor();
     client.handle_key(UiKey::Up).expect("wrap to last command");
-    assert!(client.state().command_popup_rows()[3].contains("/exit"));
+    assert!(client.state().command_popup_rows()[4].contains("/exit"));
     client
         .handle_key(UiKey::Down)
         .expect("wrap to first command");
@@ -347,7 +352,7 @@ async fn usage_command_reports_limits_for_the_selected_models_provider() {
         .expect("select second provider");
     let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
 
-    client.handle_input("/usage").expect("request usage");
+    client.handle_input("/status").expect("request status");
     wait_for(&mut client, |client| {
         client.state().transcript().iter().any(
             |row| matches!(row, TranscriptRow::Info(message) if message == "Usage · Second AI"),

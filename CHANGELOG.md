@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Added `/status` as a provider-neutral alias for `/usage` across the bundled OpenAI, Anthropic,
+  and Kimi providers.
 - Split the Rust project into the headless `misy-core` library and `misy-tui` client crates in a
   Cargo workspace.
 - Migrated core orchestration, provider processes, event subscriptions, tools, and cancellation

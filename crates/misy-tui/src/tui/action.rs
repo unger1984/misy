@@ -140,7 +140,7 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
     match input.trim() {
         "/provider" => Ok(UiAction::ShowProviders),
         "/model" => Ok(UiAction::ShowModels),
-        "/usage" => Ok(UiAction::ShowUsage),
+        "/status" | "/usage" => Ok(UiAction::ShowUsage),
         "/exit" => Ok(UiAction::CancelAndExit),
         command if command.starts_with("/provider ") => {
             Err("use `/provider` and choose from the picker".to_owned())
@@ -150,6 +150,9 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/usage ") => {
             Err("use `/usage` without arguments".to_owned())
+        }
+        command if command.starts_with("/status ") => {
+            Err("use `/status` without arguments".to_owned())
         }
         command if command.starts_with("/exit ") => Err("use `/exit` without arguments".to_owned()),
         command => Err(format!("unknown command `{command}`")),

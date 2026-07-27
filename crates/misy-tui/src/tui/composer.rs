@@ -19,7 +19,7 @@ pub(super) struct CommandPopupRow {
     pub(super) selected: bool,
 }
 
-pub(super) const COMMANDS: [CommandDefinition; 4] = [
+pub(super) const COMMANDS: [CommandDefinition; 5] = [
     CommandDefinition {
         name: "/provider",
         description: "Configure provider authentication",
@@ -27,6 +27,10 @@ pub(super) const COMMANDS: [CommandDefinition; 4] = [
     CommandDefinition {
         name: "/model",
         description: "Choose a model",
+    },
+    CommandDefinition {
+        name: "/status",
+        description: "Show provider usage and limits",
     },
     CommandDefinition {
         name: "/usage",
@@ -411,7 +415,7 @@ mod tests {
     fn slash_popup_tracks_edits_and_dismissal() {
         let mut composer = Composer::default();
         composer.insert_str("/");
-        assert_eq!(composer.popup_rows().len(), 4);
+        assert_eq!(composer.popup_rows().len(), 5);
         composer.insert_str("mo");
         assert_eq!(composer.selected_command(), Some("/model"));
         composer.dismiss_popup();
@@ -432,6 +436,7 @@ mod tests {
             [
                 "  /provider  Configure provider authentication",
                 "  /model  Choose a model",
+                "  /status  Show provider usage and limits",
                 "  /usage  Show provider usage and limits",
                 "› /exit  Exit Misy",
             ]

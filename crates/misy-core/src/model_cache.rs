@@ -34,7 +34,7 @@ impl Error for ModelCatalogError {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ModelCatalogFile {
     version: u32,
-    providers: BTreeMap<String, CachedProvider>,
+    providers: BTreeMap<ProviderId, CachedProvider>,
 }
 
 impl Default for ModelCatalogFile {
@@ -67,7 +67,7 @@ pub struct ModelCatalogStore {
 
 struct ModelCatalogState {
     file: ModelCatalogFile,
-    provider_epochs: BTreeMap<String, u64>,
+    provider_epochs: BTreeMap<ProviderId, u64>,
     generation: u64,
 }
 
@@ -109,7 +109,7 @@ impl ModelCatalogStore {
             .clone()
             .providers
             .into_iter()
-            .flat_map(|(provider, catalog)| cached_models(&ProviderId::new(provider), catalog))
+            .flat_map(|(provider, catalog)| cached_models(&provider, catalog))
             .collect()
     }
 
@@ -122,6 +122,9 @@ impl ModelCatalogStore {
     /// # Panics
     ///
     /// Panics if a prior cache operation panicked while holding the operation mutex.
+    // Unit-test shorthand for `stage_save` + `persist`; production writes go through the staged,
+    // credential-epoch-guarded path in `CoreState::save_models_if_current`.
+    #[cfg(test)]
     pub fn save(
         &self,
         provider: &ProviderId,
@@ -140,6 +143,8 @@ impl ModelCatalogStore {
     /// # Panics
     ///
     /// Panics if a prior cache operation panicked while holding the operation mutex.
+    // Unit-test shorthand for `stage_remove` + `persist`, mirroring `save` above.
+    #[cfg(test)]
     pub fn remove(&self, provider: &ProviderId) -> Result<(), ModelCatalogError> {
         let write = self.stage_remove(provider, u64::MAX);
         match write {
@@ -159,14 +164,14 @@ impl ModelCatalogStore {
             .lock()
             .expect("model cache state mutex must not be poisoned");
         state.file.providers.insert(
-            provider.as_str().to_owned(),
+            provider.clone(),
             CachedProvider {
                 models: models.iter().map(CachedModel::from).collect(),
             },
         );
         state
             .provider_epochs
-            .insert(provider.as_str().to_owned(), credential_epoch);
+            .insert(provider.clone(), credential_epoch);
         state.generation = state.generation.wrapping_add(1);
         PendingModelCatalogWrite {
             generation: state.generation,
@@ -185,13 +190,13 @@ impl ModelCatalogStore {
             .expect("model cache state mutex must not be poisoned");
         if state
             .provider_epochs
-            .get(provider.as_str())
+            .get(provider)
             .is_some_and(|cached_epoch| *cached_epoch > credential_epoch)
         {
             return None;
         }
-        state.file.providers.remove(provider.as_str())?;
-        state.provider_epochs.remove(provider.as_str());
+        state.file.providers.remove(provider)?;
+        state.provider_epochs.remove(provider);
         state.generation = state.generation.wrapping_add(1);
         Some(PendingModelCatalogWrite {
             generation: state.generation,
@@ -285,6 +290,27 @@ mod tests {
         store.save(&provider, &expected).expect("save cache");
 
         assert_eq!(store.load(), expected);
+    }
+
+    #[test]
+    fn writes_provider_ids_as_plain_json_object_keys() {
+        let temporary = tempdir().expect("temporary root");
+        let paths = MisyPaths::from_root(temporary.path());
+        let store = ModelCatalogStore::new(paths.clone());
+        store
+            .save(
+                &ProviderId::new("provider-a"),
+                &[model("provider-a", "model-a")],
+            )
+            .expect("save cache");
+
+        let contents = fs::read(paths.models_file()).expect("read cache file");
+        let json: serde_json::Value = serde_json::from_slice(&contents).expect("cache json");
+        assert_eq!(json["version"], 1);
+        assert!(
+            json["providers"].get("provider-a").is_some(),
+            "provider id must stay a plain string key: {json}"
+        );
     }
 
     #[test]

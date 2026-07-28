@@ -26,6 +26,74 @@ async fn receive_terminal_and_assert_finished_submission_is_absent(
 }
 
 #[tokio::test]
+async fn submission_accepted_arrives_in_fifo_order_with_the_message_before_any_turn_event() {
+    let (_temporary, core, _) = test_core("accepted-order");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    let mut events = core.subscribe_lossless();
+    let blocking = core
+        .submit(Message::user("block-session"))
+        .await
+        .expect("blocking submit");
+    let mut received = receive_until(&mut events, blocking, |event| {
+        matches!(
+            event,
+            CoreEvent::SubmissionStarted { submission, .. } if *submission == blocking
+        )
+    })
+    .await;
+    let first = core
+        .submit(Message::user("session-one"))
+        .await
+        .expect("first queued submit");
+    let second = core
+        .submit(Message::user("session-two"))
+        .await
+        .expect("second queued submit");
+
+    received.extend(
+        receive_until(&mut events, blocking, |event| {
+            matches!(
+                event,
+                CoreEvent::SubmissionAccepted { submission, .. } if *submission == second
+            )
+        })
+        .await,
+    );
+    let accepted = received
+        .iter()
+        .filter_map(|event| match event {
+            CoreEvent::SubmissionAccepted {
+                submission,
+                message,
+            } => Some((*submission, message)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        accepted,
+        vec![
+            (blocking, &Message::user("block-session")),
+            (first, &Message::user("session-one")),
+            (second, &Message::user("session-two")),
+        ]
+    );
+    // Both queued submissions are still behind the blocking one, so no turn event for them may
+    // have preceded its acceptance on the ordered event stream.
+    assert!(
+        !received.iter().any(|event| matches!(
+            event,
+            CoreEvent::SubmissionStarted { submission, .. }
+                if *submission == first || *submission == second
+        )),
+        "acceptance must arrive before the submission starts",
+    );
+    assert_eq!(core.snapshot().queued_submissions, vec![first, second]);
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn completed_event_exposes_an_empty_queue_snapshot() {
     let (_temporary, core, _) = test_core("terminal-snapshot-empty");
     core.select_model(fixture_model())

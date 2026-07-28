@@ -1,4 +1,4 @@
-/** Kimi endpoint and storage configuration, including test-only environment overrides. */
+/** Kimi endpoint and storage configuration, with supported user environment overrides. */
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -12,7 +12,14 @@ export type ProviderConfig = {
 	dataDir: string;
 };
 
-/** Production defaults for Kimi's registered coding client. */
+/**
+ * Production defaults for Kimi's registered coding client.
+ *
+ * Every field except `packageVersion` is overridable from the plugin process environment.
+ * This is a supported user feature — for routing through a proxy or gateway, or for
+ * debugging — not a test-only hook: `MISY_KIMI_AUTH_BASE_URL`, `MISY_KIMI_API_BASE_URL`,
+ * `MISY_KIMI_CLIENT_ID`, `MISY_KIMI_REQUEST_TIMEOUT_MS`, `MISY_KIMI_DATA_DIR`.
+ */
 export const DEFAULT_CONFIG: ProviderConfig = {
 	authBaseUrl: process.env["MISY_KIMI_AUTH_BASE_URL"] ?? "https://auth.kimi.com",
 	apiBaseUrl: process.env["MISY_KIMI_API_BASE_URL"] ?? "https://api.kimi.com/coding/v1",

@@ -1,7 +1,10 @@
 //! Deterministic state rendered by the terminal client.
 
 mod events;
+mod transcript;
 mod turns;
+
+pub use transcript::TranscriptRow;
 
 use super::{
     action::{UiAction, UiMode},
@@ -9,68 +12,23 @@ use super::{
     list::{ListRow, ListView},
     model_picker::ModelPicker,
     presentation::{
-        list_presentation, model_picker_presentation, operation_label, provider_settings,
+        list_presentation, model_picker_presentation, operation_label, provider_action_rows,
+        provider_settings,
     },
     startup_header::StartupHeader,
 };
-use misy_core::{CoreEvent, CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderId, SubmissionId};
+use misy_core::{
+    CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderDisplayName, ProviderId, SubmissionId,
+};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    fmt,
+    collections::{BTreeMap, BTreeSet},
     time::Instant,
 };
-
-/// A renderable, user-visible transcript item.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TranscriptRow {
-    /// Provider discovery/status information retained for compatible clients.
-    Provider {
-        /// Stable provider identifier.
-        id: String,
-        /// Whether local credentials exist.
-        authenticated: bool,
-    },
-    /// Model discovery information retained for compatible clients.
-    Model {
-        /// Stable provider identifier.
-        provider: String,
-        /// Provider-scoped model identifier.
-        id: String,
-        /// Whether this model is currently selected.
-        selected: bool,
-    },
-    /// Submitted user prompt.
-    UserPrompt(String),
-    /// One streamed assistant text delta.
-    AssistantText(String),
-    /// Tool execution start.
-    ToolCall {
-        /// Provider tool-call identifier.
-        id: String,
-        /// Registered tool name.
-        name: String,
-        /// Compact JSON arguments supplied by the provider, when available.
-        arguments: Option<String>,
-    },
-    /// Tool execution completion.
-    ToolResult {
-        /// Provider tool-call identifier.
-        id: String,
-        /// Whether the tool failed.
-        is_error: bool,
-        /// The user-visible local tool result, when available.
-        content: Option<String>,
-    },
-    /// Informational lifecycle message.
-    Info(String),
-    /// User-visible failure.
-    Error(String),
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProviderChoice {
     pub(super) id: ProviderId,
-    pub(super) display_name: String,
+    pub(super) display_name: ProviderDisplayName,
     pub(super) authenticated: bool,
     pub(super) credential_method: Option<String>,
     pub(super) auth_methods: Vec<ProviderAuthMethod>,
@@ -87,7 +45,7 @@ pub(super) enum ActiveView {
     Providers(ListView<ProviderId>),
     ProviderSettings {
         provider: ProviderId,
-        display_name: String,
+        display_name: ProviderDisplayName,
         credential_method: Option<String>,
         actions: ListView<ProviderAction>,
     },
@@ -114,18 +72,26 @@ pub(super) enum ProviderOperationKind {
     SelectModel,
 }
 
+/// What an in-flight [`ProviderOperationKind`] belongs to.
+///
+/// The model-catalog refresh spans every provider and has no real [`ProviderId`];
+/// a dedicated variant keeps a fake sentinel id from colliding with a genuine
+/// provider that happens to share its name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum OperationScope {
+    Provider(ProviderId),
+    ModelCatalog,
+}
+
 /// State rendered by Ratatui. Rendering depends only on this value.
 pub struct UiState {
     pub(super) composer: Composer,
     pub(super) startup_header: StartupHeader,
     transcript: Vec<TranscriptRow>,
-    providers: BTreeMap<String, ProviderChoice>,
-    pub(super) provider_names: BTreeMap<String, String>,
+    providers: BTreeMap<ProviderId, ProviderChoice>,
+    pub(super) provider_names: BTreeMap<ProviderId, ProviderDisplayName>,
     pub(super) snapshot: CoreSnapshot,
     prompt_text: BTreeMap<u64, String>,
-    pending_prompt_text: VecDeque<String>,
-    pending_submission_events: BTreeMap<u64, Vec<CoreEvent>>,
-    started_submissions: BTreeSet<u64>,
     response_submission: Option<SubmissionId>,
     cancelled_submissions: BTreeSet<u64>,
     submission_started_at: Option<Instant>,
@@ -133,7 +99,7 @@ pub struct UiState {
     quit_shortcut_expires_at: Option<Instant>,
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
-    pub(super) provider_operation: Option<(ProviderId, ProviderOperationKind)>,
+    pub(super) provider_operation: Option<(OperationScope, ProviderOperationKind)>,
     pub(super) provider_device_code: Option<String>,
 }
 
@@ -152,9 +118,6 @@ impl Default for UiState {
                 providers: Vec::new(),
             },
             prompt_text: BTreeMap::new(),
-            pending_prompt_text: VecDeque::new(),
-            pending_submission_events: BTreeMap::new(),
-            started_submissions: BTreeSet::new(),
             response_submission: None,
             cancelled_submissions: BTreeSet::new(),
             submission_started_at: None,
@@ -169,11 +132,6 @@ impl Default for UiState {
 }
 
 impl UiState {
-    /// Returns the transcript rows in display order.
-    pub fn transcript(&self) -> &[TranscriptRow] {
-        &self.transcript
-    }
-
     /// Returns whether the terminal loop should exit.
     pub fn should_exit(&self) -> bool {
         self.should_exit
@@ -271,26 +229,9 @@ impl UiState {
     }
 
     /// Applies a local, side-effect-free state transition.
-    pub fn reduce(&mut self, action: UiAction) {
+    pub fn reduce(&mut self, action: &UiAction) {
         match action {
             UiAction::Noop => {}
-            UiAction::AppendAssistantText(text) => {
-                self.append_assistant_text(None, text);
-            }
-            UiAction::AppendToolCall { id, name } => {
-                self.transcript.push(TranscriptRow::ToolCall {
-                    id,
-                    name,
-                    arguments: None,
-                });
-            }
-            UiAction::AppendToolResult { id, is_error } => {
-                self.transcript.push(TranscriptRow::ToolResult {
-                    id,
-                    is_error,
-                    content: None,
-                });
-            }
             UiAction::HistoryPrevious => self.composer.history_previous(),
             UiAction::HistoryNext => self.composer.history_next(),
             UiAction::PickerUp => self.move_picker_up(),
@@ -307,15 +248,6 @@ impl UiState {
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
         }
-    }
-
-    pub(super) fn add_error(&mut self, error: impl fmt::Display) {
-        self.transcript
-            .push(TranscriptRow::Error(error.to_string()));
-    }
-
-    pub(super) fn add_info(&mut self, message: impl Into<String>) {
-        self.transcript.push(TranscriptRow::Info(message.into()));
     }
 
     pub(super) fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
@@ -340,27 +272,47 @@ impl UiState {
     }
 
     pub(super) fn refresh_providers(&mut self, providers: Vec<ProviderChoice>) {
-        let active = match &self.view {
-            Some(ActiveView::ProviderSettings { provider, .. }) => Some(provider.clone()),
-            _ => None,
-        };
         self.replace_providers(providers);
-        if let Some(provider) = active {
-            self.open_provider_settings(&provider);
-        } else if matches!(self.view, Some(ActiveView::Providers(_))) {
-            self.view = Some(ActiveView::Providers(self.provider_list()));
+        match &self.view {
+            Some(ActiveView::ProviderSettings { provider, .. }) => {
+                let Some(choice) = self.providers.get(provider).cloned() else {
+                    return;
+                };
+                let rows = provider_action_rows(&choice);
+                // Rows are swapped into the live views instead of rebuilding
+                // them so a background refresh keeps the user's filter and
+                // highlight (review finding #10).
+                if let Some(ActiveView::ProviderSettings {
+                    display_name,
+                    credential_method,
+                    actions,
+                    ..
+                }) = &mut self.view
+                {
+                    *display_name = choice.display_name;
+                    *credential_method = choice.credential_method;
+                    actions.replace_rows(rows);
+                }
+            }
+            Some(ActiveView::Providers(_)) => {
+                let rows = self.provider_rows();
+                if let Some(ActiveView::Providers(view)) = &mut self.view {
+                    view.replace_rows(rows);
+                }
+            }
+            _ => {}
         }
     }
 
     fn replace_providers(&mut self, providers: Vec<ProviderChoice>) {
         self.providers = providers
             .into_iter()
-            .map(|provider| (provider.id.as_str().to_owned(), provider))
+            .map(|provider| (provider.id.clone(), provider))
             .collect();
     }
 
     pub(super) fn open_provider_settings(&mut self, provider: &ProviderId) {
-        let Some(choice) = self.providers.get(provider.as_str()).cloned() else {
+        let Some(choice) = self.providers.get(provider).cloned() else {
             return;
         };
         self.view = Some(provider_settings(choice));
@@ -371,7 +323,8 @@ impl UiState {
         provider: &ProviderId,
         kind: ProviderOperationKind,
     ) -> bool {
-        if self.provider_operation.as_ref() == Some(&(provider.clone(), kind)) {
+        let scope = OperationScope::Provider(provider.clone());
+        if self.provider_operation.as_ref() == Some(&(scope, kind)) {
             self.provider_operation = None;
             self.provider_device_code = None;
             true
@@ -386,8 +339,27 @@ impl UiState {
         kind: ProviderOperationKind,
         device_code: Option<String>,
     ) {
-        self.provider_operation = Some((provider, kind));
+        self.provider_operation = Some((OperationScope::Provider(provider), kind));
         self.provider_device_code = device_code;
+    }
+
+    pub(super) fn set_model_catalog_operation(&mut self) {
+        self.provider_operation =
+            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models));
+        self.provider_device_code = None;
+    }
+
+    pub(super) fn finish_model_catalog_operation(&mut self) -> bool {
+        if matches!(
+            self.provider_operation,
+            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models))
+        ) {
+            self.provider_operation = None;
+            self.provider_device_code = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn modal_presentation(&self, visible_rows: usize) -> Option<ModalPresentation> {
@@ -425,7 +397,7 @@ impl UiState {
         }
     }
 
-    pub(super) fn set_provider_names(&mut self, names: BTreeMap<String, String>) {
+    pub(super) fn set_provider_names(&mut self, names: BTreeMap<ProviderId, ProviderDisplayName>) {
         self.provider_names = names;
     }
 
@@ -435,8 +407,8 @@ impl UiState {
         };
         let provider = self
             .provider_names
-            .get(model.provider.as_str())
-            .map(String::as_str)
+            .get(&model.provider)
+            .map(ProviderDisplayName::as_str)
             .unwrap_or(model.provider.as_str());
         format!("{provider} · {}", model.model.as_str())
     }
@@ -457,8 +429,11 @@ impl UiState {
     }
 
     fn provider_list(&self) -> ListView<ProviderId> {
-        let rows = self
-            .providers
+        ListView::new("Providers", self.provider_rows())
+    }
+
+    fn provider_rows(&self) -> Vec<ListRow<ProviderId>> {
+        self.providers
             .values()
             .map(|provider| {
                 ListRow::selectable(
@@ -471,8 +446,7 @@ impl UiState {
                     }),
                 )
             })
-            .collect();
-        ListView::new("Providers", rows)
+            .collect()
     }
 
     pub(super) fn insert_filter(&mut self, text: &str) {
@@ -585,5 +559,99 @@ pub(super) fn spinner_frame(ticks: u128) -> &'static str {
         7 => "⠧",
         8 => "⠇",
         _ => "⠏",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActiveView, ProviderAction, ProviderChoice, UiState};
+    use crate::tui::action::UiAction;
+    use misy_core::{ProviderAuthMethod, ProviderDisplayName, ProviderId};
+
+    fn provider_choice(id: &str, display_name: &str, authenticated: bool) -> ProviderChoice {
+        ProviderChoice {
+            id: ProviderId::new(id),
+            display_name: ProviderDisplayName::new(display_name),
+            authenticated,
+            credential_method: authenticated.then(|| "oauth".to_owned()),
+            auth_methods: vec![ProviderAuthMethod {
+                id: "oauth".to_owned(),
+                display_name: "Browser OAuth".to_owned(),
+            }],
+        }
+    }
+
+    fn refreshed_choices() -> Vec<ProviderChoice> {
+        vec![
+            provider_choice("fixture", "Fixture AI", true),
+            provider_choice("fixture-two", "Second AI", false),
+        ]
+    }
+
+    #[test]
+    fn refresh_providers_keeps_picker_filter_and_selection_while_updating_rows() {
+        let mut state = UiState::default();
+        state.open_providers(vec![
+            provider_choice("fixture", "Fixture AI", false),
+            provider_choice("fixture-two", "Second AI", false),
+        ]);
+        state.insert_filter("second");
+
+        state.refresh_providers(refreshed_choices());
+
+        let Some(ActiveView::Providers(view)) = &state.view else {
+            panic!("provider picker must stay open");
+        };
+        assert_eq!(view.labels(), ["Second AI"]);
+
+        for _ in 0.."second".len() {
+            state.backspace_filter();
+        }
+        state.reduce(&UiAction::PickerDown);
+
+        state.refresh_providers(refreshed_choices());
+
+        let Some(ActiveView::Providers(view)) = &state.view else {
+            panic!("provider picker must stay open");
+        };
+        assert_eq!(view.labels(), ["Fixture AI", "Second AI"]);
+        assert_eq!(view.selected_value(), Some(&ProviderId::new("fixture-two")));
+        let rows = view.visible_rows(8);
+        assert_eq!(
+            rows.first().and_then(|row| row.description.as_deref()),
+            Some("✓ authenticated")
+        );
+        assert!(rows.last().is_some_and(|row| row.selected));
+    }
+
+    #[test]
+    fn refresh_providers_updates_settings_rows_without_rebuilding_the_view() {
+        let mut state = UiState::default();
+        state.open_providers(vec![provider_choice("fixture", "Fixture AI", false)]);
+        state.open_provider_settings(&ProviderId::new("fixture"));
+        assert_eq!(
+            state.selected_provider_action(),
+            Some((
+                ProviderId::new("fixture"),
+                ProviderAction::Authorize("oauth".to_owned())
+            ))
+        );
+
+        state.refresh_providers(vec![provider_choice("fixture", "Fixture AI", true)]);
+
+        let Some(ActiveView::ProviderSettings {
+            credential_method,
+            actions,
+            ..
+        }) = &state.view
+        else {
+            panic!("provider settings must stay open");
+        };
+        assert_eq!(credential_method.as_deref(), Some("oauth"));
+        assert_eq!(actions.labels(), ["Log out"]);
+        assert_eq!(
+            state.selected_provider_action(),
+            Some((ProviderId::new("fixture"), ProviderAction::Logout))
+        );
     }
 }

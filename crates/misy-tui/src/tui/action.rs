@@ -19,22 +19,6 @@ pub enum UiAction {
     SelectModel(ModelRef),
     /// Submit a user prompt.
     SubmitPrompt(String),
-    /// Append streamed assistant text.
-    AppendAssistantText(String),
-    /// Append a tool call.
-    AppendToolCall {
-        /// Provider-scoped tool-call identifier.
-        id: String,
-        /// Registered tool name.
-        name: String,
-    },
-    /// Append a tool result.
-    AppendToolResult {
-        /// Tool-call identifier being completed.
-        id: String,
-        /// Whether tool execution failed.
-        is_error: bool,
-    },
     /// Recall an older prompt.
     HistoryPrevious,
     /// Recall a newer prompt.

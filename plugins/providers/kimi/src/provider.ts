@@ -1,12 +1,13 @@
 /** Kimi provider facade joining OAuth, headers, catalog, and chat translation. */
+
+import { endpointUrl, fetchWithTimeout, preferredDefaultModel } from "@misy/provider-sdk";
 import { OAuthClient, refreshIfNeeded } from "./auth";
 import { createChatRequest, notifyChatEvents } from "./chat-wire";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { KimiHeaders } from "./headers";
-import { fetchWithTimeout } from "./http";
 import { DEFAULT_MODEL_ID, listModels } from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Model, Notify } from "./types";
-import { fetchUsage, UsageRequestError } from "./usage";
+import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
 
 /** Implements Misy protocol v2 against Kimi's subscription coding endpoints. */
 export class KimiProvider {
@@ -54,16 +55,23 @@ export class KimiProvider {
 		return await listModels(this.config, this.headers, credentials);
 	}
 
-	/** Returns normalized Kimi Coding subscription limits. */
-	async usage(credentials: Credentials, signal?: AbortSignal) {
+	/** Returns normalized Kimi Coding subscription limits plus credentials rotated by a refresh. */
+	async usage(
+		credentials: Credentials,
+		signal?: AbortSignal,
+	): Promise<UsageReport & { credentials?: Credentials }> {
 		let current = await refreshIfNeeded(this.oauth, credentials);
+		let report: UsageReport;
 		try {
-			return await fetchUsage(this.config, this.headers, current, signal);
+			report = await fetchUsage(this.config, this.headers, current, signal);
 		} catch (cause) {
 			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
 			current = await this.oauth.refresh(current);
-			return await fetchUsage(this.config, this.headers, current, signal);
+			report = await fetchUsage(this.config, this.headers, current, signal);
 		}
+		// Token rotation invalidates the stored refresh token, so refreshed credentials
+		// must travel back to the core instead of being dropped with the request.
+		return current === credentials ? report : { ...report, credentials: current };
 	}
 
 	/** Stops pending authorization polls during plugin shutdown. */
@@ -77,7 +85,7 @@ export class KimiProvider {
 		requestId: number,
 		notify: Notify,
 		signal: AbortSignal | undefined,
-	): Promise<{ metadata: Json }> {
+	): Promise<{ metadata: Json; credentials?: Credentials }> {
 		try {
 			let credentials = await refreshIfNeeded(this.oauth, request.credentials);
 			let response = await this.chatRequest(request, credentials, signal);
@@ -87,7 +95,9 @@ export class KimiProvider {
 			}
 			if (!response.ok) throw await chatError(response);
 			if (!response.body) throw new Error("Kimi chat stream did not include a body");
-			return { metadata: await notifyChatEvents(response.body, requestId, notify) };
+			const metadata = await notifyChatEvents(response.body, requestId, notify);
+			// Same rotation contract as usage(): the core persists replacement credentials.
+			return credentials === request.credentials ? { metadata } : { metadata, credentials };
 		} catch (cause) {
 			if (signal?.aborted) return { metadata: { completed: false, cancelled: true } };
 			const message = cause instanceof Error ? cause.message : "Kimi chat request failed";
@@ -98,9 +108,9 @@ export class KimiProvider {
 
 	/** Returns the preferred bundled default when present, otherwise the first returned live model. */
 	defaultModel(models: readonly Model[]): string {
-		const first = models[0];
-		if (!first) throw new Error("Kimi model catalog is empty");
-		return models.some((model) => model.id === DEFAULT_MODEL_ID) ? DEFAULT_MODEL_ID : first.id;
+		const selected = preferredDefaultModel(models, DEFAULT_MODEL_ID);
+		if (selected === undefined) throw new Error("Kimi model catalog is empty");
+		return selected;
 	}
 
 	private async chatRequest(
@@ -109,7 +119,7 @@ export class KimiProvider {
 		signal: AbortSignal | undefined,
 	): Promise<Response> {
 		return await fetchWithTimeout(
-			endpoint(this.config.apiBaseUrl, "chat/completions"),
+			endpointUrl(this.config.apiBaseUrl, "chat/completions"),
 			{
 				method: "POST",
 				signal,
@@ -141,8 +151,4 @@ async function chatError(response: Response): Promise<Error> {
 		// Gateways may send text/plain errors; retaining the text is the useful diagnostic.
 	}
 	return new Error(`Kimi chat request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-}
-
-function endpoint(baseUrl: string, suffix: string): URL {
-	return new URL(suffix, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }

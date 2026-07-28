@@ -1,4 +1,5 @@
 /** OAuth lifecycle and account identity for the OpenAI provider. */
+import { fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import type { Credentials, Json } from "./types";
 
@@ -83,11 +84,12 @@ export class OAuthClient {
 	async refresh(credentials: Credentials): Promise<Credentials> {
 		const refresh = credentials["refresh_token"];
 		if (!refresh) throw new Error("OpenAI OAuth credentials do not contain a refresh token");
+		const account = credentials["chatgpt_account_id"];
 		return {
 			...credentials,
 			...(await this.requestToken(
 				{ grant_type: "refresh_token", refresh_token: refresh },
-				credentials["chatgpt_account_id"],
+				typeof account === "string" ? account : undefined,
 			)),
 		};
 	}
@@ -149,15 +151,20 @@ export class OAuthClient {
 				? value["chatgpt_account_id"]
 				: (accountId(value["id_token"]) ?? accountFallback);
 		if (!account) throw new Error("OpenAI OAuth token did not contain a ChatGPT account id");
+		// Build the credential field by field: spreading the token response would persist any
+		// extra or malformed trailing fields the endpoint sends into the stored credentials.
 		return {
-			...value,
 			access_token: value["access_token"],
 			chatgpt_account_id: account,
 			type: "oauth",
+			...(typeof value["refresh_token"] === "string"
+				? { refresh_token: value["refresh_token"] }
+				: {}),
+			...(typeof value["id_token"] === "string" ? { id_token: value["id_token"] } : {}),
 			...(typeof value["expires_in"] === "number"
 				? { expires_at: Date.now() + value["expires_in"] * 1000 }
 				: {}),
-		} as Credentials;
+		};
 	}
 }
 
@@ -192,20 +199,9 @@ export async function refreshIfNeeded(
 /** Produces account-scoped authorization headers. */
 export function authHeaders(credentials: Credentials): Record<string, string> {
 	const account = credentials["chatgpt_account_id"];
-	if (!account)
+	if (typeof account !== "string" || account.length === 0)
 		throw new Error("OpenAI OAuth credentials do not contain a valid ChatGPT account id");
 	return { authorization: `Bearer ${credentials["access_token"]}`, "chatgpt-account-id": account };
-}
-
-/** Applies a deadline to all provider HTTP requests. */
-export async function fetchWithTimeout(
-	input: URL | string,
-	init: RequestInit,
-	timeout: number,
-): Promise<Response> {
-	const deadline = AbortSignal.timeout(timeout);
-	const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
-	return await fetch(input, { ...init, signal });
 }
 
 function accountId(idToken: Json | undefined): string | undefined {

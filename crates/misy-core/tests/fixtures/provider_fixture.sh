@@ -44,6 +44,11 @@ while IFS= read -r line; do
             printf 'descendant:%s\n' "$!" >> "$log_file"
             printf '{"jsonrpc":"2.0","id":%s,"result":{"healthy":true}}\n' "$id"
             ;;
+        *'"method":"test.oversized_line"'*)
+            # 100 MiB without a newline simulates a provider whose stdout stream never
+            # terminates a protocol line; the core must reject it instead of buffering it.
+            head -c 104857600 /dev/zero | tr '\0' 'x'
+            ;;
         *'"method":"test.flood"'*)
             count=0
             while [ "$count" -lt 128 ]; do

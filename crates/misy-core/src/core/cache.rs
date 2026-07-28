@@ -1,6 +1,9 @@
 //! Model-cache operations exposed by the headless core.
 
-use super::{AvailableModels, CoreError, CoreState, MisyCore, models::parse_models};
+use super::{
+    AvailableModels, CoreError, CoreState, MisyCore, authentication::CredentialEpoch,
+    models::parse_models,
+};
 use crate::{ModelInfo, ProviderId};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -59,7 +62,7 @@ impl CoreState {
     async fn save_models_if_current(
         &self,
         provider: &ProviderId,
-        expected: super::CredentialEpoch,
+        expected: CredentialEpoch,
         models: &[ModelInfo],
     ) {
         let _credentials = self.credential_operations.lock().await;

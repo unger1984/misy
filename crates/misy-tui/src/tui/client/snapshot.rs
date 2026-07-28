@@ -5,19 +5,56 @@ use crate::tui::state::ProviderChoice;
 use misy_core::{CoreEvent, CoreSnapshot, ProviderAuthState, ProviderId, ProviderManifest};
 
 pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
-    matches!(
-        event,
-        CoreEvent::AuthenticationChanged { .. }
-            | CoreEvent::ModelSelected { .. }
-            | CoreEvent::SubmissionStarted { .. }
-            | CoreEvent::Completed { .. }
-            | CoreEvent::Cancelled { .. }
-            | CoreEvent::Failed { .. }
-    )
+    // Exhaustive on purpose: a new `CoreEvent` variant must fail compilation
+    // here so its refresh decision is made explicitly, not silently default
+    // to `false` and leave a stale projection behind.
+    match event {
+        CoreEvent::AuthenticationChanged { .. } | CoreEvent::ModelSelected { .. } => true,
+        CoreEvent::SubmissionAccepted { .. }
+        | CoreEvent::SubmissionStarted { .. }
+        | CoreEvent::Completed { .. }
+        | CoreEvent::Cancelled { .. }
+        | CoreEvent::Failed { .. } => true,
+        CoreEvent::ProviderDiscovered { .. }
+        | CoreEvent::ModelsListed { .. }
+        | CoreEvent::TextDelta { .. }
+        | CoreEvent::ToolCall { .. }
+        | CoreEvent::ToolResult { .. }
+        | CoreEvent::Shutdown => false,
+    }
+}
+
+/// Returns whether the event can change what the provider picker shows.
+///
+/// Provider manifests are fixed for the client's lifetime, so only an
+/// authentication change can alter the picker's rows; submission and model
+/// events must not rebuild the list because that would reset typed input.
+pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
+    // Same exhaustiveness requirement as `requires_refresh`: a new variant
+    // must fail compilation so its effect on the picker is decided here.
+    match event {
+        CoreEvent::AuthenticationChanged { .. } => true,
+        CoreEvent::ProviderDiscovered { .. }
+        | CoreEvent::ModelsListed { .. }
+        | CoreEvent::ModelSelected { .. }
+        | CoreEvent::SubmissionAccepted { .. }
+        | CoreEvent::SubmissionStarted { .. }
+        | CoreEvent::TextDelta { .. }
+        | CoreEvent::ToolCall { .. }
+        | CoreEvent::ToolResult { .. }
+        | CoreEvent::Completed { .. }
+        | CoreEvent::Cancelled { .. }
+        | CoreEvent::Failed { .. }
+        | CoreEvent::Shutdown => false,
+    }
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
-    pub(super) fn refresh_snapshot(&mut self) {
+    pub(super) fn refresh_core_projection(&mut self) {
+        self.state.apply_snapshot(self.core.snapshot());
+    }
+
+    pub(super) fn refresh_provider_choices(&mut self) {
         let snapshot = self.core.snapshot();
         self.state.apply_snapshot(snapshot.clone());
         self.state

@@ -1,5 +1,6 @@
 /** OpenAI subscription usage retrieval and normalization. */
-import { authHeaders, fetchWithTimeout } from "./auth";
+import { fetchWithTimeout } from "@misy/provider-sdk";
+import { authHeaders } from "./auth";
 import type { ProviderConfig } from "./config";
 import type { Credentials } from "./types";
 
@@ -10,6 +11,9 @@ type UsageLimit = {
 	window?: { duration_ms?: number; resets_at?: number };
 	status?: "ok" | "warning" | "exhausted" | "unknown";
 };
+
+/** A normalized usage capability version 1 report. */
+export type UsageReport = { fetched_at: number; limits: UsageLimit[] };
 
 /** HTTP failure from the ChatGPT usage endpoint. */
 export class UsageRequestError extends Error {
@@ -24,7 +28,7 @@ export async function fetchUsage(
 	config: ProviderConfig,
 	credentials: Credentials,
 	signal?: AbortSignal,
-): Promise<{ fetched_at: number; limits: UsageLimit[] }> {
+): Promise<UsageReport> {
 	const response = await fetchWithTimeout(
 		usageUrl(config.codexBaseUrl),
 		{ headers: { ...authHeaders(credentials), accept: "application/json" }, signal },

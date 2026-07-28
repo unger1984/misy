@@ -47,8 +47,17 @@ pub(super) fn model_picker_presentation(
 }
 
 pub(super) fn provider_settings(provider: ProviderChoice) -> ActiveView {
-    let credential_method = provider.credential_method.clone();
-    let rows = if provider.authenticated {
+    let rows = provider_action_rows(&provider);
+    ActiveView::ProviderSettings {
+        provider: provider.id,
+        display_name: provider.display_name,
+        credential_method: provider.credential_method,
+        actions: ListView::new("Provider settings", rows),
+    }
+}
+
+pub(super) fn provider_action_rows(provider: &ProviderChoice) -> Vec<ListRow<ProviderAction>> {
+    if provider.authenticated {
         vec![ListRow::selectable(ProviderAction::Logout, "Log out", None)]
     } else {
         provider
@@ -62,11 +71,5 @@ pub(super) fn provider_settings(provider: ProviderChoice) -> ActiveView {
                 )
             })
             .collect()
-    };
-    ActiveView::ProviderSettings {
-        provider: provider.id,
-        display_name: provider.display_name,
-        credential_method,
-        actions: ListView::new("Provider settings", rows),
     }
 }

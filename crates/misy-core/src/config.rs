@@ -1,4 +1,8 @@
-use crate::domain::ModelRef;
+//! Local persistence for Misy-owned files: the versioned TOML configuration and the opaque
+//! per-provider credential store. Both stores reject files with an unknown schema revision and
+//! write atomically so a crash cannot leave a half-written file; credentials stay uninterpreted
+//! JSON because their shape belongs to provider plugins, not to the core.
+use crate::domain::{ModelRef, ProviderId};
 use atomicwrites::{AllowOverwrite, AtomicFile};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -75,14 +79,6 @@ pub struct Config {
 impl Config {
     /// Current configuration and credential-file schema revision.
     pub const VERSION: u32 = 1;
-
-    /// Creates a current-version configuration with a selected default model.
-    pub fn with_default_model(default_model: ModelRef) -> Self {
-        Self {
-            version: Self::VERSION,
-            default_model: Some(default_model),
-        }
-    }
 }
 
 impl Default for Config {
@@ -200,7 +196,7 @@ impl From<std::io::Error> for CredentialError {
 #[derive(Debug, Deserialize, Serialize)]
 struct CredentialsFile {
     version: u32,
-    providers: BTreeMap<String, serde_json::Value>,
+    providers: BTreeMap<ProviderId, serde_json::Value>,
 }
 
 impl Default for CredentialsFile {
@@ -234,7 +230,7 @@ impl CredentialStore {
         provider: &crate::domain::ProviderId,
     ) -> Result<Option<serde_json::Value>, CredentialError> {
         let document = self.read_file()?;
-        Ok(document.providers.get(provider.as_str()).cloned())
+        Ok(document.providers.get(provider).cloned())
     }
 
     /// Atomically saves one provider's opaque credential value with private permissions.
@@ -249,9 +245,7 @@ impl CredentialStore {
         credentials: serde_json::Value,
     ) -> Result<(), CredentialError> {
         let mut document = self.read_file()?;
-        document
-            .providers
-            .insert(provider.as_str().to_owned(), credentials);
+        document.providers.insert(provider.clone(), credentials);
         let contents = serde_json::to_vec_pretty(&document).map_err(CredentialError::Serialize)?;
         write_atomic_private(&self.paths.credentials_file(), &contents).map_err(CredentialError::Io)
     }
@@ -264,7 +258,7 @@ impl CredentialStore {
     /// cannot be serialized or written.
     pub fn remove(&self, provider: &crate::domain::ProviderId) -> Result<(), CredentialError> {
         let mut document = self.read_file()?;
-        document.providers.remove(provider.as_str());
+        document.providers.remove(provider);
         let contents = serde_json::to_vec_pretty(&document).map_err(CredentialError::Serialize)?;
         write_atomic_private(&self.paths.credentials_file(), &contents).map_err(CredentialError::Io)
     }
@@ -345,6 +339,7 @@ fn write_atomic_with_mode(path: &Path, contents: &[u8], private: bool) -> std::i
         )
     })?;
     fs::create_dir_all(parent)?;
+    set_private_dir_permissions(parent)?;
     AtomicFile::new(path, AllowOverwrite)
         .write(|temporary_file| {
             if private {
@@ -363,5 +358,22 @@ fn set_private_permissions(file: &fs::File) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_permissions(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+// The data directory holds provider and model metadata that other local users must not read,
+// so it is tightened to the `~/.ssh` convention. Runs on every write, not only on creation,
+// to remediate directories left at umask defaults by older versions.
+#[cfg(unix)]
+fn set_private_dir_permissions(directory: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if fs::metadata(directory)?.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }

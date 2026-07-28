@@ -160,6 +160,7 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
             && let Some(index) = character.to_digit(10)
             && index != 0
         {
+            // `handle_key` already records failures into the UI state, so this is a duplicate.
             let _ = client.handle_key(UiKey::SelectIndex(index as usize));
             return;
         }
@@ -168,6 +169,7 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         return;
     }
     if let Some(normalized) = normalized_key(key) {
+        // `handle_key` already records failures into the UI state, so this is a duplicate.
         let _ = client.handle_key(normalized);
     }
 }
@@ -238,6 +240,8 @@ impl TerminalGuard {
             return;
         }
         let mut stdout = io::stdout();
+        // Teardown is best-effort: a failed escape leaves a mode the next shell prompt
+        // redraw overrides, and there is no recovery to attempt while exiting.
         if self.keyboard_enhancement_enabled {
             let _ = execute!(stdout, PopKeyboardEnhancementFlags);
         }
@@ -277,7 +281,38 @@ fn write_escape(stdout: &mut io::Stdout, sequence: &str) -> Result<(), io::Error
 
 #[cfg(test)]
 mod tests {
+    use super::super::{clipboard::FailingClipboard, state::TranscriptRow};
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paste_failure_is_reported_in_the_transcript_without_ending_the_session() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let bundled = temporary.path().join("bundled");
+        std::fs::create_dir_all(&bundled).expect("bundled providers directory");
+        let core = MisyCore::discover(
+            MisyPaths::from_root(temporary.path().join("misy")),
+            &bundled,
+        )
+        .expect("core discovery without providers");
+        let mut client = TuiClient::new(core, SystemBrowser).await;
+
+        route_key(
+            &mut client,
+            &mut FailingClipboard,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+        );
+
+        let transcript = client.state().transcript();
+        assert!(
+            transcript.iter().any(|row| {
+                matches!(row, TranscriptRow::Error(message) if message.contains("could not access the clipboard"))
+            }),
+            "clipboard failure must surface as a transcript error, got {transcript:?}"
+        );
+        assert!(!client.state().should_exit());
+        client.insert_text("still typing");
+        assert_eq!(client.state().composer_input(), "still typing");
+    }
 
     #[test]
     fn shift_enter_and_ctrl_j_insert_a_composer_newline() {

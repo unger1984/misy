@@ -1,14 +1,14 @@
 //! Credential persistence, refresh serialization, and authentication event emission.
 
 use super::{CoreError, CoreEvent, CoreState, MisyCore};
-use crate::{CredentialStore, ProviderAuthState, ProviderCatalog, ProviderId};
+use crate::{ProviderAuthState, ProviderId, config::CredentialStore, providers::ProviderCatalog};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) fn credential_states(
     catalog: &ProviderCatalog,
     credential_store: &CredentialStore,
-) -> BTreeMap<String, ProviderAuthState> {
+) -> BTreeMap<ProviderId, ProviderCredentialState> {
     catalog
         .packages()
         .map(|package| {
@@ -18,28 +18,14 @@ pub(super) fn credential_states(
             let authenticated = credentials.is_some();
             let credential_method = credentials.as_ref().and_then(credential_method);
             (
-                provider.as_str().to_owned(),
-                ProviderAuthState {
-                    id: provider,
-                    authenticated,
-                    credential_method,
-                },
-            )
-        })
-        .collect()
-}
-
-pub(super) fn credential_epochs(
-    credential_states: &BTreeMap<String, ProviderAuthState>,
-) -> BTreeMap<String, CredentialEpoch> {
-    credential_states
-        .iter()
-        .map(|(id, state)| {
-            (
-                id.clone(),
-                CredentialEpoch {
-                    value: 0,
-                    present: state.authenticated,
+                provider.clone(),
+                ProviderCredentialState {
+                    auth: ProviderAuthState {
+                        id: provider,
+                        authenticated,
+                        credential_method,
+                    },
+                    epoch: 0,
                 },
             )
         })
@@ -53,6 +39,23 @@ pub(super) fn credential_method(credentials: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// One provider's credential presence and its mutation epoch, held as a single record so the
+/// model-cache gate and the client-visible authentication state cannot diverge.
+pub(crate) struct ProviderCredentialState {
+    pub(super) auth: ProviderAuthState,
+    epoch: u64,
+}
+
+/// How a credential-state mutation affects the recorded credential method.
+pub(super) enum CredentialMethodChange {
+    /// The mutation carries no credential record, so the recorded method stays untouched.
+    Preserve,
+    /// The mutation stores or removes a credential record and replaces the recorded method.
+    Set(Option<String>),
+}
+
+/// A point-in-time capture of one provider's credential epoch, derived from the shared
+/// [`ProviderCredentialState`] record; `present` always mirrors `auth.authenticated`.
 #[derive(Clone, Copy)]
 pub(crate) struct CredentialEpoch {
     pub(super) value: u64,
@@ -70,12 +73,10 @@ impl MisyCore {
     /// Returns an error when the core is shut down or the provider cannot start authentication.
     pub async fn start_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         self.inner.state.ensure_running()?;
-        let package = self
-            .inner
-            .state
-            .catalog
-            .get(provider.as_str())
-            .ok_or_else(|| crate::ProviderError::UnknownProvider(provider.as_str().to_owned()))?;
+        let package =
+            self.inner.state.catalog.get(provider).ok_or_else(|| {
+                crate::ProviderError::UnknownProvider(provider.as_str().to_owned())
+            })?;
         let method = package
             .manifest()
             .auth_methods
@@ -99,12 +100,10 @@ impl MisyCore {
         method: &str,
     ) -> Result<Value, CoreError> {
         self.inner.state.ensure_running()?;
-        let package = self
-            .inner
-            .state
-            .catalog
-            .get(provider.as_str())
-            .ok_or_else(|| crate::ProviderError::UnknownProvider(provider.as_str().to_owned()))?;
+        let package =
+            self.inner.state.catalog.get(provider).ok_or_else(|| {
+                crate::ProviderError::UnknownProvider(provider.as_str().to_owned())
+            })?;
         if !package
             .manifest()
             .auth_methods
@@ -126,9 +125,14 @@ impl MisyCore {
             )
             .await?;
         if response.get("kind").and_then(Value::as_str) == Some("none") {
-            self.inner
-                .state
-                .update_authentication_state(provider, true, Some(method.to_owned()));
+            // The `none` flow authenticates with no credential record at all — the deliberate
+            // analog of oh-my-pi's kNoAuth sentinel for providers that need no authorization.
+            // This is the only path allowed to record authentication without credentials.
+            self.inner.state.record_authentication(
+                provider,
+                true,
+                CredentialMethodChange::Set(Some(method.to_owned())),
+            );
             self.emit(&CoreEvent::AuthenticationChanged {
                 provider: provider.clone(),
                 authenticated: true,
@@ -172,7 +176,8 @@ impl MisyCore {
     ///
     /// # Errors
     ///
-    /// Returns an error when completion or private credential persistence fails.
+    /// Returns an error when completion or private credential persistence fails, or when a
+    /// credential-bearing flow's result omits the credentials protocol v2 requires.
     pub async fn complete_auth(
         &self,
         provider: &ProviderId,
@@ -193,6 +198,10 @@ impl MisyCore {
             .await?;
         self.inner
             .state
+            .require_auth_credentials(provider, &result, "auth.complete")
+            .await?;
+        self.inner
+            .state
             .store_credentials(provider, &mut result, true)
             .await?;
         self.emit(&CoreEvent::AuthenticationChanged {
@@ -206,7 +215,8 @@ impl MisyCore {
     ///
     /// # Errors
     ///
-    /// Returns an error when provider refresh or private credential persistence fails.
+    /// Returns an error when provider refresh or private credential persistence fails, or when
+    /// the result omits the credentials protocol v2 requires outside the `none` flow.
     pub async fn refresh_auth(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         self.inner.state.ensure_running()?;
         self.inner.state.refresh_auth(provider).await
@@ -254,6 +264,8 @@ impl CoreState {
         let mut result = self
             .provider_request(provider, "auth.refresh", serde_json::json!({}))
             .await?;
+        self.require_auth_credentials(provider, &result, "auth.refresh")
+            .await?;
         self.store_credentials(provider, &mut result, true).await?;
         self.subscribers.emit(&CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
@@ -291,29 +303,34 @@ impl CoreState {
             .expect("auth operations mutex must not be poisoned");
         Arc::clone(
             operations
-                .entry(provider.as_str().to_owned())
+                .entry(provider.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
     }
 
     pub(super) fn credential_epoch(&self, provider: &ProviderId) -> CredentialEpoch {
-        self.credential_epochs
+        let states = self
+            .credential_states
             .lock()
-            .expect("credential epoch mutex must not be poisoned")
-            .get(provider.as_str())
-            .copied()
-            .unwrap_or(CredentialEpoch {
+            .expect("credential state mutex must not be poisoned");
+        states.get(provider).map_or(
+            CredentialEpoch {
                 value: 0,
                 present: false,
-            })
+            },
+            |state| CredentialEpoch {
+                value: state.epoch,
+                present: state.auth.authenticated,
+            },
+        )
     }
 
     pub(super) fn authentication_state(&self, provider: &ProviderId) -> ProviderAuthState {
-        self.auth_states
+        self.credential_states
             .lock()
-            .expect("authentication state mutex must not be poisoned")
-            .get(provider.as_str())
-            .cloned()
+            .expect("credential state mutex must not be poisoned")
+            .get(provider)
+            .map(|state| state.auth.clone())
             .unwrap_or_else(|| ProviderAuthState {
                 id: provider.clone(),
                 authenticated: false,
@@ -321,22 +338,66 @@ impl CoreState {
             })
     }
 
-    pub(super) fn update_authentication_status(&self, provider: &ProviderId, authenticated: bool) {
+    /// Records one authentication outcome and advances the provider's credential epoch.
+    ///
+    /// This is the only writer of [`ProviderCredentialState`]: credential presence, the client
+    /// projection, and the model-cache epoch share one record, so a status query cannot leave the
+    /// cache gate believing credentials that [`MisyCore::has_credentials`] denies. The epoch grows
+    /// on every call, which also invalidates model listings captured against older state.
+    pub(super) fn record_authentication(
+        &self,
+        provider: &ProviderId,
+        authenticated: bool,
+        credential_method: CredentialMethodChange,
+    ) -> u64 {
         let mut states = self
-            .auth_states
+            .credential_states
             .lock()
-            .expect("authentication state mutex must not be poisoned");
+            .expect("credential state mutex must not be poisoned");
         let state = states
-            .entry(provider.as_str().to_owned())
-            .or_insert_with(|| ProviderAuthState {
-                id: provider.clone(),
-                authenticated: false,
-                credential_method: None,
+            .entry(provider.clone())
+            .or_insert_with(|| ProviderCredentialState {
+                auth: ProviderAuthState {
+                    id: provider.clone(),
+                    authenticated: false,
+                    credential_method: None,
+                },
+                epoch: 0,
             });
-        state.authenticated = authenticated;
-        if !authenticated {
-            state.credential_method = None;
+        state.auth.authenticated = authenticated;
+        if let CredentialMethodChange::Set(method) = credential_method {
+            state.auth.credential_method = method;
         }
+        state.epoch = state.epoch.wrapping_add(1);
+        state.epoch
+    }
+
+    /// Enforces the protocol v2 contract that an `auth.complete`/`auth.refresh` result carries
+    /// replacement `credentials`.
+    ///
+    /// The exception is a provider authenticated through the `none` flow: it legitimately holds
+    /// no credential record (the kNoAuth analog), so a credential-less result is not a violation
+    /// for it. Without this gate a plugin that silently omits credentials would still be marked
+    /// authenticated while [`MisyCore::has_credentials`] reports true and every credentialed
+    /// operation then fails downstream.
+    async fn require_auth_credentials(
+        &self,
+        provider: &ProviderId,
+        result: &Value,
+        method: &str,
+    ) -> Result<(), CoreError> {
+        if result.get("credentials").is_some() {
+            return Ok(());
+        }
+        let state = self.authentication_state(provider);
+        if state.authenticated && self.load_credentials(provider).await?.is_none() {
+            return Ok(());
+        }
+        Err(crate::ProviderError::Protocol {
+            provider: provider.as_str().to_owned(),
+            message: format!("{method} succeeded without the required credentials"),
+        }
+        .into())
     }
 
     pub(super) async fn store_credentials(
@@ -346,7 +407,12 @@ impl CoreState {
         present: bool,
     ) -> Result<(), CoreError> {
         let _credentials = self.credential_operations.lock().await;
-        let credential_method = response.get("credentials").and_then(credential_method);
+        // A credential-less mutation (the `none` flow) carries no record to derive a method
+        // from, so the previously recorded method stays untouched.
+        let method_change = match response.get("credentials") {
+            Some(credentials) => CredentialMethodChange::Set(credential_method(credentials)),
+            None => CredentialMethodChange::Preserve,
+        };
         if let Some(credentials) = response.get("credentials").cloned() {
             let store = self.credential_store.clone();
             let provider = provider.clone();
@@ -357,11 +423,11 @@ impl CoreState {
                 object.remove("credentials");
             }
         }
-        self.update_authentication_state(provider, present, credential_method);
-        let epoch = self.advance_credential_epoch(provider, present);
+        let epoch = self.record_authentication(provider, present, method_change);
         let write = self.model_cache.stage_remove(provider, epoch);
         if let Some(write) = write {
             let cache = Arc::clone(&self.model_cache);
+            // Cache persistence is best effort; the credential change itself already succeeded.
             let _ = tokio::task::spawn_blocking(move || cache.persist(write)).await;
         }
         Ok(())
@@ -374,48 +440,12 @@ impl CoreState {
         tokio::task::spawn_blocking(move || store.remove(&provider_for_file))
             .await
             .map_err(|error| CoreError::Runtime(error.to_string()))??;
-        self.update_authentication_state(provider, false, None);
-        let epoch = self.advance_credential_epoch(provider, false);
+        let epoch = self.record_authentication(provider, false, CredentialMethodChange::Set(None));
         if let Some(write) = self.model_cache.stage_remove(provider, epoch) {
             let cache = Arc::clone(&self.model_cache);
+            // Cache persistence is best effort; the credential removal itself already succeeded.
             let _ = tokio::task::spawn_blocking(move || cache.persist(write)).await;
         }
         Ok(())
-    }
-
-    fn advance_credential_epoch(&self, provider: &ProviderId, present: bool) -> u64 {
-        let mut epochs = self
-            .credential_epochs
-            .lock()
-            .expect("credential epoch mutex must not be poisoned");
-        let epoch = epochs
-            .entry(provider.as_str().to_owned())
-            .or_insert(CredentialEpoch {
-                value: 0,
-                present: false,
-            });
-        epoch.value = epoch.value.wrapping_add(1);
-        epoch.present = present;
-        epoch.value
-    }
-
-    pub(super) fn update_authentication_state(
-        &self,
-        provider: &ProviderId,
-        authenticated: bool,
-        credential_method: Option<String>,
-    ) {
-        let mut states = self
-            .auth_states
-            .lock()
-            .expect("authentication state mutex must not be poisoned");
-        states.insert(
-            provider.as_str().to_owned(),
-            ProviderAuthState {
-                id: provider.clone(),
-                authenticated,
-                credential_method,
-            },
-        );
     }
 }

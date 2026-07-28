@@ -1,0 +1,14 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
+	"formatter": { "lineWidth": 100, "lineEnding": "lf" },
+	"linter": {
+		"rules": {
+			"preset": "recommended",
+			// useLiteralKeys demands `params.request_id`, but the compiler flag
+			// noPropertyAccessFromIndexSignature (required by docs/code-style-typescript.md)
+			// demands `params["request_id"]` for index-signature access — and JSON-RPC params
+			// are exactly that. The compiler flag wins, so this rule is off.
+			"complexity": { "useLiteralKeys": "off" }
+		}
+	}
+}

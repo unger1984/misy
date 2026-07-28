@@ -50,6 +50,18 @@ impl Clipboard for SystemClipboard {
     }
 }
 
+/// Test double for hosts where the system clipboard is unavailable, so the
+/// paste-failure path can be exercised without a real window system.
+#[cfg(test)]
+pub(super) struct FailingClipboard;
+
+#[cfg(test)]
+impl Clipboard for FailingClipboard {
+    fn paste(&mut self) -> Result<String, ClipboardError> {
+        Err(ClipboardError(arboard::Error::ClipboardNotSupported))
+    }
+}
+
 pub(super) fn write_osc52_copy(writer: &mut impl Write, text: &str) -> Result<(), io::Error> {
     if text.len() > MAX_OSC52_TEXT_BYTES {
         return Err(io::Error::new(

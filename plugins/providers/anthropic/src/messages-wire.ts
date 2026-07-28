@@ -50,6 +50,11 @@ export async function notifyMessageEvents(
 			}
 			if (read.done) break;
 		}
+		// SSE events end with a blank line, so a non-empty remainder at EOF means the
+		// connection dropped mid-event; completing silently would hide the truncation.
+		if (pending.trim().length > 0) {
+			throw new Error("Anthropic Messages stream ended mid-event");
+		}
 	} finally {
 		reader.releaseLock();
 	}

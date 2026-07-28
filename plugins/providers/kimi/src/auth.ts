@@ -1,9 +1,9 @@
 /** Kimi OAuth device authorization lifecycle and token refresh. */
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import type { KimiHeaders } from "./headers";
-import { fetchWithTimeout } from "./http";
 import { type Credentials, isRecord } from "./types";
 
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
@@ -99,7 +99,7 @@ export class OAuthClient {
 		intervalMs: number;
 	}> {
 		const response = await fetchWithTimeout(
-			endpoint(this.config.authBaseUrl, "api/oauth/device_authorization"),
+			endpointUrl(this.config.authBaseUrl, "api/oauth/device_authorization"),
 			{
 				method: "POST",
 				headers: { ...this.headers.common(), "content-type": "application/x-www-form-urlencoded" },
@@ -131,7 +131,7 @@ export class OAuthClient {
 			if (pending.controller.signal.aborted)
 				throw new Error("Kimi device authorization was cancelled");
 			const response = await fetchWithTimeout(
-				endpoint(this.config.authBaseUrl, "api/oauth/token"),
+				endpointUrl(this.config.authBaseUrl, "api/oauth/token"),
 				{
 					method: "POST",
 					signal: pending.controller.signal,
@@ -171,7 +171,7 @@ export class OAuthClient {
 		refreshFallback: string,
 	): Promise<Credentials> {
 		const response = await fetchWithTimeout(
-			endpoint(this.config.authBaseUrl, "api/oauth/token"),
+			endpointUrl(this.config.authBaseUrl, "api/oauth/token"),
 			{
 				method: "POST",
 				headers: { ...this.headers.common(), "content-type": "application/x-www-form-urlencoded" },
@@ -279,10 +279,6 @@ function tokenRequestError(status: number, payload: Record<string, unknown>): Er
 function errorDetail(payload: Record<string, unknown>): string {
 	const detail = optionalString(payload, "error_description") ?? optionalString(payload, "error");
 	return detail ? `: ${detail}` : "";
-}
-
-function endpoint(baseUrl: string, suffix: string): URL {
-	return new URL(suffix, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }
 
 async function wait(durationMs: number, signal: AbortSignal): Promise<void> {

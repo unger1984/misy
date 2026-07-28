@@ -1,8 +1,13 @@
+//! Domain types shared by the core, provider plugins, and clients. Every type here is
+//! serializable because it crosses a process or client boundary, and the identifier newtypes
+//! ([`ProviderId`], [`ModelId`]) keep provider and model identity from decaying into bare
+//! strings that cannot be told apart at the type level.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 
 /// Stable identifier for a model provider.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ProviderId(String);
 
@@ -15,6 +20,36 @@ impl ProviderId {
     /// Returns the identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Provider name displayed to users; distinct from [`ProviderId`] so a map or struct cannot
+/// silently hold one where the other belongs.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ProviderDisplayName(String);
+
+impl ProviderDisplayName {
+    /// Creates a display name from an owned or borrowed string.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the display name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProviderDisplayName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl From<ProviderDisplayName> for String {
+    fn from(name: ProviderDisplayName) -> Self {
+        name.0
     }
 }
 

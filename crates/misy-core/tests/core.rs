@@ -1,7 +1,8 @@
 //! Headless-core integration tests.
 
 use misy_core::{
-    CoreEvent, Message, MisyCore, MisyPaths, ModelId, ModelRef, ProviderId, SubmissionId,
+    CoreEvent, Message, MisyCore, MisyPaths, ModelId, ModelRef, ProviderDeadlines, ProviderId,
+    SubmissionId,
 };
 use serde_json::json;
 use std::{
@@ -64,15 +65,23 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
 }
 
 fn test_core(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf) {
+    test_core_with_deadlines(name, ProviderDeadlines::default())
+}
+
+fn test_core_with_deadlines(
+    name: &str,
+    deadlines: ProviderDeadlines,
+) -> (tempfile::TempDir, MisyCore, PathBuf) {
     let temporary = tempfile::tempdir().expect("temporary root");
     let bundled = temporary.path().join("bundled");
     let target = temporary.path().join(format!("{name}.txt"));
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
     write_fixture_manifest(&bundled, "fixture", &fixture, &target);
-    let core = MisyCore::discover(
+    let core = MisyCore::discover_with_deadlines(
         MisyPaths::from_root(temporary.path().join("misy")),
         &bundled,
+        deadlines,
     )
     .expect("core discovery");
     (temporary, core, target)

@@ -2,7 +2,7 @@
 
 use crate::{
     ConfigError, CredentialError, Message, ModelInfo, ModelRef, ProviderDiscoveryError,
-    ProviderError, ProviderId, ToolCall, ToolResult,
+    ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
 };
 use serde_json::Value;
 use std::{error::Error, fmt};
@@ -46,7 +46,7 @@ pub struct ProviderModelError {
     /// Provider whose model listing failed.
     pub provider: ProviderId,
     /// Provider name intended for user-facing error messages.
-    pub provider_display_name: String,
+    pub provider_display_name: ProviderDisplayName,
     /// The provider-listing failure message.
     pub message: String,
 }
@@ -79,6 +79,19 @@ pub enum CoreEvent {
     ModelSelected {
         /// Selected provider-scoped model.
         model: ModelRef,
+    },
+    /// A submitted message was accepted into the FIFO submission queue.
+    ///
+    /// Emitted under the queue lock before the submission is enqueued, so subscribers observe
+    /// acceptances in queue order and always before any other event for the same submission.
+    /// The carried message makes the acceptance self-sufficient: clients render the prompt and
+    /// the queue preview from this event instead of reconstructing either from the asynchronous
+    /// [`MisyCore::submit`](crate::MisyCore::submit) result, which races with the event stream.
+    SubmissionAccepted {
+        /// Accepted submission.
+        submission: SubmissionId,
+        /// Message queued for processing, as retained in session history.
+        message: Message,
     },
     /// A submitted user message began processing.
     SubmissionStarted {

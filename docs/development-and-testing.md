@@ -35,6 +35,9 @@ bunx tsc --noEmit
 cd ../kimi
 bun test
 bunx tsc --noEmit
+cd ../_sdk
+bun test
+bunx tsc --noEmit
 ```
 
 ## Testing Layers
@@ -44,6 +47,9 @@ bunx tsc --noEmit
 2. Rust integration and end-to-end tests live in `crates/misy-core/tests/` for core, provider-host,
    configuration, credential, domain, and tool flows, and in `crates/misy-tui/tests/` for terminal
    client flows. They use fake provider processes from `crates/misy-core/tests/fixtures/`.
+   Integration tests reach core internals (`ProviderHost`, `ProviderCatalog`, `CredentialStore`,
+   tool types, deadline-tuning constructors) through the crate's `test-support` feature, enabled
+   by a self dev-dependency in `crates/misy-core/Cargo.toml`; production clients never see them.
 3. Language-native contract tests inside every provider package use fake local remote-provider
    endpoints.
 
@@ -58,4 +64,5 @@ dropped events, blocked input, leaked processes, or credential exposure are plau
 - [`plugins/providers/openai/package.json`](../plugins/providers/openai/package.json)
 - [`plugins/providers/anthropic/package.json`](../plugins/providers/anthropic/package.json)
 - [`plugins/providers/kimi/package.json`](../plugins/providers/kimi/package.json)
+- [`plugins/providers/_sdk/package.json`](../plugins/providers/_sdk/package.json)
 - [Architecture](architecture.md)

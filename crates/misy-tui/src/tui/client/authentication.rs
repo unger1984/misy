@@ -26,7 +26,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 ..
             } => self.open_browser_auth(provider, method, &url, session, Some(user_code)),
             AuthFlow::None => {
-                self.refresh_snapshot();
+                self.refresh_provider_choices();
                 self.state.add_info(format!(
                     "{} does not require authentication",
                     self.provider_display_name(&provider)
@@ -66,6 +66,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string());
+            // A closed channel means the client is gone, so the result has nowhere to land.
             let _ = sender.send(ProviderOperationResult::Complete(provider, method, result));
         });
         Ok(())

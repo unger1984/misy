@@ -232,8 +232,9 @@ async fn model_popup_is_centered_and_capped_on_a_wide_terminal() {
         right + 1 < terminal_width,
         "popup should not end at the screen edge: {border:?}"
     );
+    // The cap mirrors MAX_POPUP_WIDTH in tui/model_popup.rs (66 before the resize fix).
     assert!(
-        right - left < 66,
+        right - left < 100,
         "popup should have a readable maximum width"
     );
     assert!((left as isize - (terminal_width - right - 1) as isize).abs() <= 1);
@@ -447,8 +448,6 @@ async fn model_selection_cannot_be_abandoned_while_it_is_persisting() {
     client.handle_key(UiKey::Enter).expect("start selection");
     client.handle_key(UiKey::Escape).expect("escape is ignored");
     assert_eq!(client.state().mode(), UiMode::ModelList);
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    client.pump_events();
     wait_for(&mut client, |client| {
         client.state().selected_model().is_some()
     })
@@ -469,7 +468,7 @@ async fn model_selection_cannot_be_abandoned_while_it_is_persisting() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_model_loading_ignores_its_late_error() {
-    let (_temporary, core) = core_with_providers(&[("fixture", "Broken AI", "slow-bad-models")]);
+    let (temporary, core) = core_with_providers(&[("fixture", "Broken AI", "slow-bad-models")]);
     core.complete_auth(
         &ProviderId::new("fixture"),
         json!({"id": "fixture-session"}),
@@ -477,10 +476,21 @@ async fn cancelled_model_loading_ignores_its_late_error() {
     )
     .await
     .expect("store credentials");
-    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+    let mut client = TuiClient::new(core.clone(), RecordingBrowser::default()).await;
     client.handle_input("/model").expect("models");
     client.handle_key(UiKey::Escape).expect("cancel loading");
-    thread::sleep(Duration::from_millis(1_100));
+
+    let target = temporary.path().join("slow-bad-models");
+    wait_for_path(&target.with_extension("responded")).await;
+    // The fixture answers requests strictly in order, so a finished second call proves
+    // the late error was already read and handed to the runtime the client runs on.
+    core.available_models().await.expect("delivery probe");
+    for _ in 0..10 {
+        client.pump_events();
+        tokio::task::yield_now().await;
+    }
     client.pump_events();
+
+    assert_eq!(client.state().mode(), UiMode::Input);
     assert!(client.state().transcript().is_empty());
 }

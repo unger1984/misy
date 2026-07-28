@@ -20,10 +20,13 @@ fn config_store_uses_injected_root_and_round_trips_versioned_default_model() {
     let root = test_root("config");
     let paths = MisyPaths::from_root(&root);
     let store = ConfigStore::new(paths.clone());
-    let config = Config::with_default_model(ModelRef::new(
-        ProviderId::new("openai"),
-        ModelId::new("gpt-5"),
-    ));
+    let config = Config {
+        default_model: Some(ModelRef::new(
+            ProviderId::new("openai"),
+            ModelId::new("gpt-5"),
+        )),
+        ..Config::default()
+    };
 
     assert_eq!(store.load().expect("load defaults"), Config::default());
     store.save(&config).expect("save config");
@@ -68,19 +71,49 @@ fn config_store_refuses_to_write_an_unsupported_format_version() {
     assert!(!root.join("config.toml").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn config_store_keeps_the_data_directory_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = test_root("config-dir-mode");
+    fs::create_dir_all(&root).expect("create config test directory");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("relax test directory permissions");
+    let store = ConfigStore::new(MisyPaths::from_root(&root));
+
+    store.save(&Config::default()).expect("save config");
+
+    assert_eq!(
+        fs::metadata(&root)
+            .expect("read data directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    fs::remove_dir_all(root).expect("remove config test directory");
+}
+
 #[test]
 fn config_store_replaces_an_existing_config_file() {
     let root = test_root("config-overwrite");
     let paths = MisyPaths::from_root(&root);
     let store = ConfigStore::new(paths.clone());
-    let first = Config::with_default_model(ModelRef::new(
-        ProviderId::new("first-provider"),
-        ModelId::new("first-model"),
-    ));
-    let replacement = Config::with_default_model(ModelRef::new(
-        ProviderId::new("replacement-provider"),
-        ModelId::new("replacement-model"),
-    ));
+    let first = Config {
+        default_model: Some(ModelRef::new(
+            ProviderId::new("first-provider"),
+            ModelId::new("first-model"),
+        )),
+        ..Config::default()
+    };
+    let replacement = Config {
+        default_model: Some(ModelRef::new(
+            ProviderId::new("replacement-provider"),
+            ModelId::new("replacement-model"),
+        )),
+        ..Config::default()
+    };
 
     store.save(&first).expect("save first config");
     store.save(&replacement).expect("replace config");

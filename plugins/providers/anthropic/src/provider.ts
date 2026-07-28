@@ -1,10 +1,11 @@
 /** Public Anthropic provider facade joining OAuth, model discovery, and Messages streaming. */
-import { fetchWithTimeout, OAuthClient, refreshIfNeeded } from "./auth";
+import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
+import { OAuthClient, refreshIfNeeded } from "./auth";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { createMessagesRequest, notifyMessageEvents } from "./messages-wire";
 import { defaultModel, listModels, type Model } from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
-import { fetchUsage, UsageRequestError } from "./usage";
+import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
 
 const CLAUDE_CODE_BETAS =
 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14," +
@@ -63,16 +64,23 @@ export class AnthropicProvider {
 		return selected === undefined ? { models } : { models, default_model: selected };
 	}
 
-	/** Returns normalized Claude subscription limits. */
-	async usage(credentials: Credentials, signal?: AbortSignal) {
+	/** Returns normalized Claude subscription limits plus credentials rotated by a silent refresh. */
+	async usage(
+		credentials: Credentials,
+		signal?: AbortSignal,
+	): Promise<UsageReport & { credentials?: Credentials }> {
 		let current = await refreshIfNeeded(this.oauth, credentials);
+		let report: UsageReport;
 		try {
-			return await fetchUsage(this.config, current, signal);
+			report = await fetchUsage(this.config, current, signal);
 		} catch (cause) {
 			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
 			current = await this.oauth.refresh(current);
-			return await fetchUsage(this.config, current, signal);
+			report = await fetchUsage(this.config, current, signal);
 		}
+		// Token rotation invalidates the stored refresh token, so refreshed credentials
+		// must travel back to the core instead of being dropped with the request.
+		return current === credentials ? report : { ...report, credentials: current };
 	}
 
 	/** Streams Messages events, refreshing before expiry and retrying exactly once after a 401. */
@@ -81,7 +89,7 @@ export class AnthropicProvider {
 		requestId: number,
 		notify: Notify,
 		signal?: AbortSignal,
-	): Promise<{ metadata: Json }> {
+	): Promise<{ metadata: Json; credentials?: Credentials }> {
 		try {
 			let credentials = await refreshIfNeeded(this.oauth, request.credentials);
 			let response = await this.messagesRequest(request, credentials, signal);
@@ -92,7 +100,9 @@ export class AnthropicProvider {
 			if (!response.ok) throw await messagesError(response);
 			if (response.body === null)
 				throw new Error("Anthropic Messages stream did not include a body");
-			return { metadata: await notifyMessageEvents(response.body, requestId, notify) };
+			const metadata = await notifyMessageEvents(response.body, requestId, notify);
+			// Same rotation contract as usage(): the core persists replacement credentials.
+			return credentials === request.credentials ? { metadata } : { metadata, credentials };
 		} catch (cause) {
 			if (signal?.aborted === true) return { metadata: { completed: false, cancelled: true } };
 			const message = cause instanceof Error ? cause.message : "Anthropic Messages request failed";
@@ -107,7 +117,7 @@ export class AnthropicProvider {
 		signal: AbortSignal | undefined,
 	): Promise<Response> {
 		return await fetchWithTimeout(
-			endpoint(this.config.apiBaseUrl, "v1/messages"),
+			endpointUrl(this.config.apiBaseUrl, "v1/messages"),
 			{
 				method: "POST",
 				signal,
@@ -154,8 +164,4 @@ function errorDetail(body: string): string {
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function endpoint(baseUrl: string, path: string): URL {
-	return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }

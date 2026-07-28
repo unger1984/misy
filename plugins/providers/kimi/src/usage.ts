@@ -1,7 +1,8 @@
 /** Kimi subscription usage retrieval and normalization. */
+
+import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import type { KimiHeaders } from "./headers";
-import { fetchWithTimeout } from "./http";
 import type { Credentials } from "./types";
 
 type UsageLimit = {
@@ -11,6 +12,9 @@ type UsageLimit = {
 	window?: { duration_ms?: number; resets_at?: number };
 	status: "ok" | "warning" | "exhausted" | "unknown";
 };
+
+/** A normalized usage capability version 1 report. */
+export type UsageReport = { fetched_at: number; limits: UsageLimit[] };
 
 /** HTTP failure from the Kimi usage endpoint. */
 export class UsageRequestError extends Error {
@@ -26,9 +30,9 @@ export async function fetchUsage(
 	headers: KimiHeaders,
 	credentials: Credentials,
 	signal?: AbortSignal,
-): Promise<{ fetched_at: number; limits: UsageLimit[] }> {
+): Promise<UsageReport> {
 	const response = await fetchWithTimeout(
-		endpoint(config.apiBaseUrl, "usages"),
+		endpointUrl(config.apiBaseUrl, "usages"),
 		{
 			headers: { ...headers.common(), authorization: `Bearer ${credentials.access_token}` },
 			signal,
@@ -90,7 +94,9 @@ function addLimit(
 	});
 }
 
-/** Derives a display label from the window when the limit entry carries no name, as upstream does. */
+/**
+ * Derives a display label from the window when the limit entry carries no name, as upstream does.
+ */
 function windowLabel(value: unknown): string | undefined {
 	if (!isRecord(value)) return undefined;
 	const duration = number(value["duration"]);
@@ -153,10 +159,6 @@ function number(value: unknown): number | undefined {
 
 function text(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function endpoint(base: string, path: string): URL {
-	return new URL(path, base.endsWith("/") ? base : `${base}/`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

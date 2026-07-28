@@ -1,6 +1,6 @@
 //! Tool-dispatch integration tests.
 
-use misy_core::{ToolCall, ToolDispatcher, ToolRegistry};
+use misy_core::{ToolCall, ToolDefinition, ToolDispatcher, ToolRegistry};
 use serde_json::json;
 use std::{
     fs,
@@ -15,6 +15,38 @@ fn test_root(name: &str) -> PathBuf {
         .expect("system time must be after the Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("misy-{name}-{}-{unique}", std::process::id()))
+}
+
+#[test]
+fn dispatcher_declares_every_registered_tool() {
+    // The agent builds chat.start params from dispatcher.definitions(), so a tool registered
+    // through the public ToolRegistry::register must be visible there, not only executable.
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(ToolDefinition::new(
+            "custom_echo",
+            "Echo a value back.",
+            json!({"type": "object", "properties": {"value": {"type": "string"}}}),
+        ))
+        .expect("register custom test tool");
+    let dispatcher = ToolDispatcher::new(registry);
+
+    let definitions = dispatcher.definitions();
+    let names: Vec<_> = definitions
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect();
+
+    assert_eq!(
+        names,
+        [
+            "custom_echo",
+            "list_directory",
+            "read_file",
+            "run_command",
+            "write_file"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -80,6 +112,122 @@ async fn dispatcher_lists_directory_entries_in_stable_order() {
     assert!(!result.is_error, "{}", result.content);
     assert_eq!(result.content, "[\"alpha.txt\",\"zeta.txt\"]");
     fs::remove_dir_all(root).expect("remove list-directory test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_rejects_reading_a_directory_as_a_file() {
+    let root = test_root("read-directory");
+    fs::create_dir_all(&root).expect("create read-directory test directory");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher
+        .dispatch(&ToolCall::new(
+            "read-directory",
+            "read_file",
+            json!({"path": root}),
+        ))
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("regular files only"),
+        "{}",
+        result.content
+    );
+    fs::remove_dir_all(root).expect("remove read-directory test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_truncates_files_larger_than_the_read_cap() {
+    let root = test_root("read-large");
+    fs::create_dir_all(&root).expect("create read-large test directory");
+    let target = root.join("large.txt");
+    let mut content = String::new();
+    while content.len() <= 4 * 1024 * 1024 + 1024 {
+        content.push_str(&"x".repeat(1024));
+    }
+    fs::write(&target, &content).expect("write large fixture file");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher
+        .dispatch(&ToolCall::new(
+            "read-large",
+            "read_file",
+            json!({"path": target}),
+        ))
+        .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result.content.len() < content.len(),
+        "the result must not hold the whole file"
+    );
+    assert!(
+        result
+            .content
+            .contains(&format!("of {} bytes", content.len())),
+        "{}",
+        &result.content[result.content.len() - 200..]
+    );
+    fs::remove_dir_all(root).expect("remove read-large test directory");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dispatcher_rejects_fifo_reads_without_waiting_for_a_writer() {
+    let root = test_root("read-fifo");
+    fs::create_dir_all(&root).expect("create read-fifo test directory");
+    let target = root.join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&target)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo must succeed");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.dispatch(&ToolCall::new(
+            "read-fifo",
+            "read_file",
+            json!({"path": target}),
+        )),
+    )
+    .await
+    .expect("read_file must not wait for a FIFO writer");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("regular files only"),
+        "{}",
+        result.content
+    );
+    fs::remove_dir_all(root).expect("remove read-fifo test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_caps_directory_listings_with_a_marker() {
+    let root = test_root("list-overflow");
+    fs::create_dir_all(&root).expect("create list-overflow test directory");
+    for index in 0..10_001 {
+        fs::write(root.join(format!("entry-{index:05}.txt")), "").expect("write overflow fixture");
+    }
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher
+        .dispatch(&ToolCall::new(
+            "list-overflow",
+            "list_directory",
+            json!({"path": root}),
+        ))
+        .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    let entries: Vec<String> =
+        serde_json::from_str(&result.content).expect("parse directory entries");
+    assert_eq!(entries.len(), 10_001);
+    assert_eq!(entries.last().map(String::as_str), Some("... and 1 more"));
+    fs::remove_dir_all(root).expect("remove list-overflow test directory");
 }
 
 #[cfg(unix)]
@@ -167,6 +315,47 @@ async fn dispatcher_reaps_a_command_when_its_caller_is_cancelled() {
         "the detached caller must not leave the command running"
     );
     fs::remove_dir_all(root).expect("remove cancelled-command test directory");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dispatcher_returns_when_a_detached_grandchild_holds_the_output_pipe() {
+    let root = test_root("detached-grandchild");
+    fs::create_dir_all(&root).expect("create detached-grandchild test directory");
+    let escaped = root.join("escaped");
+    // A plain `(sleep 30 &)` stays in the killed process group, so the escape
+    // needs setsid; the marker file guarantees the grandchild has left the
+    // group before the leader exits and the group kill is sent.
+    let script = format!(
+        "(perl -MPOSIX=setsid -e 'setsid(); \
+         open(my $marker, \">\", $ARGV[0]); exec \"sleep\", \"30\"' '{}' &) ; \
+         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+         [ -e '{}' ] && break; sleep 0.1; done; exit 0",
+        escaped.display(),
+        escaped.display()
+    );
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    // The command exits almost at once, but the escaped grandchild inherits
+    // the stdout pipe and never closes it, so capture EOF does not arrive on
+    // its own; the dispatch must still return instead of joining forever.
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        dispatcher.dispatch(&ToolCall::new(
+            "command-detached-grandchild",
+            "run_command",
+            json!({"command": "sh", "args": ["-c", script]}),
+        )),
+    )
+    .await
+    .expect("run must return even when a grandchild holds the output pipe open");
+
+    assert!(!result.is_error, "{}", result.content);
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content).expect("parse command output");
+    assert_eq!(output["kind"], "success");
+    assert_eq!(output["exit_code"], 0);
+    fs::remove_dir_all(root).expect("remove detached-grandchild test directory");
 }
 
 #[cfg(unix)]

@@ -12,6 +12,9 @@
   to Tokio while keeping a dedicated core-owned runtime.
 - Made `CoreSnapshot` the client contract for selected-model, authentication, and submission-queue
   state.
+- Restricted the `misy-core` public surface to the client contract: provider-host, catalog,
+  credential-store, model-cache, and tool internals moved behind the `test-support` feature used
+  only by integration tests, and `ProviderHost` now always runs on an explicit runtime handle.
 
 ### Fixed
 

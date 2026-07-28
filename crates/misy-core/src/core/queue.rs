@@ -1,6 +1,6 @@
 //! FIFO submission scheduling with exactly one session-mutating agent task.
 
-use super::{ActiveSubmission, CoreError, CoreState, MisyCore, SubmissionId};
+use super::{ActiveSubmission, CoreError, CoreEvent, CoreState, MisyCore, SubmissionId};
 use crate::{Message, ModelRef};
 use std::{
     collections::VecDeque,
@@ -92,6 +92,13 @@ impl CoreState {
             .lock()
             .expect("active submissions mutex must not be poisoned")
             .insert(id.get(), Arc::clone(&active));
+        // Acceptance is published under the queue lock, before the submission is enqueued, so
+        // subscribers observe `SubmissionAccepted` in FIFO order and always before any later
+        // event or snapshot that references the submission.
+        self.emit(&CoreEvent::SubmissionAccepted {
+            submission: id,
+            message: message.clone(),
+        });
         queue.pending.push_back(QueuedSubmission {
             id,
             model,

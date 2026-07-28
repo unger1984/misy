@@ -1,4 +1,4 @@
-/** Endpoint and timeout configuration, with test-only environment overrides. */
+/** Endpoint and timeout configuration, with supported user environment overrides. */
 
 /** Runtime configuration for the OpenAI provider adapter. */
 export type ProviderConfig = {
@@ -12,7 +12,16 @@ export type ProviderConfig = {
 	requestTimeoutMs: number;
 };
 
-/** Production defaults for the registered ChatGPT OAuth client. */
+/**
+ * Production defaults for the registered ChatGPT OAuth client.
+ *
+ * Every field is overridable from the plugin process environment. This is a supported
+ * user feature — for routing through a proxy or gateway, or for debugging — not a
+ * test-only hook: `MISY_OPENAI_AUTH_ISSUER`, `MISY_OPENAI_CLIENT_ID`,
+ * `MISY_OPENAI_BASE_URL`, `MISY_OPENAI_OAUTH_SCOPES`, `MISY_OPENAI_ORIGINATOR`,
+ * `MISY_OPENAI_CLIENT_VERSION`, `MISY_OPENAI_AUTH_TIMEOUT_MS`,
+ * `MISY_OPENAI_REQUEST_TIMEOUT_MS`.
+ */
 export const DEFAULT_CONFIG: ProviderConfig = {
 	issuer: process.env["MISY_OPENAI_AUTH_ISSUER"] ?? "https://auth.openai.com",
 	clientId: process.env["MISY_OPENAI_CLIENT_ID"] ?? "app_EMoamEEZ73f0CkXaXp7hrann",

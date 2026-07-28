@@ -1,8 +1,11 @@
 //! Headless orchestration of provider sessions, credentials, events, and FIFO submissions.
 
 use crate::{
-    Config, ConfigStore, CredentialStore, MisyPaths, ModelInfo, ModelRef, ProviderCatalog,
-    ProviderHost, ProviderId, ProviderManifest, ProviderRequestId, ToolDispatcher, ToolRegistry,
+    ConfigStore, MisyPaths, ModelInfo, ModelRef, ProviderId, ProviderManifest, ProviderRequestId,
+    config::CredentialStore,
+    model_cache::ModelCatalogStore,
+    providers::{ProviderCatalog, ProviderDeadlines, ProviderHost},
+    tools::{ToolDispatcher, ToolRegistry},
 };
 use serde_json::{Value, json};
 use std::{
@@ -25,7 +28,7 @@ mod queue;
 mod runtime;
 mod snapshot;
 mod usage;
-use authentication::{CredentialEpoch, credential_epochs, credential_states};
+use authentication::{CredentialMethodChange, ProviderCredentialState, credential_states};
 use contracts::strip_credentials;
 use events::{EventSubscribers, ProviderRoutes, start_provider_event_router};
 use models::select_catalog_default;
@@ -69,18 +72,17 @@ pub(super) struct CoreState {
     pub(super) host: Arc<ProviderHost>,
     pub(super) config_store: ConfigStore,
     pub(super) credential_store: CredentialStore,
-    pub(super) model_cache: Arc<crate::ModelCatalogStore>,
+    pub(super) model_cache: Arc<ModelCatalogStore>,
     pub(super) selected_model: Mutex<Option<ModelRef>>,
     pub(super) history: Mutex<Vec<HistoryEntry>>,
     pub(super) dispatcher: ToolDispatcher,
     pub(super) subscribers: EventSubscribers,
     pub(super) routes: ProviderRoutes,
-    pub(super) provider_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    pub(super) provider_gates: Mutex<BTreeMap<ProviderId, Arc<AsyncMutex<()>>>>,
     pub(super) active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
-    pub(super) auth_operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    pub(super) auth_operations: Mutex<BTreeMap<ProviderId, Arc<AsyncMutex<()>>>>,
     pub(super) credential_operations: AsyncMutex<()>,
-    pub(super) credential_epochs: Mutex<BTreeMap<String, CredentialEpoch>>,
-    pub(super) auth_states: Mutex<BTreeMap<String, ProviderAuthState>>,
+    pub(super) credential_states: Mutex<BTreeMap<ProviderId, ProviderCredentialState>>,
     pub(super) model_operations: AsyncMutex<()>,
     pub(super) submission_queue: Mutex<SubmissionQueue>,
     pub(super) next_submission: AtomicU64,
@@ -128,7 +130,24 @@ impl MisyCore {
     ) -> Result<Self, CoreError> {
         let catalog =
             ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::from_catalog(paths, catalog)
+        Self::build(paths, catalog, ProviderDeadlines::default())
+    }
+
+    /// Discovers providers like [`MisyCore::discover`] but with explicit provider wait deadlines.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when provider discovery, configuration loading, or runtime startup fails.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn discover_with_deadlines(
+        paths: MisyPaths,
+        bundled_providers: impl AsRef<Path>,
+        deadlines: ProviderDeadlines,
+    ) -> Result<Self, CoreError> {
+        let catalog =
+            ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
+        Self::build(paths, catalog, deadlines)
     }
 
     /// Creates a core from an already-discovered provider catalog.
@@ -136,20 +155,51 @@ impl MisyCore {
     /// # Errors
     ///
     /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
     pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
+        Self::build(paths, catalog, ProviderDeadlines::default())
+    }
+
+    /// Creates a core from a catalog with explicit provider wait deadlines.
+    ///
+    /// Integration tests use this to keep hung-provider scenarios fast; production clients
+    /// should prefer [`MisyCore::discover`] and the default deadlines.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn from_catalog_with_deadlines(
+        paths: MisyPaths,
+        catalog: ProviderCatalog,
+        deadlines: ProviderDeadlines,
+    ) -> Result<Self, CoreError> {
+        Self::build(paths, catalog, deadlines)
+    }
+
+    fn build(
+        paths: MisyPaths,
+        catalog: ProviderCatalog,
+        deadlines: ProviderDeadlines,
+    ) -> Result<Self, CoreError> {
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
         let credential_store = CredentialStore::new(paths.clone());
-        let auth_states = credential_states(&catalog, &credential_store);
+        let credential_states = credential_states(&catalog, &credential_store);
         let (runtime, owner) = RuntimeControl::new()?;
         let state = Arc::new(CoreState {
-            credential_epochs: Mutex::new(credential_epochs(&auth_states)),
-            auth_states: Mutex::new(auth_states),
+            credential_states: Mutex::new(credential_states),
             catalog: catalog.clone(),
-            host: Arc::new(ProviderHost::with_handle(catalog, runtime.handle.clone())),
+            host: Arc::new(ProviderHost::with_handle_and_deadlines(
+                catalog,
+                runtime.handle.clone(),
+                deadlines,
+            )),
             config_store,
             credential_store,
-            model_cache: Arc::new(crate::ModelCatalogStore::new(paths)),
+            model_cache: Arc::new(ModelCatalogStore::new(paths)),
             selected_model: Mutex::new(config.default_model),
             history: Mutex::new(Vec::new()),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
@@ -255,6 +305,10 @@ impl MisyCore {
     /// # Errors
     ///
     /// Returns an error when the core is shut down or the provider request fails.
+    // Hidden from the client contract: no client calls it, while integration tests exercise the
+    // `auth.status` round trip and the model-cache gate through it. Unhide when a client needs
+    // on-demand status queries beyond the snapshot projection.
+    #[doc(hidden)]
     pub async fn auth_status(&self, provider: &ProviderId) -> Result<Value, CoreError> {
         self.inner.state.ensure_running()?;
         let result = self
@@ -263,19 +317,19 @@ impl MisyCore {
             .provider_request(provider, "auth.status", json!({}))
             .await?;
         let result = self.sanitize_auth_response(result);
-        self.inner.state.update_authentication_status(
+        let authenticated = result
+            .get("authenticated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // A status query carries no credential record, so the recorded credential method stays.
+        self.inner.state.record_authentication(
             provider,
-            result
-                .get("authenticated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            authenticated,
+            CredentialMethodChange::Preserve,
         );
         self.emit(&CoreEvent::AuthenticationChanged {
             provider: provider.clone(),
-            authenticated: result
-                .get("authenticated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            authenticated,
         });
         Ok(result)
     }
@@ -358,9 +412,16 @@ impl MisyCore {
     async fn persist_selected_model(&self, model: ModelRef) -> Result<(), CoreError> {
         let store = self.inner.state.config_store.clone();
         let saved_model = model.clone();
-        tokio::task::spawn_blocking(move || store.save(&Config::with_default_model(saved_model)))
-            .await
-            .map_err(|error| CoreError::Runtime(error.to_string()))??;
+        tokio::task::spawn_blocking(move || {
+            // Read-modify-write: rebuilding a fresh `Config` would silently drop every other
+            // field the file carries as soon as `Config` grows. An unreadable file fails the
+            // selection instead of being clobbered; a missing file falls back to defaults.
+            let mut config = store.load()?;
+            config.default_model = Some(saved_model);
+            store.save(&config)
+        })
+        .await
+        .map_err(|error| CoreError::Runtime(error.to_string()))??;
         *self
             .inner
             .state
@@ -455,6 +516,7 @@ impl CoreState {
     pub(super) async fn shutdown_services(&self) {
         self.close_admission();
         self.cancel_all_submissions().await;
+        // Provider shutdown is best effort; clients must still observe the Shutdown event.
         let _ = self.host.shutdown().await;
         self.subscribers.emit(&CoreEvent::Shutdown);
     }

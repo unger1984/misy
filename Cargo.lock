@@ -723,6 +723,7 @@ dependencies = [
  "base64",
  "command-group",
  "jsonschema",
+ "misy-core",
  "semver",
  "serde",
  "serde_json",

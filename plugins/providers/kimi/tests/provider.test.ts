@@ -256,3 +256,94 @@ test("stops reading an active Kimi stream when its request is cancelled", async 
 
 	expect(notifications).toContainEqual({ method: "text_delta", request_id: 9, delta: "first" });
 });
+
+test("returns rotated credentials when usage silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.path === "/api/oauth/token") {
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "rotated",
+				expires_in: 3_600,
+			});
+		}
+		return Response.json({ usage: { used: 1, limit: 10 } });
+	});
+
+	const report = await provider(base).usage(credentials({ expires_at: 0 }));
+
+	expect(report.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when usage does not refresh", async () => {
+	const base = fakeServer(() => Response.json({ usage: { used: 1, limit: 10 } }));
+
+	const report = await provider(base).usage(credentials());
+
+	expect(report).not.toHaveProperty("credentials");
+});
+
+test("returns rotated credentials when a stream silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.path === "/api/oauth/token") {
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "rotated",
+				expires_in: 3_600,
+			});
+		}
+		return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+	});
+
+	const result = await provider(base).streamChat(
+		{
+			model_id: "k3",
+			messages: [],
+			tools: [],
+			credentials: credentials({ expires_at: 0 }),
+		},
+		12,
+		() => {},
+		undefined,
+	);
+
+	expect(result.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when a stream does not refresh", async () => {
+	const base = fakeServer(
+		() => new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }),
+	);
+
+	const result = await provider(base).streamChat(
+		{ model_id: "k3", messages: [], tools: [], credentials: credentials() },
+		13,
+		() => {},
+		undefined,
+	);
+
+	expect(result).not.toHaveProperty("credentials");
+});
+
+test("fails a stream cut off mid-event without leaking a partial delta", async () => {
+	const base = fakeServer(
+		() =>
+			new Response(
+				'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n' +
+					'data: {"choices":[{"delta":{"content":"hel',
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		provider(base).streamChat(
+			{ model_id: "k3", messages: [], tools: [], credentials: credentials() },
+			14,
+			(method, params) => notifications.push({ method, ...params }),
+			undefined,
+		),
+	).rejects.toThrow("Kimi chat stream contained invalid JSON");
+	expect(notifications).toEqual([
+		{ method: "text_delta", request_id: 14, delta: "hello" },
+		{ method: "failed", request_id: 14, message: "Kimi chat stream contained invalid JSON" },
+	]);
+});

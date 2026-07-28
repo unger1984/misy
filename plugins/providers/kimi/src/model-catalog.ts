@@ -1,7 +1,8 @@
 /** Dynamic Kimi model discovery with a bundled outage fallback. */
+
+import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import type { KimiHeaders } from "./headers";
-import { fetchWithTimeout } from "./http";
 import { type Credentials, isRecord, type Model } from "./types";
 
 /** The provider-local default used when Kimi cannot publish a catalog. */
@@ -26,7 +27,7 @@ export async function listModels(
 	if (!credentials?.access_token) return fallbackModels();
 	try {
 		const response = await fetchWithTimeout(
-			endpoint(config.apiBaseUrl, "models"),
+			endpointUrl(config.apiBaseUrl, "models"),
 			{
 				headers: {
 					...headers.common(),
@@ -72,8 +73,4 @@ function parseModel(value: unknown): Model | undefined {
 				? value["context_length"]
 				: 262_144,
 	};
-}
-
-function endpoint(baseUrl: string, suffix: string): URL {
-	return new URL(suffix, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }

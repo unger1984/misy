@@ -4,9 +4,8 @@ mod process;
 mod router;
 
 use super::{ProviderCatalog, ProviderError, ProviderEvent, ProviderRequestId};
-use crate::ProviderId;
+use crate::{ProviderId, fanout::Fanout};
 use process::ProviderProcess;
-use router::ProviderSubscriber;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -18,6 +17,49 @@ use std::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
+
+/// Deadlines the host applies while waiting on provider subprocesses.
+///
+/// A provider is an external process that can hang without dying, so every wait on it is
+/// bounded: [`ProviderHost::request`] applies [`ProviderDeadlines::for_method`], and the core
+/// applies `stream_idle` between events of a `chat.start` stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderDeadlines {
+    /// Deadline for requests that do not wait on interactive user action.
+    pub request: Duration,
+    /// Deadline for `auth.*` requests, which block while the user authenticates in a browser.
+    pub auth: Duration,
+    /// Maximum silence between stream events before the core abandons the turn.
+    pub stream_idle: Duration,
+}
+
+impl ProviderDeadlines {
+    /// Returns the deadline [`ProviderHost::request`] applies for `method`.
+    ///
+    /// Interactive `auth.*` flows wait on the user rather than only on the provider, so they get
+    /// the longer [`ProviderDeadlines::auth`] bound instead of the regular request bound.
+    pub fn for_method(&self, method: &str) -> Duration {
+        if method.starts_with("auth.") {
+            self.auth
+        } else {
+            self.request
+        }
+    }
+}
+
+impl Default for ProviderDeadlines {
+    fn default() -> Self {
+        Self {
+            // Two minutes covers slow but healthy model discovery and status round trips.
+            request: Duration::from_secs(120),
+            // Browser and device auth flows block until the user finishes, which takes minutes.
+            auth: Duration::from_secs(600),
+            // A model may think for a long while between deltas, so the idle bound stays generous:
+            // it catches a hung subprocess, it must not pace legitimate long streams.
+            stream_idle: Duration::from_secs(120),
+        }
+    }
+}
 
 /// A request already written to a provider. It can be cancelled while its response is pending.
 #[derive(Debug)]
@@ -34,6 +76,9 @@ impl PendingProviderRequest {
     }
 
     /// Waits for the request's provider response.
+    ///
+    /// The wait itself is unbounded; [`ProviderHost::request`] bounds its wait with a deadline,
+    /// and the core bounds `chat.start` stream collection with a stream idle deadline.
     ///
     /// # Errors
     ///
@@ -55,45 +100,51 @@ impl PendingProviderRequest {
 #[derive(Debug)]
 pub struct ProviderHost {
     catalog: ProviderCatalog,
+    deadlines: ProviderDeadlines,
     // This lock only protects process-map transitions; no async I/O occurs while it is held.
     lifecycle: Mutex<LifecycleState>,
-    subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
-    task_handle: Option<Handle>,
+    // Only the test-support bounded `subscribe` registers lossy subscribers; the core itself
+    // always subscribes lossless.
+    subscribers: Arc<Fanout<ProviderEvent>>,
+    task_handle: Handle,
     next_request_id: AtomicU64,
 }
 
 #[derive(Debug, Default)]
 struct LifecycleState {
-    processes: BTreeMap<String, Arc<ProviderProcess>>,
+    processes: BTreeMap<ProviderId, Arc<ProviderProcess>>,
     is_shutdown: bool,
 }
 
 impl ProviderHost {
-    /// Creates a host that lazily launches packages from `catalog`.
-    ///
-    /// Provider work starts on the calling Tokio runtime. Use [`ProviderHost::with_handle`] when
-    /// the host must remain independent of the caller runtime.
-    pub fn new(catalog: ProviderCatalog) -> Self {
-        Self {
-            catalog,
-            lifecycle: Mutex::new(LifecycleState::default()),
-            subscribers: Arc::new(Mutex::new(Vec::new())),
-            task_handle: None,
-            next_request_id: AtomicU64::new(1),
-        }
-    }
-
     /// Creates a host whose provider tasks run on `task_handle`.
     ///
-    /// The core injects its owned runtime handle so provider I/O remains independent of a
-    /// client's Tokio runtime. Standalone users can keep [`ProviderHost::new`] and call it from
-    /// within their runtime instead.
+    /// The handle is mandatory so provider I/O stays on the runtime the owner chose: the core
+    /// injects its owned runtime handle, keeping provider work independent of any client runtime.
+    #[cfg(feature = "test-support")]
     pub fn with_handle(catalog: ProviderCatalog, task_handle: Handle) -> Self {
+        Self::build(catalog, task_handle, ProviderDeadlines::default())
+    }
+
+    /// Creates a host with an explicit runtime handle and explicit wait deadlines.
+    ///
+    /// Integration tests use this to keep hung-provider scenarios fast; production clients
+    /// should prefer [`ProviderDeadlines::default`] through [`ProviderHost::with_handle`].
+    pub fn with_handle_and_deadlines(
+        catalog: ProviderCatalog,
+        task_handle: Handle,
+        deadlines: ProviderDeadlines,
+    ) -> Self {
+        Self::build(catalog, task_handle, deadlines)
+    }
+
+    fn build(catalog: ProviderCatalog, task_handle: Handle, deadlines: ProviderDeadlines) -> Self {
         Self {
             catalog,
+            deadlines,
             lifecycle: Mutex::new(LifecycleState::default()),
-            subscribers: Arc::new(Mutex::new(Vec::new())),
-            task_handle: Some(task_handle),
+            subscribers: Arc::new(Fanout::default()),
+            task_handle,
             next_request_id: AtomicU64::new(1),
         }
     }
@@ -105,13 +156,9 @@ impl ProviderHost {
     /// # Panics
     ///
     /// Panics if the subscriber mutex is poisoned by an earlier host-task panic.
+    #[cfg(feature = "test-support")]
     pub fn subscribe(&self) -> mpsc::Receiver<ProviderEvent> {
-        let (sender, receiver) = mpsc::channel(64);
-        self.subscribers
-            .lock()
-            .expect("provider subscribers mutex must not be poisoned")
-            .push(ProviderSubscriber::Lossy(sender));
-        receiver
+        self.subscribers.subscribe(64, std::iter::empty())
     }
 
     /// Subscribes a request-correlated consumer without dropping stream events.
@@ -120,12 +167,7 @@ impl ProviderHost {
     ///
     /// Panics if the subscriber mutex is poisoned by an earlier host-task panic.
     pub fn subscribe_lossless(&self) -> mpsc::UnboundedReceiver<ProviderEvent> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.subscribers
-            .lock()
-            .expect("provider subscribers mutex must not be poisoned")
-            .push(ProviderSubscriber::Lossless(sender));
-        receiver
+        self.subscribers.subscribe_lossless(std::iter::empty())
     }
 
     /// Sends a JSON-RPC request and returns a handle that waits for its correlated response.
@@ -151,11 +193,16 @@ impl ProviderHost {
         })
     }
 
-    /// Sends a request and waits for its response.
+    /// Sends a request and waits for its response with a host-enforced deadline.
+    ///
+    /// The wait is bounded by [`ProviderDeadlines::for_method`]. A provider that outlives the
+    /// deadline is reaped exactly as by [`ProviderHost::request_with_timeout`], so the next
+    /// request starts a fresh process instead of hanging behind the stuck one.
     ///
     /// # Errors
     ///
-    /// Returns any error from request submission or response delivery.
+    /// Returns any error from request submission or response delivery, or
+    /// [`ProviderError::Timeout`] when the provider does not answer within the deadline.
     #[allow(clippy::needless_pass_by_value)] // The public contract transfers opaque JSON.
     pub async fn request(
         &self,
@@ -163,9 +210,8 @@ impl ProviderHost {
         method: &str,
         params: Value,
     ) -> Result<Value, ProviderError> {
-        self.request_async(provider, method, params)
-            .await?
-            .wait()
+        let deadline = self.deadlines.for_method(method);
+        self.request_with_timeout(provider, method, params, deadline)
             .await
     }
 
@@ -206,24 +252,6 @@ impl ProviderHost {
         }
     }
 
-    /// Sends a JSON-RPC notification without allocating a response slot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the provider is unavailable or the notification cannot be written.
-    #[allow(clippy::needless_pass_by_value)] // The public contract transfers opaque JSON.
-    pub async fn notify(
-        &self,
-        provider: &ProviderId,
-        method: &str,
-        params: Value,
-    ) -> Result<(), ProviderError> {
-        self.process_for(provider)
-            .await?
-            .send_notification(method, params)
-            .await
-    }
-
     /// Cancels a pending request locally and forwards JSON-RPC cancellation to the provider.
     ///
     /// # Errors
@@ -235,6 +263,29 @@ impl ProviderHost {
         id: ProviderRequestId,
     ) -> Result<(), ProviderError> {
         self.process_for(provider).await?.cancel(id).await
+    }
+
+    /// Returns the deadlines this host applies while waiting on providers.
+    pub(crate) fn deadlines(&self) -> ProviderDeadlines {
+        self.deadlines
+    }
+
+    /// Fails the provider's live process, if any, so the next request starts a fresh one.
+    ///
+    /// Unlike [`ProviderHost::request_with_timeout`], which fails the process that outlives its
+    /// own request, this covers caller-enforced deadlines — the core's stream idle bound —
+    /// where only the host can reach the process.
+    pub(crate) async fn fail_provider(&self, provider: &ProviderId, reason: String) {
+        let process = self
+            .lifecycle
+            .lock()
+            .expect("provider lifecycle mutex must not be poisoned")
+            .processes
+            .get(provider)
+            .cloned();
+        if let Some(process) = process {
+            process.fail(PendingFailure::Transport(reason)).await;
+        }
     }
 
     /// Returns the number of healthy child processes currently running.
@@ -294,17 +345,17 @@ impl ProviderHost {
             if lifecycle.is_shutdown {
                 return Err(ProviderError::Shutdown);
             }
-            if let Some(process) = lifecycle.processes.get(provider.as_str())
+            if let Some(process) = lifecycle.processes.get(provider)
                 && !process.is_failed()
             {
                 return Ok(Arc::clone(process));
             }
             self.catalog
-                .get(provider.as_str())
+                .get(provider)
                 .cloned()
                 .ok_or_else(|| ProviderError::UnknownProvider(provider.as_str().to_owned()))?
         };
-        let task_handle = self.task_handle(provider)?;
+        let task_handle = self.task_handle.clone();
         let process = Arc::new(ProviderProcess::start(
             provider.clone(),
             &package,
@@ -318,29 +369,20 @@ impl ProviderHost {
                 .expect("provider lifecycle mutex must not be poisoned");
             if lifecycle.is_shutdown {
                 None
-            } else if let Some(existing) = lifecycle.processes.get(provider.as_str())
+            } else if let Some(existing) = lifecycle.processes.get(provider)
                 && !existing.is_failed()
             {
                 Some(Arc::clone(existing))
             } else {
                 lifecycle
                     .processes
-                    .insert(provider.as_str().to_owned(), Arc::clone(&process));
+                    .insert(provider.clone(), Arc::clone(&process));
                 return Ok(process);
             }
         };
+        // This process lost the startup race; kill_on_drop reaps it even if shutdown fails.
         let _ = process.shutdown().await;
         replacement.ok_or(ProviderError::Shutdown)
-    }
-
-    fn task_handle(&self, provider: &ProviderId) -> Result<Handle, ProviderError> {
-        if let Some(task_handle) = &self.task_handle {
-            return Ok(task_handle.clone());
-        }
-        Handle::try_current().map_err(|_| ProviderError::Spawn {
-            provider: provider.as_str().to_owned(),
-            message: "provider host requires a Tokio runtime".to_owned(),
-        })
     }
 }
 

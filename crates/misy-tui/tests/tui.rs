@@ -3,13 +3,13 @@
 mod support;
 
 use misy_core::{ModelId, ModelRef, ProviderId};
-use misy_tui::{TranscriptRow, TuiClient, TuiControl, UiAction, UiKey, UiMode, UiState, map_input};
+use misy_tui::{TranscriptRow, TuiClient, UiAction, UiKey, UiMode, UiState, map_input};
 use ratatui::style::Color;
 use serde_json::json;
-use std::fs;
+use std::{fs, time::Duration};
 use support::tui::{
     RecordingBrowser, authorize_first_provider, buffer_lines, core_with_providers, render_buffer,
-    select_first_model, start_first_provider_auth, test_client, wait_for,
+    select_first_model, start_first_provider_auth, test_client, wait_for, wait_for_within,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -29,11 +29,8 @@ async fn input_mapping_and_reducer_keep_state_explicit() {
         UiAction::Noop
     );
     let mut state = UiState::default();
-    state.reduce(UiAction::AppendAssistantText("hello".to_owned()));
-    assert_eq!(
-        state.transcript(),
-        [TranscriptRow::AssistantText("hello".to_owned())]
-    );
+    state.reduce(&UiAction::CancelAndExit);
+    assert!(state.should_exit());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -112,12 +109,9 @@ async fn slash_popup_accepts_a_command_and_unknown_commands_report_errors() {
     client
         .handle_key(UiKey::Down)
         .expect("select model command");
-    assert_eq!(
-        client
-            .handle_key(UiKey::Tab)
-            .expect("complete model command"),
-        TuiControl::Continue
-    );
+    client
+        .handle_key(UiKey::Tab)
+        .expect("complete model command");
     assert_eq!(client.state().mode(), UiMode::Input);
     assert_eq!(client.state().composer_input(), "/model ");
     assert!(!client.state().command_popup_visible());
@@ -301,6 +295,86 @@ async fn numbered_modal_rows_support_direct_selection() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn provider_picker_keeps_filter_and_selection_when_submission_events_arrive() {
+    let (_temporary, core) = core_with_providers(&[
+        ("fixture", "Fixture AI", "one"),
+        ("fixture-two", "Second AI", "two"),
+    ]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+    select_first_model(&mut client).await;
+
+    client.handle_input("/provider").expect("providers");
+    client.insert_text("Second");
+    assert_eq!(client.state().picker_labels(), ["Second AI"]);
+    client.handle_input("session-one").expect("submit prompt");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::AssistantText(_)))
+    })
+    .await;
+    assert_eq!(client.state().mode(), UiMode::ProviderList);
+    assert_eq!(client.state().picker_labels(), ["Second AI"]);
+
+    for _ in 0.."Second".len() {
+        client.backspace();
+    }
+    assert_eq!(client.state().picker_labels(), ["Fixture AI", "Second AI"]);
+    client.handle_key(UiKey::Down).expect("select second row");
+    client.handle_input("session-two").expect("submit prompt");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::UserPrompt(text) if text == "session-two"))
+    })
+    .await;
+    assert_eq!(client.state().picker_labels(), ["Fixture AI", "Second AI"]);
+    client.handle_key(UiKey::Enter).expect("open settings");
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    let settings = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
+    assert!(settings.iter().any(|line| line.contains("Second AI")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_picker_keeps_selection_when_authentication_changes() {
+    let (_temporary, core) = core_with_providers(&[
+        ("fixture", "Fixture AI", "one"),
+        ("fixture-two", "Second AI", "two"),
+    ]);
+    let core_handle = core.clone();
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+    client.handle_input("/provider").expect("providers");
+    client.handle_key(UiKey::Down).expect("select second row");
+
+    core_handle
+        .complete_auth(
+            &ProviderId::new("fixture"),
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
+        .await
+        .expect("authenticate first provider");
+    wait_for(&mut client, |client| {
+        buffer_lines(&render_buffer(client.state(), 72, 14), 72)
+            .iter()
+            .any(|line| line.contains("✓ authenticated"))
+    })
+    .await;
+
+    assert_eq!(client.state().picker_labels(), ["Fixture AI", "Second AI"]);
+    client.handle_key(UiKey::Enter).expect("open settings");
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    let settings = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
+    assert!(settings.iter().any(|line| line.contains("Second AI")));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn composer_input_is_preserved_while_stream_events_arrive() {
     let (_temporary, mut client, _) = test_client().await;
     select_first_model(&mut client).await;
@@ -327,6 +401,83 @@ async fn composer_input_is_preserved_while_stream_events_arrive() {
             })
             .sum::<usize>(),
         4_096
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn streamed_deltas_merge_into_one_assistant_row_per_submission() {
+    let (_temporary, mut client, _) = test_client().await;
+    select_first_model(&mut client).await;
+    client.handle_input("burst").expect("submit burst");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::AssistantText(text) if text.len() == 4_096))
+    })
+    .await;
+
+    let assistant_rows = client
+        .state()
+        .transcript()
+        .iter()
+        .filter(|row| matches!(row, TranscriptRow::AssistantText(_)))
+        .count();
+    assert_eq!(assistant_rows, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tool_rows_carry_arguments_and_result_content_from_core_events() {
+    let (_temporary, mut client, target) = test_client().await;
+    select_first_model(&mut client).await;
+    client.handle_input("tool-round-trip").expect("prompt");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::AssistantText(text) if text == "done"))
+    })
+    .await;
+
+    let path = target.display().to_string();
+    let rows = client.state().transcript();
+    assert!(
+        rows.contains(&TranscriptRow::ToolCall {
+            id: "write-1".to_owned(),
+            name: "write_file".to_owned(),
+            arguments: Some(format!(
+                r#"{{"content":"written by tool","path":"{path}"}}"#
+            )),
+        }),
+        "write_file call must carry its compact JSON arguments"
+    );
+    assert!(
+        rows.contains(&TranscriptRow::ToolCall {
+            id: "read-1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: Some(format!(r#"{{"path":"{path}"}}"#)),
+        }),
+        "read_file call must carry its compact JSON arguments"
+    );
+    assert!(
+        rows.contains(&TranscriptRow::ToolResult {
+            id: "write-1".to_owned(),
+            is_error: false,
+            content: Some(format!("wrote {path}")),
+        }),
+        "write_file result must retain its content"
+    );
+    assert!(
+        rows.contains(&TranscriptRow::ToolResult {
+            id: "read-1".to_owned(),
+            is_error: false,
+            content: Some("written by tool".to_owned()),
+        }),
+        "read_file result must retain its content"
     );
 }
 
@@ -360,9 +511,9 @@ async fn usage_command_reports_limits_for_the_selected_models_provider() {
     })
     .await;
 
-    assert!(client.state().transcript().iter().any(
-        |row| matches!(row, TranscriptRow::Info(message) if message.contains("5 hour limit: 42% used"))
-    ));
+    assert!(client.state().transcript().iter().any(|row| {
+        matches!(row, TranscriptRow::Info(message) if message.contains("5 hour limit: 42% used"))
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -382,7 +533,9 @@ async fn completed_response_remains_in_the_fullscreen_transcript() {
     assert!(live.iter().any(|line| line.contains("next")));
     assert!(live.iter().any(|line| line.contains("Responding…")));
     assert!(live.iter().any(|line| line.contains('╭')));
-    wait_for(&mut client, |client| {
+    // The fixture sleeps 2s between the "next" delta and completion; the
+    // default deadline would leave only ~1s of headroom under CI load.
+    wait_for_within(&mut client, Duration::from_secs(10), |client| {
         client.state().active_submission().is_none()
     })
     .await;
@@ -416,7 +569,8 @@ async fn end_to_end_auth_model_tool_and_shutdown_flow() {
             .iter()
             .any(|row| matches!(row, TranscriptRow::ToolCall { name, .. } if name == "write_file"))
     );
-    assert_eq!(client.handle_ctrl_c(), TuiControl::Continue);
+    client.handle_ctrl_c();
+    assert!(!client.state().should_exit());
     let armed = render_buffer(client.state(), 72, 14);
     assert!(
         buffer_lines(&armed, 72)
@@ -424,7 +578,7 @@ async fn end_to_end_auth_model_tool_and_shutdown_flow() {
             .any(|line| line.contains("press Ctrl+C again to exit"))
     );
     assert!(armed.content().iter().any(|cell| cell.fg == Color::Cyan));
-    assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
+    client.handle_ctrl_c();
     assert!(client.state().should_exit());
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert_eq!(client.running_provider_count().await, 0);
@@ -434,10 +588,7 @@ async fn end_to_end_auth_model_tool_and_shutdown_flow() {
 async fn exit_command_shuts_down_providers_and_requests_terminal_exit() {
     let (_temporary, mut client, _) = test_client().await;
     select_first_model(&mut client).await;
-    assert_eq!(
-        client.handle_input("/exit").expect("exit command"),
-        TuiControl::Exit
-    );
+    client.handle_input("/exit").expect("exit command");
     assert!(client.state().should_exit());
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert_eq!(client.running_provider_count().await, 0);
@@ -461,8 +612,10 @@ async fn ctrl_c_requires_a_second_press_from_popup_and_every_modal_surface() {
             }
             _ => unreachable!(),
         }
-        assert_eq!(client.handle_ctrl_c(), TuiControl::Continue);
-        assert_eq!(client.handle_ctrl_c(), TuiControl::Exit);
+        client.handle_ctrl_c();
+        assert!(!client.state().should_exit(), "{setup}: first press arms");
+        client.handle_ctrl_c();
+        assert!(client.state().should_exit(), "{setup}: second press exits");
         assert_eq!(client.running_provider_count().await, 0);
     }
 }

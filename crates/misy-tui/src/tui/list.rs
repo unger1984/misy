@@ -117,6 +117,26 @@ impl<T> ListView<T> {
         self.apply_filter();
     }
 
+    /// Swaps the row set in place after a background refresh.
+    ///
+    /// Rebuilding the view from scratch would drop the typed filter and reset
+    /// the highlight, so the query survives and the selection follows its
+    /// value when that value still exists in the refreshed rows.
+    pub(super) fn replace_rows(&mut self, rows: Vec<ListRow<T>>)
+    where
+        T: Clone + PartialEq,
+    {
+        let selected = self.selected_value().cloned();
+        self.rows = rows;
+        self.apply_filter();
+        if let Some(value) = selected {
+            self.select_value(&value);
+            if self.selected.is_none() {
+                self.selected = self.first_selectable();
+            }
+        }
+    }
+
     pub(super) fn backspace_filter(&mut self) {
         self.query.pop();
         self.apply_filter();
@@ -290,5 +310,46 @@ mod tests {
         assert_eq!(visible.first().map(|row| row.number), Some(2));
         assert_eq!(visible.last().map(|row| row.number), Some(9));
         assert!(visible.last().is_some_and(|row| row.selected));
+    }
+
+    #[test]
+    fn replace_rows_keeps_the_filter_and_follows_the_selected_value() {
+        let mut view = ListView::new(
+            "items",
+            vec![
+                ListRow::selectable(1, "alpha", None),
+                ListRow::selectable(2, "alpine", None),
+                ListRow::selectable(3, "beta", None),
+            ],
+        );
+        view.insert_filter("alp");
+        view.move_down();
+        assert_eq!(view.selected_value(), Some(&2));
+
+        view.replace_rows(vec![
+            ListRow::selectable(1, "alpha", Some("updated".to_owned())),
+            ListRow::selectable(2, "alpine", None),
+            ListRow::selectable(3, "beta", None),
+        ]);
+
+        assert_eq!(view.labels(), ["alpha", "alpine"]);
+        assert_eq!(view.selected_value(), Some(&2));
+    }
+
+    #[test]
+    fn replace_rows_falls_back_to_the_first_row_when_the_value_disappears() {
+        let mut view = ListView::new(
+            "items",
+            vec![
+                ListRow::selectable(1, "alpha", None),
+                ListRow::selectable(2, "beta", None),
+            ],
+        );
+        view.move_down();
+        assert_eq!(view.selected_value(), Some(&2));
+
+        view.replace_rows(vec![ListRow::selectable(1, "alpha", None)]);
+
+        assert_eq!(view.selected_value(), Some(&1));
     }
 }

@@ -1,6 +1,6 @@
 /** OpenAI Responses request construction and SSE normalization. */
 import { supportsReasoning } from "./model-catalog";
-import type { Json, Notify, ToolDefinition } from "./types";
+import { isRecord, type Json, type Notify, type ToolDefinition } from "./types";
 
 /** Builds the complete Responses body required by the subscription backend. */
 export function createResponsesRequest(
@@ -78,15 +78,18 @@ export async function notifyResponseEvents(
 			}
 			if (read.done) break;
 		}
+		// SSE events end with a blank line, so a non-empty remainder at EOF means the
+		// connection dropped mid-event; completing silently would hide the truncation.
+		if (pending.trim().length > 0) {
+			throw new Error("OpenAI Responses stream ended mid-event");
+		}
 	} finally {
 		reader.releaseLock();
 	}
 	return metadata;
 }
 function record(value: unknown): Record<string, Json> {
-	return value !== null && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, Json>)
-		: {};
+	return isRecord(value) ? value : {};
 }
 function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 	const input: Json[] = [];
@@ -152,7 +155,9 @@ function notifyToolCall(data: Record<string, Json>, requestId: number, notify: N
 	let argumentsValue: Json = raw ?? {};
 	if (typeof raw === "string") {
 		try {
-			argumentsValue = JSON.parse(raw) as Json;
+			// JSON.parse can only produce Json values, so assigning to the Json-typed binding
+			// states a fact; the annotation sheds parse's `any` without an `as` cast.
+			argumentsValue = JSON.parse(raw);
 		} catch {
 			argumentsValue = { raw };
 		}

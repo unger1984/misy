@@ -1,8 +1,8 @@
 //! Cached and refreshed model-picker state, including provider tabs.
 
 use super::list::{ListRow, ListRowDisplay, ListView};
-use misy_core::{AvailableModels, ModelRef, ProviderId};
-use std::collections::BTreeMap;
+use misy_core::{AvailableModels, ModelRef, ProviderDisplayName, ProviderId};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One filter scope in the model picker.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,7 +48,7 @@ impl ModelPicker {
     /// Creates a picker from a cached or freshly discovered catalog.
     pub(super) fn from_available(
         available: AvailableModels,
-        provider_names: &BTreeMap<String, String>,
+        provider_names: &BTreeMap<ProviderId, ProviderDisplayName>,
         selected_model: Option<&ModelRef>,
     ) -> Self {
         let (rows, tabs) = rows_and_tabs(available, provider_names, selected_model);
@@ -70,7 +70,7 @@ impl ModelPicker {
     pub(super) fn refresh(
         &mut self,
         available: AvailableModels,
-        provider_names: &BTreeMap<String, String>,
+        provider_names: &BTreeMap<ProviderId, ProviderDisplayName>,
         selected_model: Option<&ModelRef>,
     ) {
         let active_tab = self.tabs.get(self.active_tab).cloned();
@@ -182,19 +182,19 @@ fn belongs_to_tab(entry: &PickerRow, tab: &ModelPickerTab) -> bool {
 
 fn rows_and_tabs(
     available: AvailableModels,
-    provider_names: &BTreeMap<String, String>,
+    provider_names: &BTreeMap<ProviderId, ProviderDisplayName>,
     selected_model: Option<&ModelRef>,
 ) -> (Vec<PickerRow>, Vec<ModelPickerTab>) {
-    let mut providers = BTreeMap::new();
+    let mut providers = BTreeSet::new();
     let mut rows = available
         .models
         .into_iter()
         .map(|model| {
             let provider = model.model.provider.clone();
-            providers.insert(provider.as_str().to_owned(), provider.clone());
+            providers.insert(provider.clone());
             let provider_name = provider_names
-                .get(provider.as_str())
-                .cloned()
+                .get(&provider)
+                .map(|name| name.as_str().to_owned())
                 .unwrap_or_else(|| provider.as_str().to_owned());
             let label = model.model.model.as_str().to_owned();
             let row = if selected_model == Some(&model.model) {
@@ -216,7 +216,7 @@ fn rows_and_tabs(
         })
         .collect::<Vec<_>>();
     rows.extend(available.errors.into_iter().map(|error| {
-        providers.insert(error.provider.as_str().to_owned(), error.provider.clone());
+        providers.insert(error.provider.clone());
         PickerRow {
             provider: error.provider,
             row: ListRow::informational(format!(
@@ -226,21 +226,21 @@ fn rows_and_tabs(
         }
     }));
     let tabs = std::iter::once(ModelPickerTab::All)
-        .chain(providers.into_values().map(ModelPickerTab::Provider))
+        .chain(providers.into_iter().map(ModelPickerTab::Provider))
         .collect();
     (rows, tabs)
 }
 
 fn labels_for_tabs(
     tabs: &[ModelPickerTab],
-    provider_names: &BTreeMap<String, String>,
+    provider_names: &BTreeMap<ProviderId, ProviderDisplayName>,
 ) -> Vec<String> {
     tabs.iter()
         .map(|tab| match tab {
             ModelPickerTab::All => "All".to_owned(),
             ModelPickerTab::Provider(provider) => provider_names
-                .get(provider.as_str())
-                .cloned()
+                .get(provider)
+                .map(|name| name.as_str().to_owned())
                 .unwrap_or_else(|| provider.as_str().to_owned()),
         })
         .collect()

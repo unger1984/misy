@@ -80,13 +80,24 @@ pub(crate) async fn wait_for(
     client: &mut TuiClient<RecordingBrowser>,
     condition: impl Fn(&TuiClient<RecordingBrowser>) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    wait_for_within(client, Duration::from_secs(3), condition).await;
+}
+
+// Separate helper rather than a timeout parameter on `wait_for` because most
+// conditions are satisfied by an immediate fixture reply; only waits behind a
+// deliberate fixture `sleep` should pay for a longer deadline.
+pub(crate) async fn wait_for_within(
+    client: &mut TuiClient<RecordingBrowser>,
+    timeout: Duration,
+    condition: impl Fn(&TuiClient<RecordingBrowser>) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
     loop {
         client.pump_events();
-        tokio::time::sleep(Duration::from_millis(10)).await;
         if condition(client) || Instant::now() >= deadline {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
         condition(client),

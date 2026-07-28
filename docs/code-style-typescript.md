@@ -73,7 +73,7 @@ dependencies cooperate; do not block on it.
 Use [Biome](https://biomejs.dev) — one binary, formatter and linter together, no config sprawl.
 This is also what the `oh-my-pi` reference uses.
 
-`biome.json` in each package, with:
+`biome.jsonc` in each package, with:
 
 - `linter.rules.preset: "recommended"`;
 - `formatter.lineWidth: 100` — the same width as the Rust side, so both halves of the repository
@@ -81,6 +81,11 @@ This is also what the `oh-my-pi` reference uses.
 - `formatter.lineEnding: "lf"`.
 
 Do not disable `noExplicitAny` — see [Types](#types).
+
+Disabling `complexity/useLiteralKeys` is permitted and expected: `noPropertyAccessFromIndexSignature`
+requires bracket access on index signatures (JSON-RPC `params`), which `useLiteralKeys` flags — the
+compiler flag wins. The `off` in `biome.jsonc` must carry a comment stating this — the `.jsonc`
+extension is what allows the comment.
 
 A `// biome-ignore` must name the rule and state the reason on the same comment.
 

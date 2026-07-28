@@ -51,16 +51,19 @@ impl MisyCore {
             .submission_queue
             .lock()
             .expect("submission queue mutex must not be poisoned");
-        let auth_states = state
-            .auth_states
+        let credential_states = state
+            .credential_states
             .lock()
-            .expect("authentication state mutex must not be poisoned");
+            .expect("credential state mutex must not be poisoned");
         let (active_submission, queued_submissions) = submission_queue.snapshot();
         CoreSnapshot {
             selected_model: selected_model.clone(),
             active_submission,
             queued_submissions,
-            providers: auth_states.values().cloned().collect(),
+            providers: credential_states
+                .values()
+                .map(|state| state.auth.clone())
+                .collect(),
         }
     }
 }

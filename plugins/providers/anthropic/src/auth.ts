@@ -1,7 +1,8 @@
 /** Browser PKCE OAuth lifecycle and token refresh for Claude subscriptions. */
+import { endpointUrl } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import { postOAuthJson } from "./oauth-http";
-import { type Credentials, isRecord, type Json } from "./types";
+import { type Credentials, isRecord } from "./types";
 
 const CALLBACK_URL = "http://localhost:54545/callback";
 const EXPIRY_SAFETY_MARGIN_MS = 300_000;
@@ -66,7 +67,9 @@ export class OAuthClient {
 	async complete(session: unknown, completion: Record<string, unknown>): Promise<Credentials> {
 		const pending = this.session(session);
 		try {
-			const code = suppliedCode(completion) ?? (await waitForCode(pending.code, pending.expiresAt));
+			const supplied = suppliedCode(completion);
+			if (supplied !== undefined) verifyPastedState(supplied, pending.state);
+			const code = supplied ?? (await waitForCode(pending.code, pending.expiresAt));
 			const exchange = splitCodeAndState(code, pending.state);
 			return await this.requestToken({
 				grant_type: "authorization_code",
@@ -157,7 +160,7 @@ export class OAuthClient {
 		extraHeaders: Record<string, string> = {},
 	): Promise<Credentials> {
 		const response = await postOAuthJson(
-			endpoint(this.config.apiBaseUrl, "v1/oauth/token"),
+			endpointUrl(this.config.apiBaseUrl, "v1/oauth/token"),
 			{ "content-type": "application/json", ...extraHeaders },
 			JSON.stringify(fields),
 			this.config.requestTimeoutMs,
@@ -177,20 +180,6 @@ export async function refreshIfNeeded(
 	return typeof expiresAt === "number" && expiresAt <= Date.now() + EXPIRY_SAFETY_MARGIN_MS
 		? await client.refresh(credentials)
 		: credentials;
-}
-
-/** Applies both a request deadline and a caller-provided cancellation signal. */
-export async function fetchWithTimeout(
-	input: URL | string,
-	init: RequestInit,
-	timeoutMs: number,
-): Promise<Response> {
-	const deadline = AbortSignal.timeout(timeoutMs);
-	const signal =
-		init.signal === undefined || init.signal === null
-			? deadline
-			: AbortSignal.any([init.signal, deadline]);
-	return await fetch(input, { ...init, signal });
 }
 
 function callbackResponse(
@@ -215,6 +204,20 @@ function splitCodeAndState(value: string, fallbackState: string): { code: string
 	const code = value.slice(0, separator);
 	const state = value.slice(separator + 1);
 	return { code, state: state.length > 0 ? state : fallbackState };
+}
+
+// The browser callback rejects a missing or mismatched state, so the manual paste path
+// applies the same rule: without it a pasted code#state from another authorization
+// would silently replace the session state sent to the token endpoint.
+function verifyPastedState(value: string, expected: string): void {
+	const separator = value.indexOf("#");
+	const state = separator < 0 ? "" : value.slice(separator + 1);
+	if (state.length === 0) {
+		throw new Error("Anthropic OAuth pasted code does not include its state");
+	}
+	if (state !== expected) {
+		throw new Error("Anthropic OAuth pasted code state does not match this authorization session");
+	}
 }
 
 function suppliedCode(completion: Record<string, unknown>): string | undefined {
@@ -272,22 +275,20 @@ function tokenError(status: number, body: string): Error {
 	return new Error(`Anthropic OAuth token request failed (${status})${detail}`);
 }
 
-function parseJson(body: string, source: string): Json {
+function parseJson(body: string, source: string): unknown {
 	const parsed = tryJson(body);
 	if (parsed === undefined) throw new Error(`${source} returned invalid JSON`);
 	return parsed;
 }
 
-function tryJson(body: string): Json | undefined {
+// JSON.parse never yields undefined, so undefined marks a parse failure; callers
+// narrow the unknown result with isRecord instead of trusting a cast.
+function tryJson(body: string): unknown {
 	try {
-		return JSON.parse(body) as Json;
+		return JSON.parse(body);
 	} catch {
 		return undefined;
 	}
-}
-
-function endpoint(baseUrl: string, path: string): URL {
-	return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }
 
 function randomToken(bytes: number): string {

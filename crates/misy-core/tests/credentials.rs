@@ -33,6 +33,13 @@ fn credential_store_persists_opaque_provider_json_with_private_permissions() {
         store.load(&provider).expect("load credentials"),
         Some(credentials)
     );
+    let contents = fs::read(paths.credentials_file()).expect("read credentials file");
+    let document: serde_json::Value =
+        serde_json::from_slice(&contents).expect("credentials document");
+    assert!(
+        document["providers"].get("openai").is_some(),
+        "provider id must stay a plain string key: {document}"
+    );
     assert!(!root.join("credentials.json.tmp").exists());
     #[cfg(unix)]
     {

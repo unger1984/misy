@@ -76,7 +76,7 @@ async fn available_models_skips_unconfigured_providers_and_isolates_provider_fai
     assert_eq!(available.errors.len(), 1);
     assert_eq!(available.errors[0].provider.as_str(), "failed-provider");
     assert_eq!(
-        available.errors[0].provider_display_name,
+        available.errors[0].provider_display_name.as_str(),
         "failed-provider fixture"
     );
     assert_eq!(core.running_provider_count().await, 2);
@@ -180,6 +180,43 @@ async fn late_model_response_cannot_restore_cache_after_logout() {
             .expect("cached models after logout")
             .models
             .is_empty()
+    );
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn auth_status_reporting_unauthenticated_keeps_the_model_cache_gate_consistent() {
+    let (temporary, core, _) = test_core("status-unauthenticated");
+    let provider = ProviderId::new("fixture");
+    core.complete_auth(
+        &provider,
+        json!({"id": "fixture-session"}),
+        json!({"code": "opaque"}),
+    )
+    .await
+    .expect("authenticate");
+
+    let status = core.auth_status(&provider).await.expect("auth status");
+    assert_eq!(status["authenticated"], false);
+    assert!(
+        !core
+            .has_credentials(&provider)
+            .await
+            .expect("has credentials")
+    );
+    // A status query carries no credential record, so the stored method must survive it.
+    assert_eq!(
+        core.credential_method(&provider).await.expect("method"),
+        Some("oauth".to_owned())
+    );
+
+    core.list_models(&provider).await.expect("list models");
+
+    let cache = temporary.path().join("misy/models.json");
+    let contents = fs::read_to_string(&cache).unwrap_or_default();
+    assert!(
+        !contents.contains("fixture-model"),
+        "unauthenticated provider must not write the model cache: {contents}"
     );
     core.shutdown().await.expect("shutdown");
 }

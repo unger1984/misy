@@ -107,78 +107,81 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
 
 fn row_lines(row: &TranscriptRow) -> Vec<Line<'static>> {
     match row {
-        TranscriptRow::Provider { id, authenticated } => vec![Line::styled(
-            format!(
-                "  provider {id}: {}",
-                if *authenticated {
-                    "authenticated"
-                } else {
-                    "offline"
-                }
-            ),
-            style::muted(),
-        )],
+        TranscriptRow::Provider { id, authenticated } => {
+            vec![provider_status_line(id, *authenticated)]
+        }
         TranscriptRow::Model {
             provider,
             id,
             selected,
-        } => vec![Line::styled(
-            format!(
-                "  model: {provider}/{id}{}",
-                if *selected { " ✓" } else { "" }
-            ),
-            style::muted(),
-        )],
-        TranscriptRow::UserPrompt(prompt) => prompt
-            .split('\n')
-            .enumerate()
-            .map(|(index, line)| {
-                let marker = if index == 0 { "• " } else { "  " };
-                Line::from(vec![
-                    Span::styled(marker, style::muted()),
-                    Span::styled(line.to_owned(), style::muted()),
-                ])
-            })
-            .collect(),
+        } => vec![model_status_line(provider, id, *selected)],
+        TranscriptRow::UserPrompt(prompt) => user_prompt_lines(prompt),
         TranscriptRow::AssistantText(text) => text
             .split('\n')
             .map(|line| Line::raw(line.to_owned()))
             .collect(),
         TranscriptRow::ToolCall {
             name, arguments, ..
-        } => vec![Line::from(vec![
-            Span::styled("⏺ ", style::accent()),
-            Span::raw(format!(
-                "{name}({})",
-                arguments.as_deref().unwrap_or_default()
-            )),
-        ])],
+        } => vec![tool_call_line(name, arguments.as_deref())],
         TranscriptRow::ToolResult {
             is_error, content, ..
-        } => {
-            let row_style = if *is_error {
-                style::error()
-            } else {
-                style::muted()
-            };
-            content
-                .as_deref()
-                .unwrap_or(if *is_error {
-                    "tool failed"
-                } else {
-                    "completed"
-                })
-                .split('\n')
-                .enumerate()
-                .map(|(index, line)| {
-                    let prefix = if index == 0 { "  ⎿ " } else { "    " };
-                    Line::styled(format!("{prefix}{line}"), row_style)
-                })
-                .collect()
-        }
+        } => tool_result_lines(*is_error, content.as_deref()),
         TranscriptRow::Info(message) => vec![Line::styled(format!("  {message}"), style::muted())],
         TranscriptRow::Error(message) => vec![Line::styled(format!("  {message}"), style::error())],
     }
+}
+
+fn provider_status_line(id: &str, authenticated: bool) -> Line<'static> {
+    let status = if authenticated {
+        "authenticated"
+    } else {
+        "offline"
+    };
+    Line::styled(format!("  provider {id}: {status}"), style::muted())
+}
+
+fn model_status_line(provider: &str, id: &str, selected: bool) -> Line<'static> {
+    let marker = if selected { " ✓" } else { "" };
+    Line::styled(format!("  model: {provider}/{id}{marker}"), style::muted())
+}
+
+fn user_prompt_lines(prompt: &str) -> Vec<Line<'static>> {
+    prompt
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            let marker = if index == 0 { "• " } else { "  " };
+            Line::from(vec![
+                Span::styled(marker, style::muted()),
+                Span::styled(line.to_owned(), style::muted()),
+            ])
+        })
+        .collect()
+}
+
+fn tool_call_line(name: &str, arguments: Option<&str>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("⏺ ", style::accent()),
+        Span::raw(format!("{name}({})", arguments.unwrap_or_default())),
+    ])
+}
+
+fn tool_result_lines(is_error: bool, content: Option<&str>) -> Vec<Line<'static>> {
+    let row_style = if is_error {
+        style::error()
+    } else {
+        style::muted()
+    };
+    let fallback = if is_error { "tool failed" } else { "completed" };
+    content
+        .unwrap_or(fallback)
+        .split('\n')
+        .enumerate()
+        .map(|(index, line)| {
+            let prefix = if index == 0 { "  ⎿ " } else { "    " };
+            Line::styled(format!("{prefix}{line}"), row_style)
+        })
+        .collect()
 }
 
 fn render_composer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {

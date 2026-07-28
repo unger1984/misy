@@ -24,7 +24,7 @@ impl MisyCore {
             .inner
             .state
             .catalog
-            .get(model.provider.as_str())
+            .get(&model.provider)
             .ok_or_else(|| ProviderError::UnknownProvider(model.provider.as_str().to_owned()))?;
         if !package
             .manifest()
@@ -49,10 +49,19 @@ impl MisyCore {
         {
             return Err(CoreError::ProviderNotAuthenticated(model.provider.clone()));
         }
-        let result = self
+        let mut result = self
             .usage_provider_request(model)
             .await
             .map_err(sanitize_usage_error)?;
+        // Providers report credentials rotated by a silent refresh in the result; persist them
+        // through the shared store path, which also strips the field so the strict report
+        // parser below never sees it.
+        if result.get("credentials").is_some() {
+            self.inner
+                .state
+                .store_credentials(&model.provider, &mut result, true)
+                .await?;
+        }
         UsageReport::parse_provider_value(result).map_err(CoreError::InvalidUsage)
     }
 

@@ -2,13 +2,20 @@
 import { connect as connectTcp } from "node:net";
 import { connect as connectTls } from "node:tls";
 
+// A token endpoint answers with a small JSON document; anything past this cap is a
+// misbehaving or hostile endpoint that would otherwise burn CPU and memory until the deadline.
+const MAX_RESPONSE_BYTES = 256 * 1024;
+const HEADER_BOUNDARY = Buffer.from("\r\n\r\n");
+const CHUNK_TERMINATOR = Buffer.from("\r\n0\r\n");
+
 /** A completed OAuth token HTTP response. */
 export type TokenResponse = { status: number; body: string };
 
 /**
  * Posts a JSON OAuth token request without an `Accept` header.
  *
- * Throws when the connection, response, or deadline fails. This deliberately uses raw HTTP because
+ * Throws when the connection, response, or deadline fails, when a request field contains CR/LF,
+ * or when the response grows past the 256 KiB cap. This deliberately uses raw HTTP because
  * Bun's Fetch and HTTP compatibility layers synthesize a default `Accept` header, which changes
  * this endpoint's observed Claude Code fingerprint.
  */
@@ -22,8 +29,11 @@ export async function postOAuthJson(
 	const timer = setTimeout(() => deadline.abort(), timeoutMs);
 	try {
 		return await new Promise<TokenResponse>((resolve, reject) => {
+			// Built before any socket work so an invalid field rejects the promise instead
+			// of throwing inside a connect event handler.
+			const request = requestText(url, headers, body);
 			const socket = openSocket(url);
-			const chunks: Uint8Array[] = [];
+			const incoming = createResponseAccumulator();
 			let settled = false;
 			const finish = (response: TokenResponse) => {
 				if (settled) return;
@@ -41,9 +51,8 @@ export async function postOAuthJson(
 			deadline.signal.addEventListener("abort", abort, { once: true });
 			socket.once("error", fail);
 			socket.on("data", (chunk: Uint8Array) => {
-				chunks.push(chunk);
 				try {
-					const response = completeResponse(Buffer.concat(chunks).toString());
+					const response = incoming.push(chunk);
 					if (response !== undefined) finish(response);
 				} catch (cause) {
 					fail(cause);
@@ -51,13 +60,13 @@ export async function postOAuthJson(
 			});
 			socket.once("end", () => {
 				try {
-					finish(parseResponse(Buffer.concat(chunks).toString()));
+					finish(parseResponse(incoming.text()));
 				} catch (cause) {
 					fail(cause);
 				}
 			});
 			socket.once(url.protocol === "https:" ? "secureConnect" : "connect", () => {
-				socket.write(requestText(url, headers, body));
+				socket.write(request);
 			});
 		});
 	} finally {
@@ -75,12 +84,19 @@ function openSocket(url: URL) {
 
 function requestText(url: URL, headers: Record<string, string>, body: string): string {
 	const host = url.port.length > 0 ? `${url.hostname}:${url.port}` : url.hostname;
+	const target = `${url.pathname}${url.search}`;
+	const headerLines = Object.entries(headers).map(([name, value]) => `${name}: ${value}`);
+	// Raw request assembly has no encoder to reject control bytes: a CR/LF in an interpolated
+	// field would split the request. Callers pass constants today, so this guards future inputs.
+	if ([target, host, ...headerLines].some((field) => /[\r\n]/.test(field))) {
+		throw new Error("Refusing to send the Anthropic OAuth token request: CR/LF in an HTTP field");
+	}
 	const lines = [
-		`POST ${url.pathname}${url.search} HTTP/1.1`,
+		`POST ${target} HTTP/1.1`,
 		`Host: ${host}`,
 		"Connection: close",
 		`Content-Length: ${Buffer.byteLength(body)}`,
-		...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+		...headerLines,
 		"",
 		body,
 	];
@@ -102,18 +118,59 @@ function parseResponse(raw: string): TokenResponse {
 	};
 }
 
-function completeResponse(raw: string): TokenResponse | undefined {
-	const boundary = raw.indexOf("\r\n\r\n");
-	if (boundary < 0) return undefined;
-	const header = raw.slice(0, boundary);
-	const body = raw.slice(boundary + 4);
-	if (/\r\ntransfer-encoding:\s*chunked(?:\r\n|$)/i.test(header)) {
-		return body.includes("\r\n0\r\n") ? parseResponse(raw) : undefined;
-	}
-	const length = Number(/\r\ncontent-length:\s*(\d+)(?:\r\n|$)/i.exec(header)?.[1]);
-	return Number.isSafeInteger(length) && Buffer.byteLength(body) >= length
-		? parseResponse(raw)
-		: undefined;
+/**
+ * Collects a raw response and completes it as soon as its framing allows.
+ *
+ * `push` throws when the response grows past {@link MAX_RESPONSE_BYTES}.
+ */
+function createResponseAccumulator() {
+	const chunks: Uint8Array[] = [];
+	let received = 0;
+	let headerEnd = -1;
+	let chunked = false;
+	let contentLength = Number.NaN;
+	let terminated = false;
+	let tail = Buffer.alloc(0);
+
+	const push = (chunk: Uint8Array): TokenResponse | undefined => {
+		chunks.push(chunk);
+		received += chunk.length;
+		if (received > MAX_RESPONSE_BYTES) {
+			throw new Error(
+				`Anthropic OAuth token endpoint response exceeded the ${MAX_RESPONSE_BYTES}-byte limit`,
+			);
+		}
+		// Scan only the new chunk plus a short overlap from the previous one; concatenating
+		// everything received so far on every chunk would make a large response quadratic.
+		const window = Buffer.concat([tail, chunk]);
+		const base = received - window.length;
+		tail = Buffer.from(window.subarray(Math.max(0, window.length - CHUNK_TERMINATOR.length)));
+		if (headerEnd < 0) {
+			const hit = window.indexOf(HEADER_BOUNDARY);
+			if (hit < 0) return undefined;
+			headerEnd = base + hit;
+			// Headers are parsed once, the moment their boundary is seen.
+			const header = Buffer.concat(chunks).subarray(0, headerEnd).toString();
+			chunked = /\r\ntransfer-encoding:\s*chunked(?:\r\n|$)/i.test(header);
+			contentLength = Number(/\r\ncontent-length:\s*(\d+)(?:\r\n|$)/i.exec(header)?.[1]);
+		}
+		if (chunked) {
+			if (!terminated) {
+				const bodyOffset = Math.max(headerEnd + 4, base) - base;
+				terminated = window.indexOf(CHUNK_TERMINATOR, bodyOffset) >= 0;
+			}
+			if (terminated) return parseResponse(Buffer.concat(chunks).toString());
+			return undefined;
+		}
+		if (Number.isSafeInteger(contentLength) && received - (headerEnd + 4) >= contentLength) {
+			return parseResponse(Buffer.concat(chunks).toString());
+		}
+		return undefined;
+	};
+
+	const text = (): string => Buffer.concat(chunks).toString();
+
+	return { push, text };
 }
 
 function dechunk(body: string): string {

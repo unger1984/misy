@@ -85,6 +85,35 @@ test("exchanges OAuth id_token identity and persists its authentication method",
 	});
 });
 
+test("drops unexpected token response fields from persisted credentials", async () => {
+	const idToken = jwt("workspace");
+	const issuer = fakeServer(({ pathname }) =>
+		pathname === "/oauth/token"
+			? Response.json({
+					access_token: "access",
+					refresh_token: "refresh",
+					id_token: idToken,
+					expires_in: 3600,
+					scope: "openid profile",
+					unexpected: { nested: true },
+				})
+			: new Response("not found", { status: 404 }),
+	);
+	const provider = new OpenAiProvider({ issuer, clientId: "test-client", codexBaseUrl: issuer });
+
+	const started = await provider.startAuth();
+	const completed = await provider.completeAuth(started.session, { code: "manual" });
+
+	expect(completed.credentials).toEqual({
+		access_token: "access",
+		refresh_token: "refresh",
+		id_token: idToken,
+		chatgpt_account_id: "workspace",
+		type: "oauth",
+		expires_at: expect.any(Number),
+	});
+});
+
 test("discovers models with headers, ordering, reasoning, and contexts", async () => {
 	let received: CapturedRequest | undefined;
 	const base = fakeServer((request) => {
@@ -443,4 +472,96 @@ test("expires abandoned OAuth and frees its callback port", async () => {
 
 	const retried = await provider.startAuth();
 	await provider.completeAuth(retried.session, { code: "manual" });
+});
+
+test("returns rotated credentials when usage silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		return Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+	});
+
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials({ expires_at: 0 }),
+	);
+
+	expect(report.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when usage does not refresh", async () => {
+	const base = fakeServer(() =>
+		Response.json({ rate_limit: { primary_window: { used_percent: 10 } } }),
+	);
+
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials(),
+	);
+
+	expect(report).not.toHaveProperty("credentials");
+});
+
+test("returns rotated credentials when a stream silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		return new Response("event: response.completed\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+
+	const result = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{
+			model_id: "gpt-5",
+			messages: [],
+			tools: [],
+			credentials: credentials({ expires_at: 0 }),
+		},
+		17,
+		() => {},
+	);
+
+	expect(result.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when a stream does not refresh", async () => {
+	const base = fakeServer(
+		() =>
+			new Response("event: response.completed\ndata: {}\n\n", {
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+
+	const result = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{ model_id: "gpt-5", messages: [], tools: [], credentials: credentials() },
+		18,
+		() => {},
+	);
+
+	expect(result).not.toHaveProperty("credentials");
+});
+
+test("fails a stream cut off mid-event without leaking a partial delta", async () => {
+	const base = fakeServer(
+		() =>
+			new Response(
+				'event: response.output_text.delta\ndata: {"delta":"hello"}\n\n' +
+					'event: response.output_text.delta\ndata: {"delta":"hel',
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		provider.streamChat(
+			{ model_id: "gpt-5.5", messages: [], tools: [], credentials: credentials() },
+			19,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow("OpenAI Responses stream ended mid-event");
+	expect(notifications).toEqual([
+		{ method: "text_delta", request_id: 19, delta: "hello" },
+		{ method: "failed", request_id: 19, message: "OpenAI Responses stream ended mid-event" },
+	]);
 });

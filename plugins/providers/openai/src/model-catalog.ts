@@ -1,6 +1,7 @@
 /** Discovers account-scoped Codex models and retains a bundled offline fallback. */
 
-import { authHeaders, fetchWithTimeout } from "./auth";
+import { fetchWithTimeout } from "@misy/provider-sdk";
+import { authHeaders } from "./auth";
 import type { ProviderConfig } from "./config";
 import type { Credentials } from "./types";
 

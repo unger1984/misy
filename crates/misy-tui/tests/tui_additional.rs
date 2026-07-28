@@ -4,8 +4,7 @@ mod support;
 
 use misy_core::{ModelId, ModelRef, ProviderId};
 use misy_tui::{
-    BrowserPlatform, TranscriptRow, TuiControl, UiAction, UiKey, UiState, browser_command,
-    validate_authorization_url,
+    BrowserPlatform, TranscriptRow, UiKey, browser_command, validate_authorization_url,
 };
 use ratatui::{
     Terminal,
@@ -13,10 +12,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use serde_json::json;
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use support::tui::{
     RecordingBrowser, authorize_first_provider, buffer_lines, core_with_providers, render_buffer,
     select_first_model, test_client, wait_for,
@@ -84,23 +80,25 @@ async fn renderer_shows_transcript_status_popup_and_cursor() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn startup_header_scrolls_away_with_earlier_transcript_content() {
-    let mut state = UiState::default();
-    let initial = buffer_lines(&render_buffer(&state, 72, 16), 72);
+    let (_temporary, mut client, _) = test_client().await;
+    let initial = buffer_lines(&render_buffer(client.state(), 72, 16), 72);
     assert!(initial.iter().any(|line| line.contains("Misy v")));
     assert!(initial.iter().any(|line| line.contains("Welcome back!")));
-    state.reduce(UiAction::AppendAssistantText(
-        (0..24)
-            .map(|index| format!("response line {index}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ));
-    let scrolled = buffer_lines(&render_buffer(&state, 72, 16), 72);
+    select_first_model(&mut client).await;
+    client.handle_input("burst").expect("submit burst");
+    wait_for(&mut client, |client| {
+        client.state().active_submission().is_none()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::AssistantText(text) if text.len() == 4_096))
+    })
+    .await;
+
+    let scrolled = buffer_lines(&render_buffer(client.state(), 72, 16), 72);
     assert!(!scrolled.iter().any(|line| line.contains("Misy v")));
-    assert!(
-        scrolled
-            .iter()
-            .any(|line| line.contains("response line 23"))
-    );
+    assert!(scrolled.iter().any(|line| line.contains("xxx")));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -309,16 +307,21 @@ async fn queued_prompts_render_separately_and_run_in_fifo_order() {
 async fn rapid_prompts_survive_event_result_interleaving_in_fifo_order() {
     let (_temporary, mut client, _) = test_client().await;
     select_first_model(&mut client).await;
-    let prompts = ["block-session", "session-one", "session-one", "session-one"];
+    let prompts = [
+        "block-session",
+        "session-one",
+        "session-one",
+        "session-one",
+        "session-one",
+    ];
     for prompt in prompts {
         client.handle_input(prompt).expect("queue prompt");
     }
 
+    // The preview and the transcript are projections of core acceptances, not of local input:
+    // before the `SubmissionAccepted` events are pumped, neither shows the submitted prompts.
     let preview = buffer_lines(&render_buffer(client.state(), 72, 30), 72);
-    for prompt in prompts {
-        assert!(preview.iter().any(|line| line.contains(prompt)));
-    }
-    assert!(preview.iter().any(|line| line.contains("more queued")));
+    assert!(preview.iter().all(|line| !line.contains('↳')));
     assert!(
         client
             .state()
@@ -351,6 +354,7 @@ async fn rapid_prompts_survive_event_result_interleaving_in_fifo_order() {
             .count(),
         3
     );
+    assert!(queued.iter().any(|line| line.contains("more queued")));
 
     client
         .handle_key(UiKey::Escape)
@@ -362,7 +366,7 @@ async fn rapid_prompts_survive_event_result_interleaving_in_fifo_order() {
             .iter()
             .filter(|row| matches!(row, TranscriptRow::AssistantText(text) if text == "one"))
             .count()
-            == 3
+            == 4
             && client.state().active_submission().is_none()
     })
     .await;
@@ -383,7 +387,7 @@ async fn rapid_prompts_survive_event_result_interleaving_in_fifo_order() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(assistant_messages, ["one", "one", "one"]);
+    assert_eq!(assistant_messages, ["one", "one", "one", "one"]);
     assert_eq!(
         rows.iter()
             .filter(
@@ -470,17 +474,20 @@ async fn escape_cancels_the_core_head_when_tui_events_are_stale() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn second_escape_after_timeout_advances_instead_of_clearing_the_queue() {
+async fn escape_cancels_only_the_active_head_and_keeps_the_queue() {
     let (_temporary, mut client, _) = test_client().await;
     select_first_model(&mut client).await;
+    // The first two prompts use one-second fixture replies so each Escape lands while its
+    // submission is still active; the fixture answers requests strictly in order, so the third
+    // answer arrives only after both cancelled sleeps drain (~2s), well inside the deadline.
     client
-        .handle_input("queue-timeout-first")
+        .handle_input("queue-drain-first")
         .expect("start first prompt");
     client
-        .handle_input("queue-timeout-second")
+        .handle_input("queue-drain-second")
         .expect("queue second prompt");
     client
-        .handle_input("queue-timeout-third")
+        .handle_input("queue-drain-third")
         .expect("queue third prompt");
     tokio::time::sleep(Duration::from_millis(10)).await;
     client.pump_events();
@@ -489,11 +496,12 @@ async fn second_escape_after_timeout_advances_instead_of_clearing_the_queue() {
         .expect("cancel first prompt");
     wait_for(&mut client, |client| {
         client.state().transcript().iter().any(
-            |row| matches!(row, TranscriptRow::UserPrompt(text) if text == "queue-timeout-second"),
+            |row| matches!(row, TranscriptRow::UserPrompt(text) if text == "queue-drain-second"),
         )
     })
     .await;
-    thread::sleep(Duration::from_millis(1_100));
+    // Escape has no queue-clearing timeout, so an immediate second press must cancel only the
+    // new head and leave the third prompt queued.
     client
         .handle_key(UiKey::Escape)
         .expect("cancel only the second prompt");
@@ -541,16 +549,15 @@ async fn bounded_event_pump_keeps_ctrl_c_responsive() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(client.pump_events(), 256);
     let started = Instant::now();
-    assert_eq!(client.handle_ctrl_c(), TuiControl::Continue);
+    client.handle_ctrl_c();
+    assert!(!client.state().should_exit());
     assert!(started.elapsed() < Duration::from_secs(1));
     wait_for(&mut client, |client| {
         client.state().active_submission().is_none()
     })
     .await;
-    assert_eq!(
-        client.handle_input("/exit").expect("clean shutdown"),
-        TuiControl::Exit
-    );
+    client.handle_input("/exit").expect("clean shutdown");
+    assert!(client.state().should_exit());
 }
 
 #[tokio::test(flavor = "current_thread")]

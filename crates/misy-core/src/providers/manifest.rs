@@ -1,5 +1,9 @@
+//! Provider package manifests (`misy-plugin.json`): parsing, contract validation, and
+//! filesystem discovery of bundled and installed packages. Validation happens before any
+//! subprocess starts, so unknown protocol revisions, duplicate provider IDs, and malformed
+//! manifests surface as discovery errors rather than runtime failures.
 use super::protocol::PROVIDER_PROTOCOL_VERSION;
-use crate::ProviderId;
+use crate::{ProviderDisplayName, ProviderId};
 use semver::Version;
 use serde::Deserialize;
 use std::{
@@ -15,7 +19,7 @@ pub struct ProviderManifest {
     /// Stable provider identifier used by the core and credential store.
     pub id: ProviderId,
     /// The provider name displayed to users.
-    pub display_name: String,
+    pub display_name: ProviderDisplayName,
     /// Provider package semantic version.
     pub version: Version,
     /// Package kind; provider packages must use `provider`.
@@ -90,7 +94,7 @@ impl ProviderPackage {
 /// The set of providers available without starting any subprocesses.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderCatalog {
-    packages: BTreeMap<String, ProviderPackage>,
+    packages: BTreeMap<ProviderId, ProviderPackage>,
 }
 
 impl ProviderCatalog {
@@ -107,7 +111,7 @@ impl ProviderCatalog {
         let mut packages = BTreeMap::new();
         for root in [bundled_root, installed_root] {
             for package in discover_root(root)? {
-                let id = package.manifest.id.as_str().to_owned();
+                let id = package.manifest.id.clone();
                 if packages.insert(id.clone(), package).is_some() {
                     return Err(ProviderDiscoveryError::DuplicateProvider(id));
                 }
@@ -117,7 +121,7 @@ impl ProviderCatalog {
     }
 
     /// Returns a package by stable provider ID.
-    pub fn get(&self, id: &str) -> Option<&ProviderPackage> {
+    pub fn get(&self, id: &ProviderId) -> Option<&ProviderPackage> {
         self.packages.get(id)
     }
 
@@ -127,6 +131,8 @@ impl ProviderCatalog {
     }
 
     /// Reports whether discovery found no packages.
+    // Present whenever the catalog is exported so the public `len` keeps its `is_empty` companion.
+    #[cfg(feature = "test-support")]
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
@@ -172,20 +178,28 @@ fn validate_manifest(
     manifest: &ProviderManifest,
     path: &Path,
 ) -> Result<(), ProviderDiscoveryError> {
+    validate_required_fields(manifest, path)?;
+    validate_protocol_version(manifest)?;
+    validate_capabilities(manifest, path)?;
+    validate_auth_methods(manifest, path)?;
+    Ok(())
+}
+
+fn validate_required_fields(
+    manifest: &ProviderManifest,
+    path: &Path,
+) -> Result<(), ProviderDiscoveryError> {
     if manifest.id.as_str().is_empty()
-        || manifest.display_name.trim().is_empty()
+        || manifest.display_name.as_str().trim().is_empty()
         || manifest.command.trim().is_empty()
     {
-        return Err(ProviderDiscoveryError::InvalidManifestValue {
-            path: path.to_owned(),
-            message: "id, display_name, and command must not be empty".to_owned(),
-        });
+        return Err(invalid_value(
+            path,
+            "id, display_name, and command must not be empty",
+        ));
     }
     if manifest.kind != "provider" {
-        return Err(ProviderDiscoveryError::InvalidManifestValue {
-            path: path.to_owned(),
-            message: "kind must be `provider`".to_owned(),
-        });
+        return Err(invalid_value(path, "kind must be `provider`"));
     }
     if [
         &manifest.description,
@@ -197,47 +211,72 @@ fn validate_manifest(
     .into_iter()
     .any(|value| value.trim().is_empty())
     {
-        return Err(ProviderDiscoveryError::InvalidManifestValue {
-            path: path.to_owned(),
-            message: "description, author, homepage, repository, and license must not be empty"
-                .to_owned(),
-        });
+        return Err(invalid_value(
+            path,
+            "description, author, homepage, repository, and license must not be empty",
+        ));
     }
+    Ok(())
+}
+
+fn validate_protocol_version(manifest: &ProviderManifest) -> Result<(), ProviderDiscoveryError> {
     if manifest.protocol_version != PROVIDER_PROTOCOL_VERSION {
         return Err(ProviderDiscoveryError::UnsupportedProtocol {
             id: manifest.id.as_str().to_owned(),
             found: manifest.protocol_version,
         });
     }
+    Ok(())
+}
+
+fn validate_capabilities(
+    manifest: &ProviderManifest,
+    path: &Path,
+) -> Result<(), ProviderDiscoveryError> {
     if manifest
         .capabilities
         .iter()
         .any(|(id, capability)| id.trim().is_empty() || capability.version == 0)
     {
-        return Err(ProviderDiscoveryError::InvalidManifestValue {
-            path: path.to_owned(),
-            message: "capabilities must have non-empty IDs and positive versions".to_owned(),
-        });
+        return Err(invalid_value(
+            path,
+            "capabilities must have non-empty IDs and positive versions",
+        ));
     }
+    Ok(())
+}
+
+fn validate_auth_methods(
+    manifest: &ProviderManifest,
+    path: &Path,
+) -> Result<(), ProviderDiscoveryError> {
+    let has_unique_ids = manifest
+        .auth_methods
+        .iter()
+        .map(|method| method.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == manifest.auth_methods.len();
     if manifest.auth_methods.is_empty()
         || manifest
             .auth_methods
             .iter()
             .any(|method| method.id.trim().is_empty() || method.display_name.trim().is_empty())
-        || manifest
-            .auth_methods
-            .iter()
-            .map(|method| method.id.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != manifest.auth_methods.len()
+        || !has_unique_ids
     {
-        return Err(ProviderDiscoveryError::InvalidManifestValue {
-            path: path.to_owned(),
-            message: "auth_methods must contain unique, non-empty IDs and display names".to_owned(),
-        });
+        return Err(invalid_value(
+            path,
+            "auth_methods must contain unique, non-empty IDs and display names",
+        ));
     }
     Ok(())
+}
+
+fn invalid_value(path: &Path, message: &str) -> ProviderDiscoveryError {
+    ProviderDiscoveryError::InvalidManifestValue {
+        path: path.to_owned(),
+        message: message.to_owned(),
+    }
 }
 
 /// Errors reported while discovering and validating provider packages.
@@ -260,7 +299,7 @@ pub enum ProviderDiscoveryError {
         message: String,
     },
     /// More than one package declared the same provider ID.
-    DuplicateProvider(String),
+    DuplicateProvider(ProviderId),
     /// A package requires a protocol revision this host does not implement.
     UnsupportedProtocol {
         /// Provider declaring the unsupported revision.
@@ -288,7 +327,9 @@ impl fmt::Display for ProviderDiscoveryError {
                     path.display()
                 )
             }
-            Self::DuplicateProvider(id) => write!(formatter, "duplicate provider ID `{id}`"),
+            Self::DuplicateProvider(id) => {
+                write!(formatter, "duplicate provider ID `{}`", id.as_str())
+            }
             Self::UnsupportedProtocol { id, found } => write!(
                 formatter,
                 "provider `{id}` requires unsupported protocol version {found}"

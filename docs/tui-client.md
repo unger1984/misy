@@ -86,13 +86,15 @@ model, authentication, session, and tool orchestration remain in the core.
 - Transcript rows use semantic styling: dim user prompts and service messages, normal assistant
   text, structured tool calls with indented results, and red failures. An active submission adds an
   animated one-line spinner with elapsed time and the `esc to interrupt` hint above the composer.
-- Entered prompts immediately join a bounded local queue preview above the composer, then enter
-  the transcript when the core starts them. The client serializes submission requests before
-  handing them to the core, maps each prompt by its submission ID rather than its text, and buffers
-  turn events that arrive before that mapping. Thus repeated identical prompts remain distinct,
-  FIFO transcript entries and no assistant output can be merged or misplaced by event/result
-  interleaving. Before the first assistant text the activity row says `Thinking…`; once text
-  begins it says `Responding…`.
+- Entered prompts join a bounded queue preview above the composer once the core accepts them:
+  the core emits a self-sufficient `SubmissionAccepted` event — carrying the submission ID and
+  the message — under the queue lock before enqueueing, so acceptances arrive in FIFO order and
+  before any other event for the same submission. The client maps each prompt by its submission
+  ID from that event alone and never reconstructs the prompt or the submission order from the
+  asynchronous submit result. Accepted prompts enter the transcript when the core starts them.
+  Thus repeated identical prompts remain distinct, FIFO transcript entries and no assistant
+  output can be merged or misplaced by event/result interleaving. Before the first assistant
+  text the activity row says `Thinking…`; once text begins it says `Responding…`.
 
 ## Lifecycle and Safety
 

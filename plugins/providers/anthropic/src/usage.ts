@@ -1,5 +1,5 @@
 /** Anthropic subscription usage retrieval and normalization. */
-import { fetchWithTimeout } from "./auth";
+import { fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import type { Credentials } from "./types";
 
@@ -10,6 +10,9 @@ type UsageLimit = {
 	window?: { duration_ms?: number; resets_at?: number };
 	status: "ok" | "warning" | "exhausted";
 };
+
+/** A normalized usage capability version 1 report. */
+export type UsageReport = { fetched_at: number; limits: UsageLimit[] };
 
 /** HTTP failure from the Claude usage endpoint. */
 export class UsageRequestError extends Error {
@@ -26,12 +29,14 @@ const WINDOWS = [
 	["seven_day_sonnet", "seven-day-sonnet", "7 day Sonnet limit", 7 * 24 * 60 * 60 * 1000],
 ] as const;
 
-/** Fetches Claude account limits and translates the OAuth usage response to capability version 1. */
+/**
+ * Fetches Claude account limits and translates the OAuth usage response to capability version 1.
+ */
 export async function fetchUsage(
 	config: ProviderConfig,
 	credentials: Credentials,
 	signal?: AbortSignal,
-): Promise<{ fetched_at: number; limits: UsageLimit[] }> {
+): Promise<UsageReport> {
 	const response = await fetchWithTimeout(
 		usageUrl(config.apiBaseUrl),
 		{

@@ -1,4 +1,4 @@
-/** Configuration values kept at the network edge, with test-only environment overrides. */
+/** Configuration values kept at the network edge, with supported user environment overrides. */
 
 /** Runtime endpoint and deadline configuration for the Anthropic provider. */
 export type ProviderConfig = {
@@ -10,7 +10,15 @@ export type ProviderConfig = {
 	requestTimeoutMs: number;
 };
 
-/** Production defaults for the Claude subscription OAuth client. */
+/**
+ * Production defaults for the Claude subscription OAuth client.
+ *
+ * Every field is overridable from the plugin process environment. This is a supported
+ * user feature — for routing through a proxy or gateway, or for debugging — not a
+ * test-only hook: `MISY_ANTHROPIC_AUTHORIZE_URL`, `MISY_ANTHROPIC_API_BASE_URL`,
+ * `MISY_ANTHROPIC_CLIENT_ID`, `MISY_ANTHROPIC_OAUTH_SCOPES`,
+ * `MISY_ANTHROPIC_AUTH_TIMEOUT_MS`, `MISY_ANTHROPIC_REQUEST_TIMEOUT_MS`.
+ */
 export const DEFAULT_CONFIG: ProviderConfig = {
 	authorizeUrl: process.env["MISY_ANTHROPIC_AUTHORIZE_URL"] ?? "https://claude.ai/oauth/authorize",
 	apiBaseUrl: process.env["MISY_ANTHROPIC_API_BASE_URL"] ?? "https://api.anthropic.com",

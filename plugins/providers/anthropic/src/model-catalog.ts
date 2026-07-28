@@ -1,5 +1,5 @@
 /** Dynamic Anthropic model discovery with an offline bundled fallback catalog. */
-import { fetchWithTimeout } from "./auth";
+import { endpointUrl, fetchWithTimeout, preferredDefaultModel } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import { type Credentials, isRecord, type Json } from "./types";
 
@@ -28,7 +28,7 @@ export async function listModels(
 ): Promise<Model[]> {
 	try {
 		const response = await fetchWithTimeout(
-			endpoint(config.apiBaseUrl, "v1/models"),
+			endpointUrl(config.apiBaseUrl, "v1/models"),
 			{
 				method: "GET",
 				headers: discoveryHeaders(credentials),
@@ -44,8 +44,7 @@ export async function listModels(
 
 /** Chooses a declared default only when that model is in the dynamic catalog. */
 export function defaultModel(models: readonly Model[]): string | undefined {
-	if (models.some((model) => model.id === DEFAULT_MODEL_ID)) return DEFAULT_MODEL_ID;
-	return models[0]?.id;
+	return preferredDefaultModel(models, DEFAULT_MODEL_ID);
 }
 
 function discoveryHeaders(credentials: Credentials): Record<string, string> {
@@ -85,8 +84,4 @@ function contextWindow(id: string): number {
 
 function bundledModels(): Model[] {
 	return BUNDLED_MODELS.map((model) => ({ ...model }));
-}
-
-function endpoint(baseUrl: string, path: string): URL {
-	return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }

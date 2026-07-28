@@ -31,6 +31,12 @@ flowchart LR
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
+- `config.toml`, the credential files, and `models.json` each carry a format version, but no
+  migration path is implemented yet: a version mismatch is rejected (`UnsupportedVersion`) or
+  treated as empty. This is an accepted MVP trade-off — the first version bump of any of these
+  formats MUST ship with a migration (or an explicit reset-with-notice policy), because silently
+  rejecting the previous format would log every user out and drop the model catalog on a routine
+  upgrade.
 - `misy-core` is an async Tokio library. It owns a private multi-thread Tokio runtime so provider
   supervision and queued work survive callers using another runtime or dropping an operation
   future. Its public async operations are safe to call from a client's runtime.

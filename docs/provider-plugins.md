@@ -8,6 +8,7 @@
 - [Protocol Version 2](#protocol-version-2)
 - [Optional Capabilities](#optional-capabilities)
 - [Responsibilities](#responsibilities)
+- [Environment Overrides](#environment-overrides)
 - [Change Impact](#change-impact)
 - [Sources of Truth](#sources-of-truth)
 
@@ -23,7 +24,25 @@ when bundled or the matching user plugin directory when installed. It contains `
 documentation, a license, language-native build metadata/lockfiles, source, and tests.
 
 Plugins may use any language that can run as a process and speak the protocol. Bun is the
-implementation choice for `openai`, not a global host dependency.
+implementation choice for the bundled `openai`, `anthropic`, and `kimi` packages, not a global
+host dependency.
+
+### Shared TypeScript SDK
+
+The TypeScript providers share an optional implementation library at `plugins/providers/_sdk/`
+(published nowhere; imported as `@misy/provider-sdk`). It owns the NDJSON transport, the JSON-RPC
+envelope and error codes, protocol-method dispatch with strict parameter validation, and helpers
+such as `fetchWithTimeout`. Each TypeScript plugin's `src/index.ts` only wires its provider
+adapter to `serve(...)` from that library.
+
+The SDK is **not** part of the protocol: plugins in other languages implement the same JSON-RPC
+contract independently, and a plugin that outgrows the SDK may do the same. Every plugin remains a
+separate process with its own `misy-plugin.json`, spawned exactly as before.
+
+Plugins consume the SDK as a local `file:../_sdk` dependency declared in their `package.json`.
+Bun copies `file:` dependencies into the plugin's `node_modules` on `bun install`, so an installed
+plugin directory stays self-contained; after editing `_sdk`, re-run `bun install` in each plugin
+to refresh the copy.
 
 ## Discovery and Lifecycle
 
@@ -68,6 +87,13 @@ empty completion object; prompt clients place entered values in `completion` by 
 
 Adding an optional result field is backward compatible. Adding or renaming a required field,
 method, or event requires a protocol version change.
+
+Any successful result may carry an optional top-level `credentials` object with replacement opaque
+credentials. A provider includes it when serving the request silently refreshed or rotated tokens
+(for example inside `usage.get` or `chat.start`, where refresh-token rotation would otherwise
+invalidate the stored credential), and omits it when no refresh occurred. The core persists such
+credentials exactly like an `auth.refresh` result and removes the field before the result is
+validated or exposed to clients.
 
 Streaming notifications are `text_delta`, `tool_call`, `completed`, and `failed`. Every stream
 notification carries the numeric `request_id` of its `chat.start`; cancellation carries
@@ -148,13 +174,55 @@ provider error details.
 ## Responsibilities
 
 - Rust stores opaque provider credentials, redacts them from public results/errors, and supplies
-  them when needed.
+  them when needed. Remote error messages are additionally capped at the wire boundary and
+  stripped of secret-shaped fragments (`Bearer` tokens and `authorization`/`x-api-key` header
+  values), while their wording remains the provider's own. On-disk protection is Unix-only: the
+  credential file is written atomically with `0600` and `~/.misy` is forced to `0700`; on Windows
+  the file inherits the ambient ACL, so restricting access there is left to the user's
+  environment.
 - A provider implements its own authentication, refresh, account status, model discovery, request
   mapping, stream parsing, and (when declared) usage endpoint/header selection and response
   normalization.
 - A provider never reads another client's credential files and never executes Misy's local tools.
 - Local tools are advertised and executed by the Rust core; normalized results are returned to the
   provider loop.
+
+## Environment Overrides
+
+Each provider package reads its endpoint and timeout defaults from the process environment before
+falling back to production values. This is a supported user feature — for routing through a proxy
+or gateway, or for debugging — not a test-only hook. A plugin inherits the environment of the core
+process that spawns it, which in turn inherits the user's shell environment; the core does not
+inspect or forward these variables. Timeout variables accept positive integers (milliseconds) and
+fall back to the default on any other value.
+
+**openai** (`plugins/providers/openai/src/config.ts`)
+
+- `MISY_OPENAI_AUTH_ISSUER` — OAuth issuer base URL.
+- `MISY_OPENAI_CLIENT_ID` — OAuth client ID.
+- `MISY_OPENAI_BASE_URL` — ChatGPT backend base URL.
+- `MISY_OPENAI_OAUTH_SCOPES` — space-separated OAuth scopes.
+- `MISY_OPENAI_ORIGINATOR` — originator value sent to the backend.
+- `MISY_OPENAI_CLIENT_VERSION` — client version reported to the backend.
+- `MISY_OPENAI_AUTH_TIMEOUT_MS` — deadline for the OAuth flow (default 300000).
+- `MISY_OPENAI_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+
+**anthropic** (`plugins/providers/anthropic/src/config.ts`)
+
+- `MISY_ANTHROPIC_AUTHORIZE_URL` — OAuth authorization URL.
+- `MISY_ANTHROPIC_API_BASE_URL` — API base URL.
+- `MISY_ANTHROPIC_CLIENT_ID` — OAuth client ID.
+- `MISY_ANTHROPIC_OAUTH_SCOPES` — space-separated OAuth scopes.
+- `MISY_ANTHROPIC_AUTH_TIMEOUT_MS` — deadline for the OAuth flow (default 300000).
+- `MISY_ANTHROPIC_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+
+**kimi** (`plugins/providers/kimi/src/config.ts`)
+
+- `MISY_KIMI_AUTH_BASE_URL` — OAuth base URL.
+- `MISY_KIMI_API_BASE_URL` — API base URL.
+- `MISY_KIMI_CLIENT_ID` — OAuth client ID.
+- `MISY_KIMI_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+- `MISY_KIMI_DATA_DIR` — plugin data directory (default `~/.local/share/misy/kimi`).
 
 ## Change Impact
 

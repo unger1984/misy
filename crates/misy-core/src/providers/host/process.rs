@@ -1,10 +1,10 @@
 //! Provider subprocess lifecycle and asynchronous stdin/stdout transport.
 
 use super::{
-    PendingFailure,
-    router::{ProviderSubscriber, TransportStateLock, fail_pending, route_message},
+    PendingFailure, ProviderEvent,
+    router::{TransportStateLock, fail_pending, route_message},
 };
-use crate::{ProviderError, ProviderId, ProviderPackage, ProviderRequestId};
+use crate::{ProviderError, ProviderId, ProviderPackage, ProviderRequestId, fanout::Fanout};
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use serde_json::{Value, json};
 use std::{
@@ -14,14 +14,19 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStdin, Command},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{ChildStdin, ChildStdout, Command},
     runtime::Handle,
     sync::{Mutex as AsyncMutex, oneshot, watch},
     time::timeout,
 };
 
 const REAPER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard cap on one newline-delimited protocol message. Legitimate messages are far smaller
+/// (the usage capability caps reports at 64 KiB), so 8 MiB is generous headroom that still
+/// stops a provider streaming without a newline from growing the core's memory without bound.
+const MAX_PROTOCOL_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Owns one provider child and the state required to route its JSON-RPC responses.
 #[derive(Debug)]
@@ -44,7 +49,7 @@ impl ProviderProcess {
     pub(super) fn start(
         provider: ProviderId,
         package: &ProviderPackage,
-        subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
+        subscribers: Arc<Fanout<ProviderEvent>>,
         task_handle: &Handle,
     ) -> Result<Self, ProviderError> {
         let mut command = Command::new(&package.manifest().command);
@@ -161,6 +166,7 @@ impl ProviderProcess {
             .pending
             .remove(&id.get());
         if let Some(sender) = pending {
+            // The waiter may have dropped its receiver after a racing response; cancel stands.
             let _ = sender.send(Err(PendingFailure::Cancelled));
         }
         self.send_notification("chat.cancel", json!({ "request_id": id.get() }))
@@ -169,11 +175,13 @@ impl ProviderProcess {
 
     pub(super) async fn fail(&self, failure: PendingFailure) {
         if fail_pending(&self.state, &failure) {
+            // Pending requests are already failed; kill_on_drop and Drop reap the child anyway.
             let _ = self.begin_termination().await;
         }
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), ProviderError> {
+        // The shutdown notice is a courtesy; termination below does not depend on its delivery.
         let _ = self.send_notification("misy.shutdown", Value::Null).await;
         self.fail(PendingFailure::Shutdown).await;
         self.begin_termination()
@@ -234,34 +242,18 @@ impl ProviderProcess {
 
 async fn reader_loop(
     provider: ProviderId,
-    stdout: tokio::process::ChildStdout,
+    stdout: ChildStdout,
     io: Arc<AsyncMutex<ProcessIo>>,
     child: Arc<Mutex<Option<AsyncGroupChild>>>,
     state: TransportStateLock,
-    subscribers: Arc<Mutex<Vec<ProviderSubscriber>>>,
+    subscribers: Arc<Fanout<ProviderEvent>>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => {
-                fail_and_reap(
-                    &state,
-                    &io,
-                    &child,
-                    PendingFailure::Transport("provider closed stdout".to_owned()),
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                fail_and_reap(
-                    &state,
-                    &io,
-                    &child,
-                    PendingFailure::Transport(error.to_string()),
-                )
-                .await;
+        let line = match read_protocol_line(&mut reader).await {
+            Ok(line) => line,
+            Err(failure) => {
+                fail_and_reap(&state, &io, &child, failure).await;
                 return;
             }
         };
@@ -285,6 +277,28 @@ async fn reader_loop(
     }
 }
 
+/// Reads one protocol line with a hard size cap. Reading through `take` bounds how much a
+/// single line accumulates; once the process is reaped anyway, the unread remainder of an
+/// oversized line does not matter, so it is deliberately not drained. End of stream is an
+/// error: the transport cannot outlive the provider's stdout.
+async fn read_protocol_line(reader: &mut BufReader<ChildStdout>) -> Result<String, PendingFailure> {
+    let mut line = String::new();
+    let read = reader
+        .take(MAX_PROTOCOL_LINE_BYTES + 1)
+        .read_line(&mut line)
+        .await;
+    match read {
+        Ok(0) => Err(PendingFailure::Transport(
+            "provider closed stdout".to_owned(),
+        )),
+        Ok(_) if line.len() > MAX_PROTOCOL_LINE_BYTES as usize => Err(PendingFailure::Protocol(
+            format!("protocol line exceeds the {MAX_PROTOCOL_LINE_BYTES}-byte limit"),
+        )),
+        Ok(_) => Ok(line),
+        Err(error) => Err(PendingFailure::Transport(error.to_string())),
+    }
+}
+
 async fn fail_and_reap(
     state: &TransportStateLock,
     io: &Arc<AsyncMutex<ProcessIo>>,
@@ -292,6 +306,7 @@ async fn fail_and_reap(
     failure: PendingFailure,
 ) {
     if fail_pending(state, &failure) {
+        // Pending requests are already failed; kill_on_drop and Drop reap the child anyway.
         let _ = begin_termination(io, child).await;
     }
 }
@@ -357,10 +372,12 @@ fn spawn_cleanup_owner(
                         .map_err(|error| error.to_string())
                 });
             if let Some(completion_sender) = completion_for_owner {
+                // Fails only when no reaper waiter remains; the child is already reaped.
                 let _ = completion_sender.send(Some(result));
             }
         });
     if let (Err(error), Some(completion_sender)) = (thread, completion_sender) {
+        // Fails only when no reaper waiter remains to observe the spawn failure.
         let _ = completion_sender.send(Some(Err(error.to_string())));
     }
 }

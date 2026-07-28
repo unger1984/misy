@@ -38,6 +38,8 @@ failed() {
 auth_status() {
   case "$target" in
     *slow-status*) sleep 2 ;;
+    # Denies the status query even though stored credentials are injected.
+    *status-unauthenticated*) reply '{"authenticated":false}' && return ;;
   esac
   case "$line" in
     *'"credentials"'*) reply '{"authenticated":true}' ;;
@@ -92,9 +94,17 @@ auth_complete() {
         '{"nested":{"credentials":{"access":"secret"}}}}}'
       printf '\n'
       ;;
+    *'"session":{"id":"bearer-error"}'*)
+      printf '{"jsonrpc":"2.0","id":%s,"error":' "$id"
+      printf '%s\n' \
+        '{"code":401,"message":"upstream denied: authorization: Bearer sk-fixture-leaked-token-0123456789"}}'
+      ;;
     *'"session":{"id":"pending-a"}'*)
       sleep 2
       reply '{"credentials":{"type":"oauth","access":"opaque"}}'
+      ;;
+    *'"session":{"id":"no-credentials"}'*)
+      reply '{}'
       ;;
     *'"session":{"id":"expired"}'*)
       reply \
@@ -139,6 +149,11 @@ models_list() {
     *slow-models*|*slow-bad-models*) sleep 1 ;;
   esac
   case "$target" in
+    *slow-bad-models*)
+      reply '{}'
+      # Cancellation tests await this marker instead of guessing the delay with sleeps.
+      touch "$target.responded"
+      ;;
     *bad-models*) reply '{}' ;;
     *explicit-default*)
       reply \
@@ -171,6 +186,14 @@ usage_get() {
         '{"fetched_at":1795000000000,"limits":[],' \
         '"raw":{"access_token":"must-not-escape"}}'
       ;;
+    *usage-rotate*)
+      reply \
+        '{"fetched_at":1795000000000,"limits":[' \
+        '{"id":"five-hour","label":"5 hour limit","amount":' \
+        '{"used":42,"limit":100,"remaining":58,"unit":"percent"}}],' \
+        '"credentials":{"type":"oauth","access":"usage-rotated",' \
+        '"refresh_token":"usage-rotated-refresh"}}'
+      ;;
     *)
       reply \
         '{"fetched_at":1795000000000,"limits":[' \
@@ -191,18 +214,21 @@ chat_start() {
       ;;
   esac
   case "$line" in
-    *'"content":"queue-timeout-third"'*)
+    # Ordered most-recent prompt first: a chat request carries the whole history, so the
+    # newest message's branch must win the pattern match. The cancelled pair keeps short
+    # sleeps so a queued third answer drains well inside the test deadline.
+    *'"content":"queue-drain-third"'*)
       text two
       complete
       reply '{}'
       ;;
-    *'"content":"queue-timeout-second"'*)
-      sleep 2
+    *'"content":"queue-drain-second"'*)
+      sleep 1
       complete
       reply '{}'
       ;;
-    *'"content":"queue-timeout-first"'*)
-      sleep 2
+    *'"content":"queue-drain-first"'*)
+      sleep 1
       complete
       reply '{}'
       ;;
@@ -299,6 +325,15 @@ chat_start() {
       failed 'fixture failure'
       reply '{}'
       ;;
+    *'"content":"leak-bearer-error"'*)
+      failed 'upstream 401: Bearer sk-fixture-leaked-chat-token-0123456789'
+      reply '{}'
+      ;;
+    *'"content":"huge-error"'*)
+      pad=$(printf '%2100s' '' | tr ' ' 'h')
+      failed "portal error page: $pad"
+      reply '{}'
+      ;;
     *'"content":"burst"'*)
       count=0
       while [ "$count" -lt 4096 ]; do
@@ -343,6 +378,14 @@ chat_start() {
       sleep 2
       reply '{}'
       ;;
+    *'"content":"rotate-credentials-chat"'*)
+      text rotated
+      complete
+      reply \
+        '{"metadata":{"turn":"one"},' \
+        '"credentials":{"type":"oauth","access":"chat-rotated",' \
+        '"refresh_token":"chat-rotated-refresh"}}'
+      ;;
     *) reply '{}' ;;
   esac
 }
@@ -355,10 +398,17 @@ while IFS= read -r line; do
     *'"method":"auth.complete"'*) auth_complete ;;
     *'"method":"auth.refresh"'*)
       sleep 1
-      reply \
-        '{"credentials":{"type":"oauth","access":"refreshed-opaque",' \
-        '"expires_at":4102444800000},' \
-        '"nested":{"credentials":{"access":"refresh-secret"}}}'
+      case "$target" in
+        # A credential-less refresh result: invalid for credentialed providers, the
+        # legitimate shape for a `none`-flow provider that holds no credentials.
+        *refresh-no-credentials*|*auth-none*) reply '{}' ;;
+        *)
+          reply \
+            '{"credentials":{"type":"oauth","access":"refreshed-opaque",' \
+            '"expires_at":4102444800000},' \
+            '"nested":{"credentials":{"access":"refresh-secret"}}}'
+          ;;
+      esac
       ;;
     *'"method":"auth.logout"'*) reply '{}' ;;
     *'"method":"models.list"'*) models_list ;;

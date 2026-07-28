@@ -18,6 +18,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 .available_models()
                 .await
                 .map_err(|error| error.to_string());
+            // A closed channel means the client is gone, so the result has nowhere to land.
             let _ = sender.send(ProviderOperationResult::Models(generation, result));
         });
     }

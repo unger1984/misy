@@ -50,6 +50,7 @@ impl PromptHistoryStore {
                 .map(|entry| entry.text)
                 .collect()
         });
+        // The OS releases the lock when the file closes, so an unlock failure cannot hold it.
         let _ = file.unlock();
         result
     }
@@ -60,6 +61,7 @@ impl PromptHistoryStore {
         }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
+            ensure_private_dir_permissions(parent)?;
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).append(true);
@@ -69,6 +71,7 @@ impl PromptHistoryStore {
         ensure_private_permissions(&file)?;
         lock_exclusive(&file)?;
         let result = append_locked(&mut file, text);
+        // The OS releases the lock when the file closes, so an unlock failure cannot hold it.
         let _ = file.unlock();
         result
     }
@@ -103,6 +106,7 @@ fn read_entries(file: &mut File) -> io::Result<Vec<StoredPrompt>> {
     file.seek(SeekFrom::Start(0))?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
+    // A malformed line loses only that entry; failing the whole read would drop valid history.
     Ok(contents
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -145,6 +149,24 @@ fn ensure_private_permissions(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
+// The history lives in the Misy data directory, which is tightened to the `~/.ssh` convention
+// because prompt history and provider metadata are not meant for other local users. Runs on
+// every append, not only on creation, to remediate directories left at umask defaults by
+// older versions.
+#[cfg(unix)]
+fn ensure_private_dir_permissions(directory: &std::path::Path) -> io::Result<()> {
+    let metadata = fs::metadata(directory)?;
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_dir_permissions(_directory: &std::path::Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,14 +182,24 @@ mod tests {
 
         assert_eq!(store.load().expect("load history"), ["first\nsecond"]);
         #[cfg(unix)]
-        assert_eq!(
-            fs::metadata(&store.path)
-                .expect("history metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        {
+            assert_eq!(
+                fs::metadata(&store.path)
+                    .expect("history metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(store.path.parent().expect("history parent directory"))
+                    .expect("history directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]

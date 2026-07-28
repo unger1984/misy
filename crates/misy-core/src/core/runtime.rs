@@ -76,6 +76,7 @@ impl RuntimeControl {
             return;
         }
         // Drop cannot await: callers may release the last core handle from an arbitrary runtime.
+        // An elapsed grace only means teardown is slow; the runtime is dropped either way.
         let _ = wake
             .wait_timeout(completed, DROP_SHUTDOWN_GRACE)
             .expect("runtime completion mutex must not be poisoned");
@@ -109,12 +110,14 @@ fn run_runtime_owner(
 ) {
     runtime.block_on(async move {
         if !*shutdown.borrow() {
+            // A closed watch means the control side is gone, which itself implies shutdown.
             let _ = shutdown.changed().await;
         }
         state.shutdown_services().await;
     });
     runtime.shutdown_timeout(DROP_SHUTDOWN_GRACE);
     // Completion is visible only after runtime-owned tasks have received their bounded teardown.
+    // The send fails only when no control handle remains to observe it.
     let _ = completion.send(true);
     let (complete, wake) = &**completed;
     *complete

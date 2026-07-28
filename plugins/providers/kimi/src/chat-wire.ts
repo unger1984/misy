@@ -136,7 +136,9 @@ function emitTools(tools: Map<number, ToolAccumulator>, requestId: number, notif
 function parseToolArguments(raw: string): Json {
 	if (!raw.trim()) return {};
 	try {
-		return JSON.parse(raw) as Json;
+		// JSON.parse can only produce Json values, so the return type states a fact;
+		// the wrapper exists to shed parse's `any` without an `as` cast on boundary data.
+		return JSON.parse(raw);
 	} catch {
 		return { raw };
 	}

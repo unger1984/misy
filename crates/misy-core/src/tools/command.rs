@@ -17,6 +17,10 @@ use tokio::{
 
 pub(super) const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+// A daemonized grandchild can keep the pipe's write end open after the process
+// group is killed, so capture EOF is not guaranteed once the command finished.
+// Normal EOF arrives instantly; this only bounds the pathological case.
+const CAPTURE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) async fn run(call: &ToolCall, command_timeout: Duration) -> ToolResult {
     let Some(command_name) = call.arguments.get("command").and_then(Value::as_str) else {
@@ -46,6 +50,7 @@ pub(super) async fn run(call: &ToolCall, command_timeout: Duration) -> ToolResul
     let stderr = child.inner().stderr.take().map(capture_stream);
     let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        // The receiver lives in `run`; a failed send means the caller went away.
         let _ = completion_sender.send(wait_for_command(child, command_timeout).await);
     });
     let completion = match completion_receiver.await {
@@ -120,9 +125,28 @@ where
 }
 
 async fn join_capture(handle: Option<JoinHandle<io::Result<CapturedStream>>>) -> CapturedStream {
-    match handle {
-        Some(handle) => handle.await.ok().and_then(Result::ok).unwrap_or_default(),
-        None => CapturedStream::default(),
+    let Some(mut handle) = handle else {
+        return CapturedStream::default();
+    };
+    match timeout(CAPTURE_DRAIN_TIMEOUT, &mut handle).await {
+        Ok(joined) => joined
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(capture_failed),
+        Err(_) => {
+            handle.abort();
+            CapturedStream::default()
+        }
+    }
+}
+
+// Silently swapping a failed capture for an empty stream would mask the failure
+// as "the command printed nothing", so surface it through the same truncated
+// marker the output budget uses.
+fn capture_failed() -> CapturedStream {
+    CapturedStream {
+        bytes: Vec::new(),
+        truncated: true,
     }
 }
 
@@ -153,6 +177,7 @@ async fn wait_for_command(
     mut child: AsyncGroupChild,
     command_timeout: Duration,
 ) -> CommandCompletion {
+    // Elapsed carries no payload: None maps to TimedOut and Some(Err) to WaitError below.
     let leader_result = timeout(command_timeout, child.inner().wait()).await.ok();
     let leader_is_running = child.id().is_some();
     let kill_error = child
@@ -201,5 +226,43 @@ fn command_result(
         ToolResult::success(&call.id, content)
     } else {
         ToolResult::error(&call.id, content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn marks_output_truncated_when_the_capture_task_fails() {
+        let handle: JoinHandle<io::Result<CapturedStream>> =
+            tokio::spawn(async { Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed")) });
+
+        let captured = join_capture(Some(handle)).await;
+
+        assert!(captured.truncated);
+        assert!(captured.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn marks_output_truncated_when_the_capture_task_panics() {
+        let handle: JoinHandle<io::Result<CapturedStream>> =
+            tokio::spawn(async { panic!("capture task blew up") });
+
+        let captured = join_capture(Some(handle)).await;
+
+        assert!(captured.truncated);
+        assert!(captured.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_a_successful_empty_capture_clean() {
+        let handle: JoinHandle<io::Result<CapturedStream>> =
+            tokio::spawn(async { Ok(CapturedStream::default()) });
+
+        let captured = join_capture(Some(handle)).await;
+
+        assert!(!captured.truncated);
+        assert!(captured.bytes.is_empty());
     }
 }

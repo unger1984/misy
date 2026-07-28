@@ -1,11 +1,18 @@
 //! Provider-host integration tests.
 
 use misy_core::{
-    PROVIDER_PROTOCOL_VERSION, ProviderCatalog, ProviderDiscoveryError, ProviderError,
-    ProviderHost, ProviderId,
+    PROVIDER_PROTOCOL_VERSION, ProviderCatalog, ProviderDeadlines, ProviderDiscoveryError,
+    ProviderError, ProviderHost, ProviderId,
 };
 use serde_json::json;
 use std::{fs, path::Path, time::Duration};
+use tokio::runtime::Handle;
+
+// Tests run inside a Tokio runtime, so the host reuses the caller's handle; production hosts get
+// the core-owned runtime handle instead.
+fn host_for(catalog: ProviderCatalog) -> ProviderHost {
+    ProviderHost::with_handle(catalog, Handle::current())
+}
 
 fn write_manifest(root: &Path, id: &str, protocol_version: u32) {
     let package = root.join(id);
@@ -46,13 +53,17 @@ fn discovery_reads_self_contained_provider_packages() {
     assert_eq!(catalog.len(), 2);
     assert_eq!(
         catalog
-            .get("bundled-provider")
+            .get(&ProviderId::new("bundled-provider"))
             .expect("bundled provider")
             .manifest()
             .capabilities,
         Default::default()
     );
-    assert!(catalog.get("installed-provider").is_some());
+    assert!(
+        catalog
+            .get(&ProviderId::new("installed-provider"))
+            .is_some()
+    );
 }
 
 #[test]
@@ -67,13 +78,18 @@ fn discovery_reads_versioned_optional_capabilities() {
         &manifest,
         contents.replace(
             "  \"description\": \"A fixture provider\",\n",
-            "  \"description\": \"A fixture provider\",\n  \"capabilities\": {\"usage\": {\"version\": 1}},\n",
+            concat!(
+                "  \"description\": \"A fixture provider\",\n",
+                "  \"capabilities\": {\"usage\": {\"version\": 1}},\n",
+            ),
         ),
     )
     .expect("usage capability");
 
     let catalog = ProviderCatalog::discover(&bundled, &installed).expect("valid capability");
-    let package = catalog.get("usage-provider").expect("usage provider");
+    let package = catalog
+        .get(&ProviderId::new("usage-provider"))
+        .expect("usage provider");
 
     assert!(package.manifest().supports_capability("usage", 1));
     assert!(!package.manifest().supports_capability("usage", 2));
@@ -230,7 +246,7 @@ async fn host_lazily_correlates_concurrent_requests_and_forwards_notifications()
         &log_file,
     );
     let catalog = ProviderCatalog::discover(&bundled, &installed).expect("catalog");
-    let host = ProviderHost::new(catalog);
+    let host = host_for(catalog);
     let mut events = host.subscribe();
     let provider = ProviderId::new("fixture");
 
@@ -282,7 +298,7 @@ async fn host_forwards_cancellation_to_the_pending_provider_request() {
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
     let provider = ProviderId::new("fixture");
     let pending = host
         .request_async(&provider, "chat.start", json!({ "delay": "slow" }))
@@ -324,7 +340,7 @@ async fn host_rejects_malformed_and_eof_provider_output_without_poisoning_restar
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
     let provider = ProviderId::new("fixture");
 
     assert!(matches!(
@@ -351,6 +367,46 @@ async fn host_rejects_malformed_and_eof_provider_output_without_poisoning_restar
 }
 
 #[tokio::test]
+async fn host_rejects_oversized_protocol_line_and_allows_restart() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let provider = ProviderId::new("fixture");
+
+    // The fixture streams 100 MiB without a newline; the host must fail fast against its
+    // protocol line cap instead of buffering the stream until it runs out of memory.
+    match host
+        .request(&provider, "test.oversized_line", json!({}))
+        .await
+    {
+        Err(ProviderError::Protocol { message, .. }) => {
+            assert!(
+                message.contains("limit"),
+                "error must name the protocol line limit: {message}"
+            );
+        }
+        other => panic!("expected oversized-line protocol error, got {other:?}"),
+    }
+    assert_eq!(
+        host.request(&provider, "models.list", json!({}))
+            .await
+            .expect("provider restart after oversized line"),
+        json!({ "models": [] })
+    );
+    host.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn bounded_request_reaps_an_unresponsive_provider_and_allows_restart() {
     let temporary = tempfile::tempdir().expect("temporary root");
     let bundled = temporary.path().join("bundled");
@@ -364,7 +420,7 @@ async fn bounded_request_reaps_an_unresponsive_provider_and_allows_restart() {
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
     let provider = ProviderId::new("fixture");
 
     assert!(matches!(
@@ -376,6 +432,46 @@ async fn bounded_request_reaps_an_unresponsive_provider_and_allows_restart() {
         host.request(&provider, "models.list", json!({}))
             .await
             .expect("provider restart after timeout"),
+        json!({ "models": [] })
+    );
+    host.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn request_deadline_reaps_an_unresponsive_provider_and_allows_restart() {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let installed = temporary.path().join("installed");
+    let log_file = temporary.path().join("provider.log");
+    write_fixture_manifest(
+        &bundled,
+        "fixture",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider_fixture.sh")
+            .as_path(),
+        &log_file,
+    );
+    let deadlines = ProviderDeadlines {
+        request: Duration::from_millis(20),
+        ..ProviderDeadlines::default()
+    };
+    let host = ProviderHost::with_handle_and_deadlines(
+        ProviderCatalog::discover(&bundled, &installed).expect("catalog"),
+        Handle::current(),
+        deadlines,
+    );
+    let provider = ProviderId::new("fixture");
+
+    // Unlike the bounded-request test above, this goes through the plain request path: the host
+    // must apply its own deadline instead of waiting on the hung fixture forever.
+    assert!(matches!(
+        host.request(&provider, "test.hang", json!({})).await,
+        Err(ProviderError::Timeout { .. })
+    ));
+    assert_eq!(
+        host.request(&provider, "models.list", json!({}))
+            .await
+            .expect("provider restart after request deadline"),
         json!({ "models": [] })
     );
     host.shutdown().await.expect("shutdown");
@@ -399,7 +495,7 @@ async fn one_failed_provider_does_not_interrupt_another_provider() {
         &fixture,
         &temporary.path().join("healthy.log"),
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
 
     assert!(matches!(
         host.request(&ProviderId::new("broken"), "test.malformed", json!({}))
@@ -429,7 +525,7 @@ async fn malformed_provider_is_terminated_and_reaped() {
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
 
     assert!(matches!(
         host.request(
@@ -484,7 +580,7 @@ async fn malformed_provider_termination_reaps_long_lived_descendants() {
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
 
     assert!(matches!(
         host.request(
@@ -533,7 +629,7 @@ async fn unread_subscriber_does_not_block_flooded_provider() {
             .as_path(),
         &log_file,
     );
-    let host = ProviderHost::new(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
+    let host = host_for(ProviderCatalog::discover(&bundled, &installed).expect("catalog"));
     let _unread = host.subscribe();
 
     let pending = host
@@ -564,7 +660,7 @@ async fn concurrent_requests_complete_when_provider_exits() {
             .as_path(),
         &log_file,
     );
-    let host = std::sync::Arc::new(ProviderHost::new(
+    let host = std::sync::Arc::new(host_for(
         ProviderCatalog::discover(&bundled, &installed).expect("catalog"),
     ));
     let mut workers = tokio::task::JoinSet::new();
@@ -604,7 +700,7 @@ fn standalone_host_drop_after_caller_runtime_reaps_leader_and_descendant() {
             .enable_all()
             .build()
             .expect("caller runtime");
-        let host = ProviderHost::new(catalog);
+        let host = ProviderHost::with_handle(catalog, runtime.handle().clone());
         let result = runtime.block_on(host.request(
             &ProviderId::new("fixture"),
             "test.healthy_descendant",

@@ -44,9 +44,29 @@ function credentials(overrides: Partial<Credentials> = {}): Credentials {
 	return { access_token: "access", refresh_token: "refresh", type: "oauth", ...overrides };
 }
 
-async function rawServer(response: string): Promise<string> {
+async function rawServer(response: string, pieceSize?: number): Promise<string> {
 	const server = createServer((socket) => {
-		socket.once("data", () => socket.end(response));
+		socket.once("data", () => {
+			if (pieceSize === undefined) {
+				socket.end(response);
+				return;
+			}
+			const pieces: string[] = [];
+			for (let index = 0; index < response.length; index += pieceSize) {
+				pieces.push(response.slice(index, index + pieceSize));
+			}
+			// The spacing between writes makes TCP coalescing unlikely, so the client
+			// really does reassemble the response across many data events.
+			const send = (index: number) => {
+				const piece = pieces[index];
+				if (piece === undefined) {
+					socket.end();
+					return;
+				}
+				socket.write(piece, () => setTimeout(() => send(index + 1), 1));
+			};
+			send(0);
+		});
 	});
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
@@ -77,6 +97,43 @@ test("rejects a truncated raw OAuth response without throwing from a socket call
 	).rejects.toThrow("ended a chunk early");
 });
 
+test("rejects an OAuth response that grows past the response size limit", async () => {
+	const body = `"${"x".repeat(300 * 1024)}"`;
+	const base = await rawServer(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
+	await expect(
+		postOAuthJson(
+			new URL("/v1/oauth/token", base),
+			{ "content-type": "application/json" },
+			"{}",
+			5_000,
+		),
+	).rejects.toThrow("exceeded the 262144-byte limit");
+});
+
+test("assembles an OAuth response that arrives in many small pieces", async () => {
+	const body = JSON.stringify({ access_token: "pieced", refresh_token: "together" });
+	const raw = `HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`;
+	const base = await rawServer(raw, 7);
+	const response = await postOAuthJson(
+		new URL("/v1/oauth/token", base),
+		{ "content-type": "application/json" },
+		"{}",
+		5_000,
+	);
+	expect(response).toEqual({ status: 200, body });
+});
+
+test("refuses to send an OAuth request whose header value contains CR/LF", async () => {
+	await expect(
+		postOAuthJson(
+			new URL("http://127.0.0.1:1/v1/oauth/token"),
+			{ "x-custom": "fine\r\nInjected: yes" },
+			"{}",
+			50,
+		),
+	).rejects.toThrow("CR/LF");
+});
+
 test("exchanges a browser callback code without Accept and supports code#state", async () => {
 	let exchange: CapturedRequest | undefined;
 	const base = fakeServer((request) => {
@@ -102,6 +159,44 @@ test("exchanges a browser callback code without Accept and supports code#state",
 		code: "callback-code",
 		state: "replacement-state",
 		redirect_uri: "http://localhost:54545/callback",
+	});
+	expect(completed.credentials).toMatchObject({ access_token: "access", type: "oauth" });
+});
+
+test("rejects a pasted code whose state belongs to another authorization", async () => {
+	const base = fakeServer(() => Response.json({ access_token: "access" }));
+	const provider = new AnthropicProvider({ apiBaseUrl: base, authorizeUrl: `${base}/authorize` });
+	const started = await provider.startAuth();
+	await expect(
+		provider.completeAuth(started.session, { code: "pasted-code#foreign-state" }),
+	).rejects.toThrow("state does not match this authorization session");
+});
+
+test("rejects a pasted code without a state, as the browser callback does", async () => {
+	const base = fakeServer(() => Response.json({ access_token: "access" }));
+	const provider = new AnthropicProvider({ apiBaseUrl: base, authorizeUrl: `${base}/authorize` });
+	const started = await provider.startAuth();
+	await expect(provider.completeAuth(started.session, { code: "pasted-code" })).rejects.toThrow(
+		"does not include its state",
+	);
+});
+
+test("exchanges a pasted code whose state matches the session", async () => {
+	let exchange: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		exchange = request;
+		return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 600 });
+	});
+	const provider = new AnthropicProvider({ apiBaseUrl: base, authorizeUrl: `${base}/authorize` });
+	const started = await provider.startAuth();
+	const state = new URL(started.url).searchParams.get("state") ?? "";
+	const completed = await provider.completeAuth(started.session, {
+		code: `pasted-code#${state}`,
+	});
+	expect(exchange?.body).toMatchObject({
+		grant_type: "authorization_code",
+		code: "pasted-code",
+		state,
 	});
 	expect(completed.credentials).toMatchObject({ access_token: "access", type: "oauth" });
 });
@@ -287,4 +382,211 @@ test("streams text and tool calls, refreshes after a 401, and honors cancellatio
 			"effort-2025-11-24,extended-cache-ttl-2025-04-11",
 	);
 	expect(userAgent ?? "").toBe("claude-cli/2.1.165");
+});
+
+test("returns rotated credentials when usage silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.path === "/v1/oauth/token") {
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "rotated",
+				expires_in: 600,
+			});
+		}
+		return Response.json({ five_hour: { utilization: 10 } });
+	});
+
+	const report = await new AnthropicProvider({ apiBaseUrl: base }).usage(
+		credentials({ expires_at: 0 }),
+	);
+
+	expect(report.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when usage does not refresh", async () => {
+	const base = fakeServer(() => Response.json({ five_hour: { utilization: 10 } }));
+
+	const report = await new AnthropicProvider({ apiBaseUrl: base }).usage(credentials());
+
+	expect(report).not.toHaveProperty("credentials");
+});
+
+test("returns rotated credentials when a stream silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.path === "/v1/oauth/token") {
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "rotated",
+				expires_in: 600,
+			});
+		}
+		return new Response("event: message_stop\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+
+	const result = await new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+		{
+			model_id: "claude-opus-4-8",
+			messages: [],
+			tools: [],
+			credentials: credentials({ expires_at: 0 }),
+		},
+		11,
+		() => {},
+	);
+
+	expect(result.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when a stream does not refresh", async () => {
+	const base = fakeServer(
+		() =>
+			new Response("event: message_stop\ndata: {}\n\n", {
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+
+	const result = await new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+		{
+			model_id: "claude-opus-4-8",
+			messages: [],
+			tools: [],
+			credentials: credentials(),
+		},
+		12,
+		() => {},
+	);
+
+	expect(result).not.toHaveProperty("credentials");
+});
+
+test("fails a stream whose event payload is truncated without leaking a partial delta", async () => {
+	const base = fakeServer(
+		() =>
+			new Response(
+				"event: content_block_delta\ndata: " +
+					'{"index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n' +
+					'event: content_block_delta\ndata: {"index":0,"delta":{"text":"hel\n\n',
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+			{ model_id: "claude-opus-4-8", messages: [], tools: [], credentials: credentials() },
+			13,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow("Anthropic Messages stream contained invalid JSON");
+	expect(notifications).toEqual([
+		{ method: "text_delta", request_id: 13, delta: "hello" },
+		{
+			method: "failed",
+			request_id: 13,
+			message: "Anthropic Messages stream contained invalid JSON",
+		},
+	]);
+});
+
+test("fails a stream that ends mid-event instead of completing silently", async () => {
+	const base = fakeServer(
+		() =>
+			new Response(
+				"event: content_block_delta\ndata: " +
+					'{"index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n' +
+					'event: content_block_delta\ndata: {"index":0,"delta":{"text":"hel',
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+			{ model_id: "claude-opus-4-8", messages: [], tools: [], credentials: credentials() },
+			14,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow("Anthropic Messages stream ended mid-event");
+	expect(notifications).toEqual([
+		{ method: "text_delta", request_id: 14, delta: "hello" },
+		{ method: "failed", request_id: 14, message: "Anthropic Messages stream ended mid-event" },
+	]);
+});
+
+test("retries one 401 after refresh and no more", async () => {
+	let messageRequests = 0;
+	let tokenRequests = 0;
+	const base = fakeServer((request) => {
+		if (request.path === "/v1/oauth/token") {
+			tokenRequests += 1;
+			return Response.json({
+				access_token: "fresh",
+				refresh_token: "fresh-refresh",
+				expires_in: 600,
+			});
+		}
+		messageRequests += 1;
+		return new Response("unauthorized", { status: 401 });
+	});
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+			{ model_id: "claude-opus-4-8", messages: [], tools: [], credentials: credentials() },
+			15,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow("Anthropic Messages request failed (401)");
+	expect(messageRequests).toBe(2);
+	expect(tokenRequests).toBe(1);
+	expect(notifications).toEqual([
+		{
+			method: "failed",
+			request_id: 15,
+			message: "Anthropic Messages request failed (401): unauthorized",
+		},
+	]);
+});
+
+test("aborts a hanging Messages request at the configured timeout", async () => {
+	const base = fakeServer(
+		(request) =>
+			new Promise<Response>((resolve) => {
+				// The handler never answers on its own; only the client deadline releases it,
+				// so a rejection here can only come from the configured request timeout.
+				request.signal.addEventListener("abort", () =>
+					resolve(new Response("aborted", { status: 500 })),
+				);
+			}),
+	);
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		new AnthropicProvider({ apiBaseUrl: base, requestTimeoutMs: 50 }).streamChat(
+			{ model_id: "claude-opus-4-8", messages: [], tools: [], credentials: credentials() },
+			16,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow();
+	expect(notifications.map((entry) => entry["method"])).toEqual(["failed"]);
+});
+
+test("rejects a non-object usage response instead of casting it", async () => {
+	const base = fakeServer(() => Response.json(["not-an-object"]));
+	await expect(new AnthropicProvider({ apiBaseUrl: base }).usage(credentials())).rejects.toThrow(
+		"Anthropic usage response must be an object",
+	);
+});
+
+test("rejects authentication methods not declared by the provider", async () => {
+	await expect(new AnthropicProvider().startAuth("api_key")).rejects.toThrow(
+		"Unsupported Anthropic authentication method: api_key",
+	);
+});
+
+test("expires an abandoned authorization instead of waiting forever", async () => {
+	const base = fakeServer(() => Response.json({ access_token: "access" }));
+	const provider = new AnthropicProvider({ apiBaseUrl: base, authTimeoutMs: 20 });
+	const started = await provider.startAuth();
+	await expect(provider.completeAuth(started.session, {})).rejects.toThrow(
+		"expired before authentication completed",
+	);
 });

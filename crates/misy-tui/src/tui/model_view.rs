@@ -2,18 +2,14 @@
 
 use super::{
     model_picker::ModelPicker,
-    state::{ActiveView, ProviderOperationKind, UiState},
+    state::{ActiveView, UiState},
 };
-use misy_core::{AvailableModels, ProviderId};
+use misy_core::{AvailableModels, ProviderDisplayName, ProviderId};
 use std::collections::BTreeMap;
 
 impl UiState {
     pub(super) fn open_models(&mut self, available: AvailableModels) {
-        self.set_provider_operation(
-            ProviderId::new("models"),
-            ProviderOperationKind::Models,
-            None,
-        );
+        self.set_model_catalog_operation();
         let picker = if available.models.is_empty() && available.errors.is_empty() {
             ModelPicker::loading()
         } else {
@@ -29,18 +25,13 @@ impl UiState {
     pub(super) fn finish_models(
         &mut self,
         available: AvailableModels,
-        names: &BTreeMap<String, String>,
+        names: &BTreeMap<ProviderId, ProviderDisplayName>,
     ) {
         if !matches!(self.view, Some(ActiveView::Models(_)))
-            || !matches!(
-                self.provider_operation,
-                Some((_, ProviderOperationKind::Models))
-            )
+            || !self.finish_model_catalog_operation()
         {
             return;
         }
-        self.provider_operation = None;
-        self.provider_device_code = None;
         if let Some(ActiveView::Models(picker)) = &mut self.view {
             picker.refresh(available, names, self.snapshot.selected_model.as_ref());
         }

@@ -3,14 +3,23 @@
 mod support;
 
 use misy_core::{MisyPaths, ModelId, ModelRef, ProviderId};
-use misy_tui::{TranscriptRow, TuiClient, UiAction, UiKey, UiMode, UiState, map_input};
-use ratatui::style::Color;
+use misy_tui::{TranscriptRow, TuiClient, UiAction, UiKey, UiMode, UiState, map_input, render};
+use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
 use serde_json::json;
 use std::{fs, time::Duration};
 use support::tui::{
     RecordingBrowser, authorize_first_provider, buffer_lines, core_with_providers, render_buffer,
     select_first_model, start_first_provider_auth, test_client, wait_for, wait_for_within,
 };
+
+fn render_cursor_position(state: &UiState, width: u16, height: u16) -> Position {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, state))
+        .expect("render state");
+    terminal.get_cursor_position().expect("rendered cursor")
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn input_mapping_and_reducer_keep_state_explicit() {
@@ -483,11 +492,23 @@ async fn prompt_auth_masks_the_secret_and_completes_without_using_the_composer()
         client.state().mode() == UiMode::AuthPrompt
     })
     .await;
+    let empty = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
+    assert!(
+        empty
+            .iter()
+            .any(|line| line.contains("API key") && line.contains("[ ]"))
+    );
+    assert!(empty.iter().any(|line| line.contains("enter validate")));
+    let empty_cursor = render_cursor_position(client.state(), 72, 18);
+    assert_ne!(empty_cursor, (0, 0).into());
     client.paste_text("sk-secret\n12");
     let rendered = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
     assert!(rendered.iter().any(|line| line.contains("API key")));
     assert!(rendered.iter().any(|line| line.contains("••••••••••••")));
     assert!(!rendered.iter().any(|line| line.contains("sk-secret")));
+    let filled_cursor = render_cursor_position(client.state(), 72, 18);
+    assert_eq!(filled_cursor.y, empty_cursor.y);
+    assert!(filled_cursor.x > empty_cursor.x);
     assert!(client.state().composer_input().is_empty());
 
     client.handle_key(UiKey::Enter).expect("submit credentials");

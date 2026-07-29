@@ -3,6 +3,7 @@
 use super::{
     action::UiKey,
     auth_flow::PromptField,
+    display_width::text_width,
     list::ListRowDisplay,
     state::{ActiveView, UiState},
 };
@@ -46,6 +47,13 @@ impl FieldBuffer {
 
     fn text(&self) -> String {
         self.value.iter().collect()
+    }
+
+    fn display_cursor(&self, secret: bool) -> usize {
+        if secret {
+            return self.cursor;
+        }
+        text_width(&self.value[..self.cursor].iter().collect::<String>())
     }
 }
 
@@ -161,18 +169,31 @@ impl AuthPromptForm {
             .iter()
             .zip(&self.buffers)
             .enumerate()
-            .map(|(index, (field, buffer))| ListRowDisplay {
-                number: index + 1,
-                label: field.label.clone(),
-                description: Some(if field.secret {
+            .map(|(index, (field, buffer))| {
+                let value = if field.secret {
                     "•".repeat(buffer.value.len())
                 } else {
                     buffer.text()
-                }),
-                selected: index == self.active,
-                current: false,
+                };
+                ListRowDisplay {
+                    number: index + 1,
+                    label: field.label.clone(),
+                    description: Some(if value.is_empty() {
+                        "[ ]".to_owned()
+                    } else {
+                        format!("[{value}]")
+                    }),
+                    selected: index == self.active,
+                    current: false,
+                }
             })
             .collect()
+    }
+
+    pub(super) fn cursor_position(&self) -> Option<(usize, usize)> {
+        let field = self.fields.get(self.active)?;
+        let buffer = self.buffers.get(self.active)?;
+        Some((self.active, 1 + buffer.display_cursor(field.secret)))
     }
 }
 
@@ -263,6 +284,13 @@ impl UiState {
             _ => {}
         }
     }
+
+    pub(super) fn auth_prompt_cursor_position(&self) -> Option<(usize, usize)> {
+        let Some(ActiveView::AuthPrompt(view)) = &self.view else {
+            return None;
+        };
+        view.form.cursor_position()
+    }
 }
 
 #[cfg(test)]
@@ -293,10 +321,12 @@ mod tests {
         form.move_left();
         form.backspace();
         form.insert("b");
-        assert_eq!(form.rows()[0].description.as_deref(), Some("•••"));
+        assert_eq!(form.rows()[0].description.as_deref(), Some("[•••]"));
+        assert_eq!(form.cursor_position(), Some((0, 3)));
         assert!(!form.advance_or_ready());
         form.insert("acme");
-        assert_eq!(form.rows()[1].description.as_deref(), Some("acme"));
+        assert_eq!(form.rows()[1].description.as_deref(), Some("[acme]"));
+        assert_eq!(form.cursor_position(), Some((1, 5)));
         assert!(form.advance_or_ready());
         assert_eq!(
             form.into_completion(),

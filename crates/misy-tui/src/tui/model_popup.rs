@@ -34,6 +34,40 @@ pub(super) fn render(
     } else {
         render_content(frame, layout.content, &modal);
     }
+    render_auth_prompt_cursor(frame, layout.content, state, &modal);
+}
+
+fn render_auth_prompt_cursor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    state: &UiState,
+    modal: &ModalPresentation,
+) {
+    let Some((row_index, value_column)) = state.auth_prompt_cursor_position() else {
+        return;
+    };
+    let Some(row) = modal.rows.get(row_index) else {
+        return;
+    };
+    let label_width = super::render::modal_label_width(&modal.rows, area.width);
+    let prefix_width = super::display_width::text_width(&format!(
+        "{} {}{}. ",
+        if row.selected { "›" } else { " " },
+        if row.current { "✓ " } else { "  " },
+        row.number,
+    ));
+    let cursor_x = area
+        .x
+        .saturating_add(u16::try_from(prefix_width).unwrap_or(u16::MAX))
+        .saturating_add(u16::try_from(label_width).unwrap_or(u16::MAX))
+        .saturating_add(2)
+        .saturating_add(u16::try_from(value_column).unwrap_or(u16::MAX))
+        .min(area.right().saturating_sub(1));
+    let cursor_y = area
+        .y
+        .saturating_add(u16::try_from(row_index).unwrap_or(u16::MAX))
+        .min(area.bottom().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn render_loading(frame: &mut ratatui::Frame, area: Rect) {

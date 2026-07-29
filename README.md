@@ -75,6 +75,8 @@ The repository already contains a working development-stage vertical slice:
   `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
 - independent synchronous and background child-agent sessions with inherited context, scoped
   tools, addressable messaging, bounded transcripts, and a pull-based completion mailbox;
+- hierarchical global, project-root, and target-scoped nested `AGENTS.md` instructions with
+  pre-side-effect tool gating and a dedicated `/context` usage popup;
 - unit, integration, end-to-end, and provider contract tests that use local fixtures instead of
   real accounts or external network access.
 
@@ -122,8 +124,8 @@ cargo run -p misy-tui
 ```
 
 Inside Misy, use `/provider` to authenticate, `/model` to select a model, `/status` to inspect
-provider limits when supported, and `/exit` to shut down cleanly. Type `?` to see keyboard
-shortcuts.
+provider limits, `/context` to inspect active prompt usage and instructions, and `/exit` to shut
+down cleanly. Type `?` to see keyboard shortcuts.
 
 Misy stores configuration, credentials, model metadata, and prompt history under `~/.misy` by
 default. Use a separate development profile when experimenting:

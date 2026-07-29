@@ -118,6 +118,12 @@ flowchart LR
     cancellation, dismissal suppression, and snapshot recovery; clients only render requests and
     call the typed answer or dismiss operations. A question has no elapsed timeout because it waits
     for local user intent, but owner cancellation and shutdown always wake the waiter.
+18. The core builds an ephemeral request system prefix from built-in guidance, the optional global
+    `~/.misy/AGENTS.md`, the project-root `AGENTS.md`, and nested files on the ancestor chain of
+    actual tool targets. Global/root snapshots are shared across main and child sessions; nested
+    caches and active scopes are agent-session-local. A validated tool batch that discovers a new
+    nested scope is retried as a whole before any handler runs. Instruction contents and internal
+    retry turns are never appended to conversation JSONL or client transcripts.
 
 ## Fixed Constraints
 
@@ -127,7 +133,9 @@ flowchart LR
   authenticated provider/model pair.
 - External clients must reuse the `misy-core` contract, including its public async operations,
   events, cancellation methods, and `CoreSnapshot` projection.
-- Child agents ship with workspace contract version `0.3.0`; provider protocol v2 remains
+- Hierarchical instruction context ships with workspace contract version `0.4.0`; provider
+  protocol v2, config version 2, credential version 1, model-cache format, and session format
+  remain compatible. `context_window = 0` means unknown in the in-memory context report.
   compatible because concurrent chat notifications already carry request IDs.
 
 ## Change Impact
@@ -140,6 +148,8 @@ Changing ownership or event semantics affects the core, TUI, provider host, inte
 - [`crates/misy-core/src/core.rs`](../crates/misy-core/src/core.rs)
 - [`crates/misy-core/src/core/agent.rs`](../crates/misy-core/src/core/agent.rs)
 - [`crates/misy-core/src/core/events.rs`](../crates/misy-core/src/core/events.rs)
+- [`crates/misy-core/src/core/instructions.rs`](../crates/misy-core/src/core/instructions.rs)
+- [`crates/misy-core/src/core/context_report.rs`](../crates/misy-core/src/core/context_report.rs)
 - [`crates/misy-core/src/core/snapshot.rs`](../crates/misy-core/src/core/snapshot.rs)
 - [Provider Plugins](provider-plugins.md)
 - [TUI Client](tui-client.md)

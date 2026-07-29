@@ -771,6 +771,11 @@ async fn tool_rows_carry_arguments_and_result_content_from_core_events() {
     .await;
 
     let path = target.display().to_string();
+    let resolved_path = target
+        .canonicalize()
+        .expect("canonical tool target")
+        .display()
+        .to_string();
     let rows = client.state().transcript();
     assert!(
         rows.contains(&TranscriptRow::ToolCall {
@@ -794,7 +799,7 @@ async fn tool_rows_carry_arguments_and_result_content_from_core_events() {
         rows.contains(&TranscriptRow::ToolResult {
             id: "write-1".to_owned(),
             is_error: false,
-            content: Some(format!("wrote {path}")),
+            content: Some(format!("wrote {resolved_path}")),
         }),
         "write_file result must retain its content"
     );

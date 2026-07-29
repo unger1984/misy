@@ -66,6 +66,12 @@ impl UiState {
             CoreEvent::SessionPersistenceFailed { message } => {
                 self.add_error(format!("could not save session: {message}"));
             }
+            CoreEvent::InstructionWarning { warning } => {
+                self.add_error(format!(
+                    "AGENTS.md warning for {}: {:?}",
+                    warning.source.display_path, warning.reason
+                ));
+            }
             CoreEvent::Shutdown => {
                 self.terminal_turn = None;
                 self.should_exit = true;

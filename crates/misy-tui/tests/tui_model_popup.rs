@@ -199,6 +199,28 @@ async fn model_picker_uses_the_herdr_style_popup_without_clipping_on_narrow_term
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn context_command_opens_a_scrollable_content_specific_popup() {
+    let (_temporary, mut client, _) = test_client().await;
+    client.handle_input("/context").expect("open context");
+    assert_eq!(client.state().mode(), UiMode::Context);
+
+    let lines = buffer_lines(&render_buffer(client.state(), 82, 24), 82);
+    assert!(lines.iter().any(|line| line.contains("Context usage")));
+    assert!(lines.iter().any(|line| line.contains("Estimated")));
+    assert!(lines.iter().any(|line| line.contains("AGENTS.md")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("token estimate unavailable"))
+    );
+    client.handle_key(UiKey::End).expect("context end");
+    client.handle_key(UiKey::PageUp).expect("context page up");
+    client.handle_key(UiKey::Escape).expect("close context");
+    assert_eq!(client.state().mode(), UiMode::Input);
+    client.handle_ctrl_c();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_popup_is_centered_and_capped_on_a_wide_terminal() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "good-models")]);
     populate_cached_models(&core, &["fixture"]).await;

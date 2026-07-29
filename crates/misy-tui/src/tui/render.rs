@@ -72,6 +72,9 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     if let Some(modal) = modal.as_ref() {
         super::model_popup::render(frame, area, state, modal);
     }
+    if let Some(view) = state.context_view() {
+        super::context_popup::render(frame, area, view);
+    }
     render_footer(frame, areas[6], state);
     render_cursor(frame, areas[3], state);
     areas[3]

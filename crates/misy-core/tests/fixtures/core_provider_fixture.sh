@@ -307,6 +307,23 @@ chat_start() {
       complete
       reply '{}'
       ;;
+    *'"tool_call_id":"scope-write-1"'*)
+      if [ "${scope_retry_seen:-0}" -eq 0 ]; then
+        case "$line" in *'global rules'*'root rules'*) ;; *) failed 'base AGENTS.md instructions missing'; reply '{}'; continue ;; esac
+        case "$line" in *'frontend rules'*) ;; *) failed 'frontend AGENTS.md instructions missing'; reply '{}'; continue ;; esac
+        case "$line" in *'backend rules'*) ;; *) failed 'backend AGENTS.md instructions missing'; reply '{}'; continue ;; esac
+        scope_retry_seen=1
+        while [ ! -f "$target/allow-retry" ]; do sleep 0.01; done
+        call_write scope-write-1 "$target/frontend/instruction-preflight.txt" frontend
+        call_write scope-write-2 "$target/backend/instruction-preflight.txt" backend
+        complete
+        reply '{}'
+      else
+        text scoped-done
+        complete
+        reply '{}'
+      fi
+      ;;
     *'"tool_call_id":"write-1"'*)
       text done
       complete
@@ -416,6 +433,12 @@ chat_start() {
       call_read read-1 "$target"
       complete
       reply '{"metadata":{"turn":"one"}}'
+      ;;
+    *'"content":"instruction-preflight"'*)
+      call_write scope-write-1 "$target/frontend/instruction-preflight.txt" frontend
+      call_write scope-write-2 "$target/backend/instruction-preflight.txt" backend
+      complete
+      reply '{}'
       ;;
     *'"content":"background-command"'*)
       call_background_shell

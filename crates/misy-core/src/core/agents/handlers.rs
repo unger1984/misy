@@ -2,7 +2,8 @@
 
 use super::{AgentId, AgentRecord, InboxDecision, MailboxWait, normalize_agent_title};
 use crate::{
-    ActivityStatus, CoreError, CoreEvent, HistoryEntry, Message, ModelRef, ToolCall, ToolResult,
+    ActivityStatus, CoreError, CoreEvent, HistoryEntry, InstructionOwner, Message, ModelRef,
+    ToolCall, ToolResult,
     activity::ActivityOwner,
     core::{CoreState, turn},
 };
@@ -81,7 +82,24 @@ async fn spawn(
     core.emit(&CoreEvent::ActivityChanged {
         activity: record.summary().activity_summary(),
     });
-    let child = turn::AgentTurnState::child(record.summary().id, model, history);
+    let child_id = record.summary().id;
+    let instruction_root = core
+        .instructions
+        .lock()
+        .expect("instruction runtime mutex must not be poisoned")
+        .root();
+    let child_instructions = Arc::new(std::sync::Mutex::new(
+        crate::core::instructions::InstructionSession::new(
+            instruction_root,
+            InstructionOwner::Child(child_id),
+        ),
+    ));
+    let child = turn::AgentTurnState::child(child_id, model, history, child_instructions);
+    child
+        .instructions()
+        .lock()
+        .expect("instruction session mutex must not be poisoned")
+        .begin_submission();
     record.attach_active(Arc::clone(child.active()));
     let Some(core) = core.weak_self().upgrade() else {
         return Err(CoreError::Shutdown.to_string());
@@ -156,6 +174,12 @@ async fn run_child(core: Arc<CoreState>, record: Arc<AgentRecord>, child: turn::
             Ok(()) => match record.decide_inbox(remaining_turns > 0) {
                 InboxDecision::Continue(messages) => {
                     append_messages(&child, messages);
+                    let mut instructions = child
+                        .instructions()
+                        .lock()
+                        .expect("instruction session mutex must not be poisoned");
+                    instructions.finish_submission();
+                    instructions.begin_submission();
                     captured = child
                         .history()
                         .lock()
@@ -181,6 +205,17 @@ async fn run_child(core: Arc<CoreState>, record: Arc<AgentRecord>, child: turn::
     core.dispatcher
         .stop_owner_commands(ActivityOwner::Agent(id))
         .await;
+    child
+        .instructions()
+        .lock()
+        .expect("instruction session mutex must not be poisoned")
+        .finish_submission();
+    let (_, instruction_sources, _) = child
+        .instructions()
+        .lock()
+        .expect("instruction session mutex must not be poisoned")
+        .report_sources();
+    record.set_instruction_sources(instruction_sources);
     if core.agents.finish(&record, status, &result) {
         let summary = record.summary();
         core.emit(&CoreEvent::ActivityChanged {

@@ -3,8 +3,8 @@
 use super::session::SessionError;
 use crate::{
     ActivitySummary, AgentId, AgentSummary, ConfigError, CredentialError, ImageAttachment,
-    InputModality, Message, ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName,
-    ProviderError, ProviderId, ToolCall, ToolResult,
+    InputModality, InstructionWarning, Message, ModelInfo, ModelRef, ProviderDiscoveryError,
+    ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -192,6 +192,11 @@ pub enum CoreEvent {
         /// User-facing description of the local storage failure.
         message: String,
     },
+    /// A hierarchical instruction source was blocked or truncated.
+    InstructionWarning {
+        /// Content-free diagnostic safe for every frontend.
+        warning: InstructionWarning,
+    },
     /// The core shut down and no longer accepts work.
     Shutdown,
 }
@@ -236,6 +241,8 @@ pub enum CoreError {
     },
     /// The private Tokio runtime could not be started or a runtime task could not complete.
     Runtime(String),
+    /// Required `AGENTS.md` instructions cannot be applied safely.
+    InstructionBlocked(String),
     /// A provider does not advertise the requested optional capability revision.
     UnsupportedCapability {
         /// Provider whose manifest was checked.
@@ -316,6 +323,9 @@ impl fmt::Display for CoreError {
                 "submission images contain {found} bytes; maximum is {maximum}"
             ),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
+            Self::InstructionBlocked(message) => {
+                write!(formatter, "instruction context is blocked: {message}")
+            }
             Self::UnsupportedCapability {
                 provider,
                 capability,

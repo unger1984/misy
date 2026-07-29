@@ -1,7 +1,8 @@
 //! Public projections for independent child-agent sessions.
 
 use crate::{
-    ActivityId, ActivityKind, ActivityStatus, ActivitySummary, ModelRef, ToolCall, ToolResult,
+    ActivityId, ActivityKind, ActivityStatus, ActivitySummary, InstructionSourceSummary, ModelRef,
+    ToolCall, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -111,4 +112,6 @@ pub struct AgentTranscript {
     pub entries: Vec<AgentTranscriptEntry>,
     /// Whether older transcript content was omitted to stay within the budget.
     pub truncated: bool,
+    /// Content-free instruction sources used by the child before it terminated.
+    pub instruction_sources: Vec<InstructionSourceSummary>,
 }

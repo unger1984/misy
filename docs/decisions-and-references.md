@@ -53,6 +53,16 @@ Read this document before making a new architecture or user-interaction choice.
   and a client-synthesized `Other` choice. Codex contributes only typed request identity and
   snapshot recovery. The core owns both tools; question capability version 1 is immutable for the
   core lifetime, and three dismissals suppress further dialogs for the same turn owner.
+- Misy always reads the optional global `~/.misy/AGENTS.md` and project-root `AGENTS.md` for a new
+  root conversation. Nested `AGENTS.md` files are discovered only on the ancestor chain of an
+  actual filesystem target, cached per main/child session, and applied before tool side effects.
+  Deeper files win a shared leaf-first 32 KiB project budget. Conditional routing prose remains a
+  model instruction; the core does not parse natural-language conditions or eagerly load linked
+  documents.
+- Instruction discovery follows Codex's stable session ownership, Kimi's leaf-first priority, and
+  Oh My Pi's separate context diagnostics. Misy deliberately adds stricter blocked-source and
+  whole-batch retry semantics. Arbitrary shell text is not parsed: `exec_command` is scoped only by
+  its normalized `cwd`, while `write_stdin` inherits the original command activity cwd.
 - Kimi's push notification delivery and Oh My Pi's push-oriented task presentation were considered
   but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
   post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1
@@ -76,11 +86,13 @@ subscription device flow is supported through the version 2 provider protocol.
 
 ## Reference Policy
 
-`.references/openai-codex/` and `.references/oh-my-pi/` are equal local reference implementations. They are idea and implementation sources, not architectural authorities over Misy. `.references/kimi-cli/` is the upstream Kimi CLI, consulted for Kimi provider wire formats and behavior.
+`.references/openai-codex/`, `.references/kimi-cli/`, and `.references/oh-my-pi/` are the three
+local reference implementations. They are idea and implementation sources, not architectural
+authorities over Misy. Kimi CLI is also the primary reference for Kimi provider wire formats.
 
 When a comparable implementation or UX question appears:
 
-1. Inspect both references.
+1. Inspect all three references for the comparable behavior.
 2. Reuse an established pattern that fits Misy's fixed boundaries.
 3. Do not silently invent a third alternative when a suitable pattern exists.
 4. If the references differ materially and the choice changes architecture or user-visible behavior, present the alternatives to the user unless the behavior is already specified.

@@ -21,7 +21,7 @@ pub(super) struct CommandPopupRow {
     pub(super) selected: bool,
 }
 
-pub(super) const COMMANDS: [CommandDefinition; 9] = [
+pub(super) const COMMANDS: [CommandDefinition; 10] = [
     CommandDefinition {
         name: "/provider",
         description: "Configure provider authentication",
@@ -33,6 +33,10 @@ pub(super) const COMMANDS: [CommandDefinition; 9] = [
     CommandDefinition {
         name: "/tasks",
         description: "Show background tasks and agents",
+    },
+    CommandDefinition {
+        name: "/context",
+        description: "Show active context usage",
     },
     CommandDefinition {
         name: "/new",

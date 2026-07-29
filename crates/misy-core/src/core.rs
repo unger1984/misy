@@ -23,9 +23,13 @@ mod agent;
 pub(crate) mod agents;
 mod authentication;
 mod cache;
+mod context_report;
 mod contracts;
 mod events;
 mod images;
+mod instruction_contracts;
+mod instruction_paths;
+mod instructions;
 mod models;
 mod options;
 pub(crate) mod questions;
@@ -53,6 +57,11 @@ pub use agents::{
 #[allow(clippy::module_name_repetitions)]
 pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
+};
+pub use instruction_contracts::{
+    ContextCategory, ContextCategoryUsage, ContextReport, ContextReportState, InstructionOwner,
+    InstructionScope, InstructionSourceKind, InstructionSourceStatus, InstructionSourceSummary,
+    InstructionWarning, InstructionWarningReason,
 };
 pub use questions::{
     ClientCapabilities, CoreOptions, QuestionItem, QuestionOption, QuestionRequest,
@@ -94,6 +103,8 @@ pub(super) struct CoreState {
     pub(super) config_store: ConfigStore,
     pub(super) credential_store: CredentialStore,
     pub(super) model_cache: Arc<ModelCatalogStore>,
+    pub(super) misy_paths: MisyPaths,
+    pub(super) instructions: Mutex<instructions::InstructionRuntime>,
     pub(super) selected_model: Mutex<Option<ModelRef>>,
     pub(super) keybindings: BTreeMap<String, Vec<String>>,
     pub(super) client_capabilities: ClientCapabilities,
@@ -163,58 +174,8 @@ impl MisyCore {
             catalog,
             ProviderDeadlines::default(),
             CoreOptions::default(),
+            None,
         )
-    }
-
-    /// Discovers providers like [`MisyCore::discover`] but with explicit provider wait deadlines.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when provider discovery, configuration loading, or runtime startup fails.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn discover_with_deadlines(
-        paths: MisyPaths,
-        bundled_providers: impl AsRef<Path>,
-        deadlines: ProviderDeadlines,
-    ) -> Result<Self, CoreError> {
-        let catalog =
-            ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::build(paths, catalog, deadlines, CoreOptions::default())
-    }
-
-    /// Creates a core from an already-discovered provider catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
-        Self::build(
-            paths,
-            catalog,
-            ProviderDeadlines::default(),
-            CoreOptions::default(),
-        )
-    }
-
-    /// Creates a core from a catalog with explicit provider wait deadlines.
-    ///
-    /// Integration tests use this to keep hung-provider scenarios fast; production clients
-    /// should prefer [`MisyCore::discover`] and the default deadlines.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn from_catalog_with_deadlines(
-        paths: MisyPaths,
-        catalog: ProviderCatalog,
-        deadlines: ProviderDeadlines,
-    ) -> Result<Self, CoreError> {
-        Self::build(paths, catalog, deadlines, CoreOptions::default())
     }
 
     fn build(
@@ -222,7 +183,15 @@ impl MisyCore {
         catalog: ProviderCatalog,
         deadlines: ProviderDeadlines,
         options: CoreOptions,
+        workspace_cwd: Option<std::path::PathBuf>,
     ) -> Result<Self, CoreError> {
+        let instruction_root = match workspace_cwd {
+            Some(workspace_cwd) => {
+                instructions::InstructionRoot::load_at(&paths, false, &workspace_cwd)
+            }
+            None => instructions::InstructionRoot::load(&paths, false),
+        }
+        .map_err(CoreError::Runtime)?;
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
         let credential_store = CredentialStore::new(paths.clone());
@@ -240,7 +209,9 @@ impl MisyCore {
             )),
             config_store,
             credential_store,
-            model_cache: Arc::new(ModelCatalogStore::new(paths)),
+            model_cache: Arc::new(ModelCatalogStore::new(paths.clone())),
+            misy_paths: paths,
+            instructions: Mutex::new(instructions::InstructionRuntime::new(instruction_root)),
             selected_model: Mutex::new(config.default_model),
             keybindings: config.keybindings,
             client_capabilities: options.client_capabilities,

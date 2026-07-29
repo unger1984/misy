@@ -1,7 +1,9 @@
 //! Deterministic state rendered by the terminal client.
 
 mod activities;
+mod context;
 mod events;
+mod input;
 mod questions;
 mod sessions;
 mod spinner;
@@ -18,6 +20,7 @@ use super::{
     action::{UiAction, UiMode},
     activity_picker::ActivityPicker,
     composer::Composer,
+    context_view::ContextView,
     list::{ListRow, ListView},
     model_picker::ModelPicker,
     presentation::{
@@ -67,6 +70,7 @@ pub(super) enum ActiveView {
     AgentDiscard(ListView<bool>),
     ActivityLog(Box<activities::ActivityLogView>),
     Question(QuestionDialog),
+    Context(ContextView),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -203,6 +207,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(_)) => UiMode::Confirmation,
             Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
             Some(ActiveView::Question(_)) => UiMode::Question,
+            Some(ActiveView::Context(_)) => UiMode::Context,
         }
     }
 
@@ -253,6 +258,7 @@ impl UiState {
                 .into_iter()
                 .map(|row| row.label)
                 .collect(),
+            Some(ActiveView::Context(_)) => Vec::new(),
         }
     }
 
@@ -319,6 +325,7 @@ impl UiState {
             | UiAction::NewSession
             | UiAction::ResumeSession(_)
             | UiAction::ShowUsage
+            | UiAction::ShowContext
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
         }
@@ -470,6 +477,7 @@ impl UiState {
             }),
             Some(ActiveView::ActivityLog(_)) => None,
             Some(ActiveView::Question(view)) => Some(view.presentation(visible_rows)),
+            Some(ActiveView::Context(_)) => None,
             Some(ActiveView::ProviderSettings {
                 display_name,
                 credential_method,
@@ -515,21 +523,6 @@ impl UiState {
         })
     }
 
-    pub(super) fn composer_cursor_position(&self) -> (u16, u16) {
-        self.composer.cursor_position()
-    }
-
-    pub(super) fn composer_line_count(&self) -> usize {
-        self.composer.text().split('\n').count()
-    }
-
-    pub(super) fn command_popup_rows_for_render(&self) -> Vec<super::composer::CommandPopupRow> {
-        if self.view.is_some() {
-            return Vec::new();
-        }
-        self.composer.popup_rows_for_render()
-    }
-
     fn provider_list(&self) -> ListView<ProviderId> {
         ListView::new("Providers", self.provider_rows())
     }
@@ -561,6 +554,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
             Some(ActiveView::Question(view)) => view.insert_text(text),
+            Some(ActiveView::Context(_)) => {}
             None => {}
         }
     }
@@ -575,6 +569,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
             Some(ActiveView::Question(view)) => view.backspace(),
+            Some(ActiveView::Context(_)) => {}
             None => {}
         }
     }
@@ -615,6 +610,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(view)) => view.select_number(one_based),
             Some(ActiveView::ActivityLog(_)) => false,
             Some(ActiveView::Question(view)) => view.select_number(one_based),
+            Some(ActiveView::Context(_)) => false,
             None => false,
         }
     }
@@ -629,6 +625,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(view)) => view.move_up(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
             Some(ActiveView::Question(view)) => view.move_up(),
+            Some(ActiveView::Context(view)) => view.up(1),
             None => {}
         }
     }
@@ -643,6 +640,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(view)) => view.move_down(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
             Some(ActiveView::Question(view)) => view.move_down(),
+            Some(ActiveView::Context(view)) => view.down(1),
             None => {}
         }
     }
@@ -691,6 +689,7 @@ impl UiState {
                 self.view = Some(ActiveView::Activities(view.picker));
             }
             Some(ActiveView::Question(_)) => {}
+            Some(ActiveView::Context(_)) => self.view = None,
             None => {}
         }
     }

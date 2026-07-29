@@ -2,8 +2,8 @@
 
 use super::registry::{AgentRecord, InboxDecision, now_millis};
 use crate::{
-    ActivityStatus, AgentSummary, AgentTranscript, CoreError, HistoryEntry, MessageRole,
-    core::ActiveSubmission,
+    ActivityStatus, AgentSummary, AgentTranscript, CoreError, HistoryEntry,
+    InstructionSourceSummary, MessageRole, core::ActiveSubmission,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -102,6 +102,14 @@ impl AgentRecord {
                 state.transcript.push_tool_result(result);
             }
         }
+    }
+
+    pub(super) fn set_instruction_sources(&self, sources: Vec<InstructionSourceSummary>) {
+        self.state
+            .lock()
+            .expect("agent record mutex must not be poisoned")
+            .transcript
+            .set_instruction_sources(sources);
     }
 
     pub(super) fn finish(&self, status: ActivityStatus, result: &str) -> bool {

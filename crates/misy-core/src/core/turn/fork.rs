@@ -2,11 +2,6 @@
 
 use crate::{HistoryEntry, Message, MessageRole};
 
-const CHILD_SYSTEM_INSTRUCTION: &str = concat!(
-    "You are a child agent working on a delegated task. Work independently, return a concise ",
-    "result to your parent, and never speak to the root user as that user's assistant."
-);
-
 /// Returns only completed parent entries, excluding the assistant entry that contains a spawn.
 pub(crate) fn forkable_prefix(history: &[HistoryEntry]) -> Vec<HistoryEntry> {
     let completed_ids = history
@@ -28,14 +23,7 @@ pub(crate) fn forkable_prefix(history: &[HistoryEntry]) -> Vec<HistoryEntry> {
 
 /// Builds an isolated child history from a completed parent prefix and one assignment.
 pub(crate) fn child_history(parent_prefix: &[HistoryEntry], task: &str) -> Vec<HistoryEntry> {
-    let mut history = Vec::with_capacity(parent_prefix.len().saturating_add(2));
-    history.push(HistoryEntry {
-        message: Message::new(MessageRole::System, CHILD_SYSTEM_INSTRUCTION),
-        attachments: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_results: Vec::new(),
-        provider_metadata: serde_json::Value::Null,
-    });
+    let mut history = Vec::with_capacity(parent_prefix.len().saturating_add(1));
     let removed_ids = parent_prefix
         .iter()
         .flat_map(|entry| entry.tool_calls.iter())
@@ -123,10 +111,10 @@ mod tests {
 
         let child = child_history(&forkable_prefix(&parent), "inspect this");
 
-        assert_eq!(child[1].tool_calls.len(), 1);
-        assert_eq!(child[1].tool_calls[0].name, "read_file");
-        assert_eq!(child[2].tool_results.len(), 1);
-        assert_eq!(child[2].tool_results[0].tool_call_id, "read");
+        assert_eq!(child[0].tool_calls.len(), 1);
+        assert_eq!(child[0].tool_calls[0].name, "read_file");
+        assert_eq!(child[1].tool_results.len(), 1);
+        assert_eq!(child[1].tool_results[0].tool_call_id, "read");
     }
 
     #[test]
@@ -139,7 +127,7 @@ mod tests {
 
         let child = child_history(&forkable_prefix(&parent), "inspect this");
 
-        assert_eq!(child.len(), 2);
-        assert_eq!(child[1].message.role, MessageRole::User);
+        assert_eq!(child.len(), 1);
+        assert_eq!(child[0].message.role, MessageRole::User);
     }
 }

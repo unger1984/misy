@@ -22,7 +22,7 @@ pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
         CoreEvent::TodoListUpdated { .. }
         | CoreEvent::QuestionRequested { .. }
         | CoreEvent::QuestionResolved { .. } => true,
-        CoreEvent::SessionPersistenceFailed { .. } => false,
+        CoreEvent::SessionPersistenceFailed { .. } | CoreEvent::InstructionWarning { .. } => false,
         CoreEvent::ProviderDiscovered { .. }
         | CoreEvent::ModelsListed { .. }
         | CoreEvent::TextDelta { .. }
@@ -60,6 +60,7 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
         | CoreEvent::TodoListUpdated { .. }
         | CoreEvent::QuestionRequested { .. }
         | CoreEvent::QuestionResolved { .. }
+        | CoreEvent::InstructionWarning { .. }
         | CoreEvent::Shutdown => false,
     }
 }

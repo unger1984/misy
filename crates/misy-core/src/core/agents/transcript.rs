@@ -1,7 +1,7 @@
 //! Bounded semantic transcript storage for child-agent sessions.
 
 use super::{AgentSummary, AgentTranscript, AgentTranscriptEntry, AgentTranscriptEntryKind};
-use crate::{ToolCall, ToolResult};
+use crate::{InstructionSourceSummary, ToolCall, ToolResult};
 use std::collections::VecDeque;
 
 const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
@@ -13,6 +13,7 @@ pub(super) struct TranscriptBuffer {
     entries: VecDeque<AgentTranscriptEntry>,
     retained_bytes: usize,
     truncated: bool,
+    instruction_sources: Vec<InstructionSourceSummary>,
 }
 
 impl TranscriptBuffer {
@@ -87,7 +88,12 @@ impl TranscriptBuffer {
             agent,
             entries: self.entries.iter().cloned().collect(),
             truncated: self.truncated,
+            instruction_sources: self.instruction_sources.clone(),
         }
+    }
+
+    pub(super) fn set_instruction_sources(&mut self, sources: Vec<InstructionSourceSummary>) {
+        self.instruction_sources = sources;
     }
 
     fn push(&mut self, mut entry: AgentTranscriptEntry) {

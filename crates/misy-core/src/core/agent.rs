@@ -30,7 +30,16 @@ impl CoreState {
             Arc::clone(&self.todos),
             Arc::clone(active),
             id,
+            self.instructions
+                .lock()
+                .expect("instruction runtime mutex must not be poisoned")
+                .main(),
         );
+        state
+            .instructions()
+            .lock()
+            .expect("instruction session mutex must not be poisoned")
+            .begin_submission();
         self.push_main_history(HistoryEntry {
             message,
             attachments,
@@ -38,7 +47,7 @@ impl CoreState {
             tool_results: Vec::new(),
             provider_metadata: Value::Null,
         });
-        match turn::run_turns(self, &state).await {
+        let outcome = match turn::run_turns(self, &state).await {
             Ok(()) => CoreEvent::Completed { submission: id },
             Err(message) if message == "cancelled" || active.cancelled.load(Ordering::Acquire) => {
                 CoreEvent::Cancelled { submission: id }
@@ -47,7 +56,13 @@ impl CoreState {
                 submission: id,
                 message,
             },
-        }
+        };
+        state
+            .instructions()
+            .lock()
+            .expect("instruction session mutex must not be poisoned")
+            .finish_submission();
+        outcome
     }
 
     fn push_main_history(&self, entry: HistoryEntry) {

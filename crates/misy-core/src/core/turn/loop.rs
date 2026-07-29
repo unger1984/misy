@@ -43,49 +43,89 @@ pub(crate) async fn run_turns_with_limit(
     remaining: &mut usize,
 ) -> Result<(), String> {
     let mut active_image_bytes = history_image_bytes(state);
+    let mut ephemeral_entries = 0;
     while *remaining > 0 {
         *remaining -= 1;
+        if let Err(error) = cancel_if_requested(core, state).await {
+            remove_ephemeral_history(state, &mut ephemeral_entries);
+            return Err(error);
+        }
+        let turn = run_model_turn(core, state).await;
+        remove_ephemeral_history(state, &mut ephemeral_entries);
+        let turn = turn?;
         cancel_if_requested(core, state).await?;
-        let turn = run_model_turn(core, state).await?;
-        cancel_if_requested(core, state).await?;
-        push_history(
-            core,
-            state,
-            HistoryEntry {
-                message: Message::new(MessageRole::Assistant, turn.text),
-                attachments: Vec::new(),
-                tool_calls: turn.tool_calls.clone(),
-                tool_results: Vec::new(),
-                provider_metadata: turn.metadata,
-            },
-        );
+        let assistant_entry = HistoryEntry {
+            message: Message::new(MessageRole::Assistant, turn.text),
+            attachments: Vec::new(),
+            tool_calls: turn.tool_calls.clone(),
+            tool_results: Vec::new(),
+            provider_metadata: turn.metadata,
+        };
         if turn.tool_calls.is_empty() {
+            push_history(core, state, assistant_entry, true);
             return Ok(());
         }
-        let results = dispatch_tools(core, state, &turn.tool_calls, &mut active_image_bytes).await;
-        push_history(
+        let prepared = super::preflight::prepare_tool_batch(core, state, &turn.tool_calls);
+        let ephemeral = prepared.halted;
+        push_history(core, state, assistant_entry, !ephemeral);
+        let results = dispatch_tools(
             core,
             state,
-            HistoryEntry {
-                message: Message::new(MessageRole::Tool, ""),
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_results: results,
-                provider_metadata: Value::Null,
-            },
-        );
+            &turn.tool_calls,
+            prepared,
+            &mut active_image_bytes,
+        )
+        .await;
+        let tool_entry = HistoryEntry {
+            message: Message::new(MessageRole::Tool, ""),
+            attachments: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_results: results,
+            provider_metadata: Value::Null,
+        };
+        push_history(core, state, tool_entry, !ephemeral);
+        ephemeral_entries = usize::from(ephemeral).saturating_mul(2);
     }
+    remove_ephemeral_history(state, &mut ephemeral_entries);
     Err(format!("agent stopped after {MAX_MODEL_TURNS} model turns"))
+}
+
+fn remove_ephemeral_history(state: &AgentTurnState, count: &mut usize) {
+    if *count == 0 {
+        return;
+    }
+    let mut history = state
+        .history()
+        .lock()
+        .expect("turn history mutex must not be poisoned");
+    let retained = history.len().saturating_sub(*count);
+    history.truncate(retained);
+    *count = 0;
 }
 
 async fn dispatch_tools(
     core: &CoreState,
     state: &AgentTurnState,
     calls: &[ToolCall],
+    prepared: super::preflight::PreparedBatch,
     active_image_bytes: &mut usize,
 ) -> Vec<crate::ToolResult> {
+    let super::preflight::PreparedBatch {
+        calls: prepared_calls,
+        results: prepared_results,
+        halted,
+    } = prepared;
+    if halted {
+        return prepared_results;
+    }
     let mut results = Vec::with_capacity(calls.len());
-    for call in calls {
+    for (original, prepared) in calls.iter().zip(prepared_calls) {
+        let Some(call) = prepared else {
+            let result = super::preflight::prepared_result(&prepared_results, original);
+            emit_tool_result(core, state, result.clone());
+            results.push(result);
+            continue;
+        };
         let result = if state.active().cancelled.load(Ordering::Acquire) {
             crate::ToolResult::error(&call.id, "tool dispatch cancelled")
         } else if call.name == "view_image"
@@ -96,18 +136,18 @@ async fn dispatch_tools(
                 "view_image is unavailable because the selected model lacks image input",
             )
         } else if super::super::tool_router::is_core_tool(&call.name) {
-            super::super::tool_router::dispatch(core, state, call).await
+            super::super::tool_router::dispatch(core, state, &call).await
         } else {
             match state.identity() {
                 super::AgentTurnIdentity::Main => {
                     core.dispatcher
-                        .dispatch_cancellable(call, state.active().cancellation_receiver())
+                        .dispatch_cancellable(&call, state.active().cancellation_receiver())
                         .await
                 }
                 super::AgentTurnIdentity::Child(id) => {
                     core.dispatcher
                         .dispatch_for_owner(
-                            call,
+                            &call,
                             ActivityOwner::Agent(id),
                             state.active().cancellation_receiver(),
                         )
@@ -200,10 +240,23 @@ async fn start_and_collect_turn(
 
 async fn chat_params(core: &CoreState, state: &AgentTurnState) -> Result<Value, String> {
     let supports_images = core.model_supports(state.model(), InputModality::Image);
+    let rendered = state
+        .instructions()
+        .lock()
+        .expect("instruction session mutex must not be poisoned")
+        .rendered(!state.permits_agent_tools());
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": rendered.system_prompt,
+        "tool_calls": [],
+        "tool_results": [],
+        "provider_metadata": Value::Null,
+    })];
+    messages.extend(serialized_history(state, supports_images));
     let mut params = json!({
         "provider_id": state.model().provider.as_str(),
         "model_id": state.model().model.as_str(),
-        "messages": serialized_history(state, supports_images),
+        "messages": messages,
         "tools": tool_definitions(core, state, supports_images),
     });
     if let Some(credentials) = core
@@ -424,19 +477,23 @@ fn record_metadata(stream: &mut TurnStream, metadata: Option<Value>) {
     }
 }
 
-fn emit_tool_result(core: &CoreState, state: &AgentTurnState, result: crate::ToolResult) {
+pub(super) fn emit_tool_result(
+    core: &CoreState,
+    state: &AgentTurnState,
+    result: crate::ToolResult,
+) {
     if let TurnEventSink::Submission(submission) = state.events() {
         core.emit(&CoreEvent::ToolResult { submission, result });
     }
 }
 
-fn push_history(core: &CoreState, state: &AgentTurnState, entry: HistoryEntry) {
+fn push_history(core: &CoreState, state: &AgentTurnState, entry: HistoryEntry, persist: bool) {
     state
         .history()
         .lock()
         .expect("turn history mutex must not be poisoned")
         .push(entry.clone());
-    if state.persistence() == PersistencePolicy::Conversation {
+    if persist && state.persistence() == PersistencePolicy::Conversation {
         core.persist_history(entry);
     }
 }
@@ -490,7 +547,10 @@ fn tool_definitions(
     }
 }
 
-fn serialize_history_entry(entry: &HistoryEntry, include_images: bool) -> Value {
+pub(in crate::core) fn serialize_history_entry(
+    entry: &HistoryEntry,
+    include_images: bool,
+) -> Value {
     let role = match entry.message.role {
         MessageRole::System => "system",
         MessageRole::User => "user",

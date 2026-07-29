@@ -75,10 +75,13 @@ pub use activity::{
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, MisyPaths};
 pub use core::{
     AgentId, AgentSummary, AgentTranscript, AgentTranscriptEntry, AgentTranscriptEntryKind,
-    AvailableModels, ClientCapabilities, CoreError, CoreEvent, CoreOptions, CoreSnapshot,
-    HistoryEntry, MisyCore, ProviderAuthState, ProviderModelError, QuestionItem, QuestionOption,
-    QuestionRequest, QuestionRequestId, QuestionResponse, QuestionSource, ResumeOutcome,
-    SessionError, SessionSummary, SubmissionId, TodoItem, TodoStatus,
+    AvailableModels, ClientCapabilities, ContextCategory, ContextCategoryUsage, ContextReport,
+    ContextReportState, CoreError, CoreEvent, CoreOptions, CoreSnapshot, HistoryEntry,
+    InstructionOwner, InstructionScope, InstructionSourceKind, InstructionSourceStatus,
+    InstructionSourceSummary, InstructionWarning, InstructionWarningReason, MisyCore,
+    ProviderAuthState, ProviderModelError, QuestionItem, QuestionOption, QuestionRequest,
+    QuestionRequestId, QuestionResponse, QuestionSource, ResumeOutcome, SessionError,
+    SessionSummary, SubmissionId, TodoItem, TodoStatus,
 };
 pub use domain::{
     Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderDisplayName, ProviderId, ToolCall,

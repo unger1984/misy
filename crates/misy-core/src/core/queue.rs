@@ -55,12 +55,27 @@ impl MisyCore {
     ///
     /// Returns an error when no model is selected, the provider or model lacks image input,
     /// the attachment count exceeds the limit, or the core has shut down.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal instruction-state mutex is poisoned.
     pub async fn submit_with_attachments(
         &self,
         message: Message,
         attachments: Vec<ImageAttachment>,
     ) -> Result<SubmissionId, CoreError> {
         self.inner.state.ensure_running()?;
+        if let Some(error) = self
+            .inner
+            .state
+            .instructions
+            .lock()
+            .expect("instruction runtime mutex must not be poisoned")
+            .root()
+            .base_error()
+        {
+            return Err(CoreError::InstructionBlocked(error));
+        }
         let model = self
             .selected_model()
             .await

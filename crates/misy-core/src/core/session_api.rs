@@ -30,24 +30,49 @@ impl MisyCore {
     /// Returns an error when work is active, the core is shut down, or session state is poisoned.
     pub fn new_session(&self) -> Result<(), CoreError> {
         let _queue = self.lock_idle_session_queue()?;
-        self.inner
+        let workspace_cwd = self
+            .inner
+            .state
+            .instructions
+            .lock()
+            .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?
+            .root()
+            .workspace_cwd()
+            .to_path_buf();
+        let instruction_root = super::instructions::InstructionRoot::load_at(
+            &self.inner.state.misy_paths,
+            true,
+            &workspace_cwd,
+        )
+        .map_err(CoreError::InstructionBlocked)?;
+        let mut history = self
+            .inner
             .state
             .history
             .lock()
-            .map_err(|_| SessionError::StatePoisoned)?
-            .clear();
-        self.inner
+            .map_err(|_| SessionError::StatePoisoned)?;
+        let mut todos = self
+            .inner
             .state
             .todos
             .lock()
-            .map_err(|_| SessionError::StatePoisoned)?
-            .clear();
-        self.inner
+            .map_err(|_| SessionError::StatePoisoned)?;
+        let mut session = self
+            .inner
             .state
             .session
             .lock()
-            .map_err(|_| SessionError::StatePoisoned)?
-            .detach();
+            .map_err(|_| SessionError::StatePoisoned)?;
+        let mut instructions = self
+            .inner
+            .state
+            .instructions
+            .lock()
+            .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?;
+        history.clear();
+        todos.clear();
+        session.detach();
+        instructions.replace(instruction_root);
         Ok(())
     }
 
@@ -58,26 +83,60 @@ impl MisyCore {
     /// Returns an error when work is active or the requested saved session cannot be loaded.
     pub fn resume_session(&self, id: &str) -> Result<ResumeOutcome, CoreError> {
         let _queue = self.lock_idle_session_queue()?;
+        let workspace_cwd = self
+            .inner
+            .state
+            .instructions
+            .lock()
+            .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?
+            .root()
+            .workspace_cwd()
+            .to_path_buf();
+        let instruction_root = super::instructions::InstructionRoot::load_at(
+            &self.inner.state.misy_paths,
+            true,
+            &workspace_cwd,
+        )
+        .map_err(CoreError::InstructionBlocked)?;
+        let loaded = self
+            .inner
+            .state
+            .session
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?
+            .load(id)?;
+        let mut history = self
+            .inner
+            .state
+            .history
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?;
+        let mut todos = self
+            .inner
+            .state
+            .todos
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?;
         let mut session = self
             .inner
             .state
             .session
             .lock()
             .map_err(|_| SessionError::StatePoisoned)?;
-        let loaded = session.load(id)?;
-        *self
+        let mut instructions = self
             .inner
             .state
-            .history
+            .instructions
             .lock()
-            .map_err(|_| SessionError::StatePoisoned)? = loaded.history.clone();
-        *self
-            .inner
-            .state
-            .todos
-            .lock()
-            .map_err(|_| SessionError::StatePoisoned)? = loaded.todos.clone();
+            .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?;
+        *history = loaded.history.clone();
+        *todos = loaded.todos.clone();
         session.attach(&loaded);
+        instructions.replace(instruction_root);
+        drop(todos);
+        drop(instructions);
+        drop(session);
+        drop(history);
         let warning = self.restore_saved_model(loaded.summary.model.as_ref());
         Ok(ResumeOutcome {
             session: loaded.summary,

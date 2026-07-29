@@ -23,6 +23,8 @@ pub enum UiAction {
     ResumeSession(String),
     /// Fetch account-limit usage for the selected model's provider.
     ShowUsage,
+    /// Open the core-owned context usage report.
+    ShowContext,
     /// Select a model.
     SelectModel(ModelRef),
     /// Submit a user prompt.
@@ -110,6 +112,8 @@ pub enum UiMode {
     ActivityDetail,
     /// Structured question dialog owned by the core lifecycle.
     Question,
+    /// Scrollable context-usage report.
+    Context,
 }
 
 /// Maps navigation keys to their old action vocabulary for API compatibility.
@@ -163,6 +167,7 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         "/provider" => Ok(UiAction::ShowProviders),
         "/model" => Ok(UiAction::ShowModels),
         "/tasks" => Ok(UiAction::ShowActivities),
+        "/context" => Ok(UiAction::ShowContext),
         "/new" | "/clear" => Ok(UiAction::NewSession),
         "/resume" => Ok(UiAction::ShowSessions),
         "/status" | "/usage" => Ok(UiAction::ShowUsage),
@@ -175,6 +180,9 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/tasks ") => {
             Err("use `/tasks` without arguments".to_owned())
+        }
+        command if command.starts_with("/context ") => {
+            Err("use `/context` without arguments".to_owned())
         }
         command if command.starts_with("/new ") => Err("use `/new` without arguments".to_owned()),
         command if command.starts_with("/clear ") => {

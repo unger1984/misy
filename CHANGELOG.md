@@ -9,6 +9,11 @@
 - Added the capability-gated `AskUserQuestion` tool with single- and multi-select prompts, custom
   answers, cancellation-safe response handling, dismissal suppression, and an interactive TUI
   dialog.
+- Added hierarchical `AGENTS.md` context with mandatory global and project-root instructions,
+  target-scoped nested rules, stable main/child caches, leaf-first budgets, and atomic tool-batch
+  preflight before filesystem side effects.
+- Added a scrollable `/context` popup backed by a content-free core report for model window,
+  estimated prompt categories, active instruction sources, decoded image bytes, and warnings.
 - Added independent synchronous and background child agents with inherited context, correlated
   provider streams, scoped command ownership, addressable messaging, bounded transcripts, and a
   pull-based completion mailbox.
@@ -25,6 +30,9 @@
 
 ### Changed
 
+- Moved child role guidance and all `AGENTS.md` contents into an ephemeral request system prefix;
+  session JSONL and visible transcripts retain neither instruction contents nor internal scope
+  retry turns.
 - Redesigned the session transcript with a consistent left inset, distinct user and assistant
   blocks, paired friendly tool calls and results, compact head/tail output, global `Ctrl+O`
   expansion, background-task completion cards, and successful tool-work separators.

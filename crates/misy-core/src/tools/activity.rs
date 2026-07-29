@@ -188,6 +188,11 @@ impl ActivityManager {
         summaries
     }
 
+    pub(super) fn cwd_for_owner(&self, owner: ActivityOwner, id: ActivityId) -> Option<String> {
+        self.record_for_owner(owner, id)
+            .and_then(|record| record.summary().cwd)
+    }
+
     pub(super) async fn output(
         &self,
         id: ActivityId,

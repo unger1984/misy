@@ -32,6 +32,20 @@ pub struct ToolRegistry {
 struct RegisteredTool {
     definition: ToolDefinition,
     validator: Validator,
+    scope_policy: ToolScopePolicy,
+}
+
+/// Filesystem scope required before one validated tool call may execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolScopePolicy {
+    /// A string argument names the filesystem target.
+    PathArgument(&'static str),
+    /// An optional string argument selects the command working directory.
+    WorkingDirectory(&'static str),
+    /// A task identifier inherits the immutable cwd of its command activity.
+    ActivityWorkingDirectory(&'static str),
+    /// The tool has no filesystem side effect requiring hierarchical instructions.
+    None,
 }
 
 impl ToolRegistry {
@@ -48,11 +62,14 @@ impl ToolRegistry {
             .map(|definition| {
                 let validator = compile_schema(&definition.input_schema)
                     .expect("built-in tool schemas must be valid JSON Schema draft 2020-12");
+                let scope_policy = builtin_scope_policy(&definition.name)
+                    .expect("every built-in tool must declare an instruction scope policy");
                 (
                     definition.name.clone(),
                     RegisteredTool {
                         definition,
                         validator,
+                        scope_policy,
                     },
                 )
             })
@@ -90,6 +107,7 @@ impl ToolRegistry {
             RegisteredTool {
                 definition,
                 validator,
+                scope_policy: ToolScopePolicy::None,
             },
         );
         Ok(())
@@ -229,6 +247,19 @@ impl ToolDispatcher {
     pub(crate) fn validate_arguments(&self, call: &ToolCall) -> Result<(), ToolRegistryError> {
         self.registry
             .validate_arguments(&call.name, &call.arguments)
+    }
+
+    pub(crate) fn scope_policy(&self, name: &str) -> Result<ToolScopePolicy, ToolRegistryError> {
+        self.registry
+            .definitions
+            .get(name)
+            .map(|tool| tool.scope_policy)
+            .ok_or_else(|| ToolRegistryError::UnknownTool(name.to_owned()))
+    }
+
+    pub(crate) fn activity_cwd(&self, call: &ToolCall, owner: ActivityOwner) -> Option<String> {
+        let id = task_id(call)?;
+        self.activities.cwd_for_owner(owner, id)
     }
 
     /// Replaces the command execution timeout used by `exec_command`.
@@ -453,4 +484,19 @@ fn compile_schema(schema: &Value) -> Result<Validator, ToolRegistryError> {
         .with_draft(Draft::Draft202012)
         .build(schema)
         .map_err(|error| ToolRegistryError::InvalidSchema(error.to_string()))
+}
+
+fn builtin_scope_policy(name: &str) -> Option<ToolScopePolicy> {
+    match name {
+        "list_directory" | "read_file" | "view_image" | "write_file" => {
+            Some(ToolScopePolicy::PathArgument("path"))
+        }
+        "exec_command" => Some(ToolScopePolicy::WorkingDirectory("cwd")),
+        "write_stdin" => Some(ToolScopePolicy::ActivityWorkingDirectory("task_id")),
+        "task_list" | "task_stop" | "spawn_agent" | "agent_list" | "agent_wait"
+        | "agent_output" | "agent_message" | "agent_stop" | "SetTodoList" | "AskUserQuestion" => {
+            Some(ToolScopePolicy::None)
+        }
+        _ => None,
+    }
 }

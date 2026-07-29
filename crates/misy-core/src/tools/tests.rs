@@ -1,7 +1,19 @@
-use super::{ToolDispatcher, ToolRegistry};
+use super::{ToolDispatcher, ToolRegistry, builtin_scope_policy};
 use crate::ToolCall;
 use serde_json::json;
 use std::time::Duration;
+
+#[test]
+fn every_builtin_declares_an_instruction_scope_policy() {
+    let registry = ToolRegistry::new();
+    for definition in registry.definitions() {
+        assert!(
+            builtin_scope_policy(&definition.name).is_some(),
+            "{} has no scope policy",
+            definition.name
+        );
+    }
+}
 
 #[cfg(unix)]
 #[tokio::test]

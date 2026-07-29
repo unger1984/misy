@@ -72,6 +72,12 @@ model, authentication, session, and tool orchestration remain in the core.
   remaining amounts, exhausted limits, and known reset timing. If no model is selected, the
   provider does not declare usage capability version 1, authentication fails, the request times
   out, or the report is invalid, the TUI renders the error without changing the selected model.
+- `/context` opens a dedicated centered popup without provider or filesystem I/O. It renders the
+  core-owned report for the selected model and advertised window, estimated Misy prompt,
+  `AGENTS.md`, tool-schema, message, and free-space categories, active or last instruction source
+  summaries, decoded image count/bytes, and blocked/truncated-source warnings. A zero model window
+  is shown as unknown, and images explicitly have no fabricated token estimate. `Up`, `Down`,
+  `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
 - `/new` and `/clear` start the same clean conversation while retaining the previous persisted
@@ -211,6 +217,7 @@ behavior tests. Core events or lifecycle changes also require updates to
 - [`crates/misy-tui/src/lib.rs`](../crates/misy-tui/src/lib.rs)
 - [`crates/misy-tui/src/tui/client.rs`](../crates/misy-tui/src/tui/client.rs)
 - [`crates/misy-tui/src/tui/state.rs`](../crates/misy-tui/src/tui/state.rs)
+- [`crates/misy-tui/src/tui/context_popup.rs`](../crates/misy-tui/src/tui/context_popup.rs)
 - [`crates/misy-tui/src/tui/terminal.rs`](../crates/misy-tui/src/tui/terminal.rs)
 - [`crates/misy-tui/tests/tui.rs`](../crates/misy-tui/tests/tui.rs)
 - [`crates/misy-tui/tests/tui_model_popup.rs`](../crates/misy-tui/tests/tui_model_popup.rs)

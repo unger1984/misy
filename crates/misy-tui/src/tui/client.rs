@@ -342,6 +342,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
                         }
                     }
                     self.state.apply_core_event(event);
+                    if self.state.mode() == UiMode::Context {
+                        self.state.refresh_context(self.core.context_report());
+                    }
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
@@ -359,6 +362,19 @@ impl<B: BrowserHandoff> TuiClient<B> {
     fn handle_view_key(&mut self, key: UiKey) -> Result<(), TuiError> {
         if self.state.mode() == UiMode::Question {
             return self.handle_question_key(key);
+        }
+        if self.state.mode() == UiMode::Context {
+            match key {
+                UiKey::Up => self.state.reduce(&UiAction::PickerUp),
+                UiKey::Down => self.state.reduce(&UiAction::PickerDown),
+                UiKey::PageUp => self.state.scroll_context_page(false),
+                UiKey::PageDown => self.state.scroll_context_page(true),
+                UiKey::Home => self.state.scroll_context_edge(false),
+                UiKey::End => self.state.scroll_context_edge(true),
+                UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
+                _ => {}
+            }
+            return Ok(());
         }
         if self.state.mode() == UiMode::ActivityDetail {
             match key {
@@ -443,6 +459,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::NewSession => self.start_new_session()?,
             UiAction::ResumeSession(id) => self.resume_session(&id)?,
             UiAction::ShowUsage => self.show_usage()?,
+            UiAction::ShowContext => self.state.open_context(self.core.context_report()),
             UiAction::SubmitPrompt(prompt) => self.submit_prompt(prompt),
             UiAction::SelectModel(model) => self.select_model(model),
             UiAction::StartAuth(provider) => {
@@ -586,6 +603,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             }
             UiMode::ActivityDetail => {}
             UiMode::Question => {}
+            UiMode::Context => {}
             UiMode::Input => {}
         }
         Ok(())

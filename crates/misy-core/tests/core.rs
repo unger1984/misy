@@ -26,6 +26,8 @@ mod concurrency;
 mod contracts_integration;
 #[path = "core/images.rs"]
 mod images;
+#[path = "core/instructions.rs"]
+mod instructions;
 #[path = "core/lifecycle.rs"]
 mod lifecycle;
 #[path = "core/limits.rs"]
@@ -116,6 +118,32 @@ fn test_core_with_questions(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf
     )
     .expect("core discovery");
     (temporary, core, target)
+}
+
+fn test_core_in_workspace(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf, PathBuf) {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let workspace = temporary.path().join("workspace");
+    fs::create_dir_all(workspace.join(".git")).expect("project marker");
+    fs::create_dir_all(workspace.join("frontend")).expect("frontend directory");
+    fs::create_dir_all(workspace.join("backend")).expect("backend directory");
+    fs::create_dir_all(temporary.path().join("misy")).expect("Misy directory");
+    fs::write(temporary.path().join("misy/AGENTS.md"), "global rules").expect("global rules");
+    fs::write(workspace.join("AGENTS.md"), "root rules").expect("root rules");
+    fs::write(workspace.join("frontend/AGENTS.md"), "frontend rules").expect("frontend rules");
+    fs::write(workspace.join("backend/AGENTS.md"), "backend rules").expect("backend rules");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(&bundled, "fixture", &fixture, &workspace);
+    let core = MisyCore::discover_in_workspace(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+        &workspace,
+    )
+    .expect("core discovery");
+    let frontend = workspace.join(format!("frontend/{name}.txt"));
+    let backend = workspace.join(format!("backend/{name}.txt"));
+    (temporary, core, frontend, backend)
 }
 
 fn fixture_model() -> ModelRef {

@@ -25,5 +25,6 @@
 - Read [TUI Client](docs/tui-client.md) before changing commands, composer behavior, pickers, rendering, keyboard input, or browser handoff.
 - Read [Code Style](docs/code-style.md) before writing or reviewing any code, then the document for the language you are touching: [Rust](docs/code-style-rust.md) or [TypeScript](docs/code-style-typescript.md).
 - Read [Development and Testing](docs/development-and-testing.md) before implementation, verification, or test-structure changes.
-- Read [Decisions and References](docs/decisions-and-references.md) before making a new architecture or UX choice. Inspect both local references before inventing a new solution.
+- Read [Decisions and References](docs/decisions-and-references.md) before making a new architecture
+  or UX choice. Inspect all three local references before inventing a new solution.
 - Start at [Documentation Index](docs/README.md) when the task spans multiple areas.

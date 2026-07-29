@@ -50,8 +50,12 @@ model, authentication, session, and tool orchestration remain in the core.
 - A plain left click in composer text moves its cursor. Dragging across any visible Misy content
   renders an application-owned selection; releasing the mouse sends the selected text over OSC 52
   and immediately clears the highlight. This lets a terminal host such as Herdr own clipboard
-  access and display its normal copy feedback. Bracketed paste and forwarded `Cmd+V` insert text
-  atomically at the cursor and never submit embedded newlines.
+  access and display its normal copy feedback. Bracketed paste inserts text atomically at the
+  cursor and never submits embedded newlines. Forwarded `Ctrl+V` and `Cmd+V` first inspect the
+  clipboard for an image and insert a numbered `[Image #N]` placeholder when one is available;
+  otherwise they paste text. Deleting a placeholder removes its payload, and image-only prompts
+  are valid. A draft accepts at most four images. Persisted input history excludes both attachment
+  payloads and their placeholders.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
   without taking focus from it. The popup shows at most eight commands; `Up` and `Down` scroll its
   window and wrap between the first and last matching commands. `Tab` completes the selected
@@ -99,6 +103,10 @@ model, authentication, session, and tool orchestration remain in the core.
   text the activity row says `Thinking…`; once text begins it says `Responding…`.
 
 ## Lifecycle and Safety
+
+- The TUI keeps the current draft and pasted images until the core accepts a submission. If image
+  normalization or the selected provider/model capability check fails, the draft remains editable
+  and the error is shown. The core repeats validation at its public submission boundary.
 
 - Opening the provider list does not start every plugin; local manifest/credential state is used
   until a concrete provider action requires the process.

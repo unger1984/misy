@@ -2,7 +2,7 @@
 
 mod support;
 
-use misy_core::{ModelId, ModelRef, ProviderId};
+use misy_core::{MisyPaths, ModelId, ModelRef, ProviderId};
 use misy_tui::{TranscriptRow, TuiClient, UiAction, UiKey, UiMode, UiState, map_input};
 use ratatui::style::Color;
 use serde_json::json;
@@ -74,6 +74,159 @@ async fn bracketed_paste_is_atomic_multiline_input_at_the_cursor() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn bracketed_image_marker_remains_plain_text() {
+    let (_temporary, mut client, _) = test_client().await;
+
+    client.paste_text("[Image #1]\nplain paste");
+
+    assert_eq!(client.state().composer_attachment_count(), 0);
+    assert_eq!(client.state().composer_input(), "[Image #1]\nplain paste");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn image_only_submission_clears_only_after_core_acceptance() {
+    let (_temporary, mut client, _) = test_client().await;
+    select_first_model(&mut client).await;
+    client.paste_image_rgba(1, 1, vec![255, 0, 0, 255]);
+    assert_eq!(client.state().composer_attachment_count(), 1);
+
+    client.submit_composer().expect("submit image-only draft");
+
+    assert_eq!(client.state().composer_attachment_count(), 1);
+    assert_eq!(client.state().composer_input(), "[Image #1] ");
+    wait_for(&mut client, |client| {
+        client.state().composer_attachment_count() == 0
+            && client.state().composer_input().is_empty()
+    })
+    .await;
+    assert_eq!(client.state().history_len(), 0);
+    assert!(
+        client.state().transcript().iter().any(
+            |row| matches!(row, TranscriptRow::UserPrompt(text) if text.contains("[Image #1]"))
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_acceptance_blocks_edits_that_would_duplicate_the_submitted_prefix() {
+    let (_temporary, mut client, _) = test_client().await;
+    select_first_model(&mut client).await;
+    client.insert_text("session-one");
+    client.submit_composer().expect("submit first prompt");
+
+    client.insert_text(" typed too soon");
+    client.paste_text(" pasted too soon");
+    client.insert_newline();
+    client.backspace();
+    client.handle_key(UiKey::Delete).expect("blocked delete");
+    client
+        .handle_key(UiKey::Up)
+        .expect("blocked history recall");
+    client.paste_image_rgba(1, 1, vec![255, 0, 0, 255]);
+
+    assert_eq!(client.state().composer_input(), "session-one");
+    assert_eq!(client.state().composer_attachment_count(), 0);
+    wait_for(&mut client, |client| {
+        client.state().composer_input().is_empty()
+    })
+    .await;
+
+    client.insert_text("session-two");
+    client.submit_composer().expect("submit second prompt");
+    wait_for(&mut client, |client| {
+        client
+            .state()
+            .transcript()
+            .iter()
+            .any(|row| matches!(row, TranscriptRow::UserPrompt(text) if text == "session-two"))
+    })
+    .await;
+    let submitted: Vec<&str> = client
+        .state()
+        .transcript()
+        .iter()
+        .filter_map(|row| match row {
+            TranscriptRow::UserPrompt(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(submitted, ["session-one", "session-two"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn persistent_history_records_only_text_from_an_image_prompt() {
+    let (temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "image-history.txt")]);
+    let paths = MisyPaths::from_root(temporary.path().join("misy"));
+    let mut client =
+        TuiClient::with_persistent_history(core, RecordingBrowser::default(), &paths).await;
+    select_first_model(&mut client).await;
+    client.paste_image_rgba(1, 1, vec![255, 0, 0, 255]);
+    client.insert_text("describe this");
+
+    client.submit_composer().expect("submit image prompt");
+    wait_for(&mut client, |client| {
+        client.state().composer_input().is_empty()
+    })
+    .await;
+
+    let stored = fs::read_to_string(paths.root().join("prompt-history.jsonl"))
+        .expect("read persistent prompt history");
+    assert!(stored.contains("describe this"));
+    assert!(!stored.contains("[Image #"));
+    assert!(!stored.contains("data_base64"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn image_validation_error_preserves_the_existing_draft() {
+    let (_temporary, mut client, _) = test_client().await;
+    select_first_model(&mut client).await;
+    client.insert_text("keep this draft");
+
+    client.paste_image_rgba(2, 2, vec![0, 0, 0, 255]);
+
+    assert_eq!(client.state().composer_input(), "keep this draft");
+    assert_eq!(client.state().composer_attachment_count(), 0);
+    assert!(client.state().transcript().iter().any(|row| {
+        matches!(row, TranscriptRow::Error(message) if message.contains("clipboard image"))
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn capability_rejection_retains_text_and_images_for_retry() {
+    let (_temporary, mut client, _) = test_client().await;
+    select_first_model(&mut client).await;
+    client.paste_image_rgba(1, 1, vec![255, 0, 0, 255]);
+    client.insert_text("retry me");
+    let draft = client.state().composer_input().to_owned();
+
+    client.handle_input("/model").expect("open models");
+    wait_for(&mut client, |client| {
+        client.state().picker_labels().len() == 2
+    })
+    .await;
+    client.handle_key(UiKey::Down).expect("select text model");
+    client.handle_key(UiKey::Enter).expect("apply text model");
+    wait_for(&mut client, |client| client.state().mode() == UiMode::Input).await;
+    client.submit_composer().expect("submit unsupported image");
+    wait_for(&mut client, |client| {
+        client.state().transcript().iter().any(
+            |row| matches!(row, TranscriptRow::Error(message) if message.contains("Image input")),
+        )
+    })
+    .await;
+
+    assert_eq!(client.state().composer_input(), draft);
+    assert_eq!(client.state().composer_attachment_count(), 1);
+    client.insert_text(" after rejection");
+    assert!(
+        client
+            .state()
+            .composer_input()
+            .ends_with(" after rejection")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     let (_temporary, mut client, _) = test_client().await;
     client.insert_text("/");
@@ -126,6 +279,7 @@ async fn slash_popup_accepts_a_command_and_unknown_commands_report_errors() {
     assert!(client.state().transcript().iter().any(
         |row| matches!(row, TranscriptRow::Error(message) if message.contains("unknown command"))
     ));
+    assert_eq!(client.state().composer_input(), "/unknown");
 }
 
 #[tokio::test(flavor = "current_thread")]

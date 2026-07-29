@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, error::Error, fmt, fs, io::Read};
 use tokio::task::spawn_blocking;
 
 mod command;
+mod image_view;
 
 /// Upper bound for one `read_file` result; larger files are truncated with a marker.
 const MAX_READ_FILE_BYTES: usize = 4 * 1024 * 1024;
@@ -163,8 +164,18 @@ impl ToolDispatcher {
     /// This is the single source of truth for the declarations sent to providers: a tool that the
     /// dispatcher can execute must also be declared to the model, so the agent builds
     /// `chat.start` params from this list rather than from a separate registry.
+    #[cfg(feature = "test-support")]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.registry.definitions()
+        self.definitions_for(true)
+    }
+
+    /// Returns definitions supported by the selected model's input modalities.
+    pub fn definitions_for(&self, supports_images: bool) -> Vec<ToolDefinition> {
+        self.registry
+            .definitions()
+            .into_iter()
+            .filter(|definition| supports_images || definition.name != "view_image")
+            .collect()
     }
 
     /// Replaces the command execution timeout used by `run_command`.
@@ -190,6 +201,7 @@ impl ToolDispatcher {
         match call.name.as_str() {
             "list_directory" => self.list_directory(call).await,
             "read_file" => self.read_file(call).await,
+            "view_image" => image_view::execute(call).await,
             "run_command" => self.run_command(call).await,
             "write_file" => self.write_file(call).await,
             _ => ToolResult::error(&call.id, format!("tool `{}` is not executable", call.name)),
@@ -276,7 +288,7 @@ impl ToolDispatcher {
     }
 }
 
-fn builtin_definitions() -> [ToolDefinition; 4] {
+fn builtin_definitions() -> [ToolDefinition; 5] {
     [
         ToolDefinition::new(
             "list_directory",
@@ -298,6 +310,7 @@ fn builtin_definitions() -> [ToolDefinition; 4] {
                 "additionalProperties": false,
             }),
         ),
+        image_view::definition(),
         ToolDefinition::new(
             "run_command",
             "Run a local command without a shell.",

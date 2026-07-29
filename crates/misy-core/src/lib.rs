@@ -54,6 +54,8 @@ pub(crate) mod core;
 pub(crate) mod domain;
 /// Lossy/lossless event fan-out shared by the core bus and the provider host.
 pub(crate) mod fanout;
+/// Validated image payloads shared by submissions and local tools.
+pub(crate) mod image;
 /// Persistent, best-effort cache of provider model catalogs.
 pub(crate) mod model_cache;
 /// Provider package discovery and JSON-RPC subprocess supervision.
@@ -73,11 +75,15 @@ pub use domain::{
     Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderDisplayName, ProviderId, ToolCall,
     ToolDefinition, ToolResult,
 };
+pub use image::{
+    ImageAttachment, ImageAttachmentInfo, ImageError, InputModality, MAX_ACTIVE_IMAGE_BYTES,
+    MAX_IMAGE_INPUT_BYTES, MAX_IMAGE_OUTPUT_BYTES, MAX_SUBMISSION_IMAGES,
+};
 pub use providers::{
-    CHAT_CANCEL_REQUEST_ID_FIELD, PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION,
-    PROVIDER_STREAM_EVENTS, ProviderAuthMethod, ProviderCapability, ProviderDiscoveryError,
-    ProviderError, ProviderManifest, ProviderPackage, ProviderRequestId, USAGE_CAPABILITY,
-    USAGE_CAPABILITY_VERSION, USAGE_METHOD,
+    CHAT_CANCEL_REQUEST_ID_FIELD, IMAGE_INPUT_CAPABILITY, IMAGE_INPUT_CAPABILITY_VERSION,
+    PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION, PROVIDER_STREAM_EVENTS, ProviderAuthMethod,
+    ProviderCapability, ProviderDiscoveryError, ProviderError, ProviderManifest, ProviderPackage,
+    ProviderRequestId, USAGE_CAPABILITY, USAGE_CAPABILITY_VERSION, USAGE_METHOD,
 };
 
 // Integration tests exercise these internals through the crate boundary. They are not part of

@@ -190,6 +190,53 @@ test("rejects malformed auth.start, auth.complete, and chat.start params", async
 	expect(messages.get(5)).toBe("chat.start tools require string name and description");
 });
 
+test("accepts image attachments and rejects malformed message and tool images", async () => {
+	const png =
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y" +
+		"AAAAASUVORK5CYII=";
+	const validImage = `{"type":"image","media_type":"image/png","data_base64":"${png}"}`;
+	const credentials = '{"access_token":"t","type":"oauth"}';
+	const { replies } = await roundTrip(
+		'{"jsonrpc":"2.0","id":6,"method":"chat.start","params":{"model_id":"fast",' +
+			'"messages":[{"role":"user","content":"look","attachments":[' +
+			`${validImage}]},{"role":"tool","tool_results":[{"tool_call_id":"call-1",` +
+			`"content":"done","attachments":[${validImage}]}]}],"tools":[],` +
+			`"credentials":${credentials}}}\n` +
+			'{"jsonrpc":"2.0","id":7,"method":"chat.start","params":{"model_id":"fast",' +
+			'"messages":[{"role":"user","attachments":[{"type":"image",' +
+			'"media_type":"image/jpeg","data_base64":"aW1hZ2U="}]}],"tools":[],' +
+			`"credentials":${credentials}}}\n` +
+			'{"jsonrpc":"2.0","id":8,"method":"chat.start","params":{"model_id":"fast",' +
+			'"messages":[{"role":"tool","tool_results":[{"attachments":[{"type":"image",' +
+			'"media_type":"image/png","data_base64":"aW1hZ2U="}]}]}],"tools":[],' +
+			`"credentials":${credentials}}}\n`,
+	);
+	expect(replies).toContainEqual(expect.objectContaining({ id: 6, result: expect.any(Object) }));
+	expect(replies).toContainEqual({
+		jsonrpc: "2.0",
+		id: 7,
+		error: { code: -32000, message: "chat.start attachments require base64 image/png objects" },
+	});
+	expect(replies).toContainEqual({
+		jsonrpc: "2.0",
+		id: 8,
+		error: { code: -32000, message: "chat.start attachments require base64 image/png objects" },
+	});
+});
+
+test("rejects an NDJSON input frame larger than 32 MiB and resumes at its newline", async () => {
+	const request = '{"jsonrpc":"2.0","id":9,"method":"auth.logout","params":{}}\n';
+	const { replies } = await roundTrip(`${" ".repeat(32 * 1024 * 1024 + 1)}\n${request}`);
+	expect(replies).toEqual([
+		{
+			jsonrpc: "2.0",
+			id: null,
+			error: { code: -32700, message: "Input frame exceeds 32 MiB limit" },
+		},
+		{ jsonrpc: "2.0", id: 9, result: {} },
+	]);
+});
+
 test("completes a fast chat and passes rotated credentials through untouched", async () => {
 	const { replies } = await roundTrip(
 		'{"jsonrpc":"2.0","id":7,"method":"chat.start","params":{"model_id":"fast","messages":[],' +

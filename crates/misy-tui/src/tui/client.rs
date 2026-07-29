@@ -4,10 +4,12 @@ mod authentication;
 mod interrupts;
 mod operation_result;
 mod snapshot;
+mod submission;
 
 use super::{
     action::{UiAction, UiKey, UiMode},
     browser::BrowserHandoff,
+    composer_attachment::ComposerDraft,
     history::PromptHistoryStore,
     state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
 };
@@ -68,16 +70,21 @@ pub(super) enum ProviderOperationResult {
     Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
     Usage(ModelRef, Result<UsageReport, String>),
-    // The accepted submission is mapped by `CoreEvent::SubmissionAccepted`, so only a failure
-    // needs the client's attention here.
-    Submit(Result<SubmissionId, String>),
+    // `SubmissionAccepted` maps the transcript; this result gates draft clearing and history.
+    Submit(SubmissionRequest, Result<SubmissionId, String>),
+}
+
+pub(super) struct SubmissionRequest {
+    pub(super) draft: ComposerDraft,
+    pub(super) clear_composer: bool,
+    pub(super) history_text: Option<String>,
 }
 
 /// Thin interactive client that translates input into headless core operations.
 pub struct TuiClient<B> {
     pub(super) core: MisyCore,
     events: UnboundedReceiver<CoreEvent>,
-    submission_sender: UnboundedSender<String>,
+    submission_sender: UnboundedSender<SubmissionRequest>,
     browser: B,
     pub(super) state: UiState,
     pub(super) operation_sender: UnboundedSender<ProviderOperationResult>,
@@ -88,6 +95,7 @@ pub struct TuiClient<B> {
     prompt_history: Option<PromptHistoryStore>,
     pub(super) model_refresh_generation: u64,
     auth_task: Option<(ProviderId, ProviderOperationKind, AbortHandle)>,
+    composer_submission_pending: bool,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
@@ -146,6 +154,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             prompt_history,
             model_refresh_generation: 0,
             auth_task: None,
+            composer_submission_pending: false,
         }
     }
 
@@ -168,7 +177,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     pub fn insert_text(&mut self, text: &str) {
         self.state.clear_quit_shortcut();
         if self.state.mode() == UiMode::Input {
-            self.state.composer.insert_str(text);
+            if !self.composer_submission_pending {
+                self.state.composer.insert_str(text);
+            }
         } else {
             self.state.insert_filter(text);
         }
@@ -179,7 +190,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.state.clear_quit_shortcut();
         let normalized = normalize_paste(text);
         if self.state.mode() == UiMode::Input {
-            self.state.composer.insert_str(&normalized);
+            if !self.composer_submission_pending {
+                self.state.composer.insert_str(&normalized);
+            }
         } else {
             self.state
                 .insert_filter(&normalized.replace(['\n', '\t'], " "));
@@ -195,7 +208,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     /// Inserts a newline without submitting the composer.
     pub fn insert_newline(&mut self) {
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Input && !self.composer_submission_pending {
             self.state.composer.insert_newline();
         }
     }
@@ -203,7 +216,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Deletes the character before the focused cursor.
     pub fn backspace(&mut self) {
         if self.state.mode() == UiMode::Input {
-            self.state.composer.backspace();
+            if !self.composer_submission_pending {
+                self.state.composer.backspace();
+            }
         } else {
             self.state.backspace_filter();
         }
@@ -211,73 +226,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     pub(super) fn report_terminal_error(&mut self, error: impl fmt::Display) {
         self.state.add_error(error);
-    }
-
-    /// Submits the composer or accepts its slash-command completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns core or browser-handoff errors produced by the selected action.
-    pub fn submit_composer(&mut self) -> Result<(), TuiError> {
-        if self.state.mode() != UiMode::Input {
-            return Ok(());
-        }
-        if self.state.composer.popup_visible()
-            && let Some(command) = self.state.composer.selected_command()
-        {
-            let command = command.to_owned();
-            self.state.composer.clear();
-            let (result, accepted) = self.handle_submitted_input(&command);
-            if accepted {
-                self.record_prompt_history(&command);
-            }
-            return result;
-        }
-        let input = self.state.composer.take_text();
-        let (result, accepted) = self.handle_submitted_input(&input);
-        if accepted {
-            self.record_prompt_history(&input);
-        }
-        result
-    }
-
-    /// Parses and executes submitted text.
-    ///
-    /// # Errors
-    ///
-    /// Returns failures from core calls initiated by the resulting action.
-    pub fn handle_input(&mut self, input: &str) -> Result<(), TuiError> {
-        self.state.clear_quit_shortcut();
-        self.handle_submitted_input(input).0
-    }
-
-    fn handle_submitted_input(&mut self, input: &str) -> (Result<(), TuiError>, bool) {
-        match super::action::map_input(input) {
-            Ok(UiAction::Noop) => (Ok(()), false),
-            Ok(action) => {
-                let result = self
-                    .execute(action)
-                    .inspect_err(|error| self.state.add_error(error));
-                let accepted = result.is_ok();
-                (result, accepted)
-            }
-            Err(error) => {
-                self.state.add_error(error);
-                (Ok(()), false)
-            }
-        }
-    }
-
-    fn record_prompt_history(&mut self, text: &str) {
-        if !self.state.composer.record_submitted(text) {
-            return;
-        }
-        if let Some(history) = &self.prompt_history
-            && let Err(error) = history.append(text)
-        {
-            self.state
-                .add_error(format!("could not save prompt history: {error}"));
-        }
     }
 
     /// Routes a normalized key through modal view, popup, then composer layers.
@@ -299,6 +247,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
             if !self.state.composer.popup_visible() {
                 return Ok(());
             }
+        }
+        if self.composer_submission_pending && composer_key_mutates_draft(key) {
+            return Ok(());
         }
         if self.state.composer.popup_visible() {
             match key {
@@ -522,6 +473,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
         true
     }
+}
+
+fn composer_key_mutates_draft(key: UiKey) -> bool {
+    matches!(
+        key,
+        UiKey::Backspace | UiKey::Delete | UiKey::Newline | UiKey::Up | UiKey::Down | UiKey::Tab
+    )
 }
 
 fn normalize_paste(text: &str) -> String {

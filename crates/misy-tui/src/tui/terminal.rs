@@ -4,7 +4,7 @@ use super::{
     action::UiKey,
     browser::SystemBrowser,
     client::TuiClient,
-    clipboard::{Clipboard, SystemClipboard, write_osc52_copy},
+    clipboard::{Clipboard, ClipboardPaste, SystemClipboard, write_osc52_copy},
     render::render_with_composer_area,
     screen_selection::ScreenSelection,
 };
@@ -144,9 +144,14 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         client.handle_ctrl_c();
         return;
     }
-    if key.modifiers.contains(KeyModifiers::SUPER) && key.code == KeyCode::Char('v') {
+    if is_explicit_paste_key(key) {
         match clipboard.paste() {
-            Ok(text) => client.paste_text(&text),
+            Ok(ClipboardPaste::Text(text)) => client.paste_text(&text),
+            Ok(ClipboardPaste::Image {
+                width,
+                height,
+                rgba,
+            }) => client.paste_image_rgba(width, height, rgba),
             Err(error) => client.report_terminal_error(error),
         }
         return;
@@ -172,6 +177,13 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         // `handle_key` already records failures into the UI state, so this is a duplicate.
         let _ = client.handle_key(normalized);
     }
+}
+
+fn is_explicit_paste_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('v')
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
 }
 
 fn normalized_key(key: KeyEvent) -> Option<UiKey> {
@@ -281,8 +293,36 @@ fn write_escape(stdout: &mut io::Stdout, sequence: &str) -> Result<(), io::Error
 
 #[cfg(test)]
 mod tests {
-    use super::super::{clipboard::FailingClipboard, state::TranscriptRow};
+    use super::super::{
+        clipboard::{ClipboardError, FailingClipboard},
+        state::TranscriptRow,
+    };
     use super::*;
+    use std::collections::VecDeque;
+
+    struct TextClipboard {
+        pastes: VecDeque<String>,
+    }
+
+    struct ImageClipboard;
+
+    impl Clipboard for TextClipboard {
+        fn paste(&mut self) -> Result<ClipboardPaste, ClipboardError> {
+            Ok(ClipboardPaste::Text(
+                self.pastes.pop_front().expect("configured clipboard paste"),
+            ))
+        }
+    }
+
+    impl Clipboard for ImageClipboard {
+        fn paste(&mut self) -> Result<ClipboardPaste, ClipboardError> {
+            Ok(ClipboardPaste::Image {
+                width: 1,
+                height: 1,
+                rgba: vec![255, 0, 0, 255],
+            })
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn paste_failure_is_reported_in_the_transcript_without_ending_the_session() {
@@ -318,6 +358,60 @@ mod tests {
         assert_eq!(client.state().composer_input(), "still typing");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn control_and_super_v_use_the_explicit_clipboard_text_fallback() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let bundled = temporary.path().join("bundled");
+        std::fs::create_dir_all(&bundled).expect("bundled providers directory");
+        let core = MisyCore::discover(
+            MisyPaths::from_root(temporary.path().join("misy")),
+            &bundled,
+        )
+        .expect("core discovery without providers");
+        let mut client = TuiClient::new(core, SystemBrowser).await;
+        let mut clipboard = TextClipboard {
+            pastes: VecDeque::from(["control".to_owned(), " super".to_owned()]),
+        };
+
+        route_key(
+            &mut client,
+            &mut clipboard,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+        route_key(
+            &mut client,
+            &mut clipboard,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+        );
+
+        assert_eq!(client.state().composer_input(), "control super");
+        assert!(clipboard.pastes.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_paste_chord_routes_clipboard_images_without_inserting_text() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let bundled = temporary.path().join("bundled");
+        std::fs::create_dir_all(&bundled).expect("bundled providers directory");
+        let core = MisyCore::discover(
+            MisyPaths::from_root(temporary.path().join("misy")),
+            &bundled,
+        )
+        .expect("core discovery without providers");
+        let mut client = TuiClient::new(core, SystemBrowser).await;
+
+        route_key(
+            &mut client,
+            &mut ImageClipboard,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+
+        assert!(client.state().composer_input().is_empty());
+        assert!(client.state().transcript().iter().any(
+            |row| matches!(row, TranscriptRow::Error(message) if message.contains("no model"))
+        ));
+    }
+
     #[test]
     fn shift_enter_and_ctrl_j_insert_a_composer_newline() {
         assert_eq!(
@@ -332,6 +426,22 @@ mod tests {
             normalized_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(UiKey::Enter)
         );
+    }
+
+    #[test]
+    fn control_and_super_v_are_explicit_clipboard_paste_chords() {
+        assert!(is_explicit_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_explicit_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER
+        )));
+        assert!(!is_explicit_paste_key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]

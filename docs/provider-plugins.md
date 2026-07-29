@@ -122,6 +122,31 @@ the exact version, for example:
 Unknown capability IDs are permitted for forward compatibility. A missing `capabilities` object,
 or a manifest without `usage` version 1, does not implement usage and must not receive `usage.get`.
 
+### Image input capability version 1
+
+A provider declares `capabilities.image_input.version` as `1` when it can translate normalized
+image attachments. Models that accept them also include `"image"` in `input_modalities`; both
+declarations are required before the core accepts an image submission. Missing model metadata is
+treated as text-only.
+
+User messages and rich tool results may include an `attachments` array. Each entry has the
+following capability-scoped shape:
+
+```json
+{
+  "type": "image",
+  "media_type": "image/png",
+  "data_base64": "..."
+}
+```
+
+The core validates and normalizes supported clipboard and local image formats to bounded PNG
+data. One active request retains at most 20 MiB of normalized image bytes. Plugins translate that
+data to the remote provider protocol; they never receive or resolve local filesystem paths.
+Protocol input and output frames are limited to 32 MiB so base64 image payloads remain bounded on
+both sides of the subprocess boundary. The core serializes and checks the complete `chat.start`
+request before writing it, including history, tools, credentials, and base64 expansion.
+
 ### Usage capability version 1
 
 When a manifest declares `capabilities.usage.version` as `1`, `usage.get` is required for that

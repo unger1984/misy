@@ -5,10 +5,15 @@
  * SDK's open credential shape; the provider reads them at its own API boundary.
  */
 export {
+	type ChatMessage,
 	type ChatRequest,
 	type Credentials,
+	type ImageAttachment,
+	imageAttachments,
+	imageDataUrl,
 	isRecord,
 	type Json,
 	type Notify,
 	type ToolDefinition,
+	type ToolResult,
 } from "@misy/provider-sdk";

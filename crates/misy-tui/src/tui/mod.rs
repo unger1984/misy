@@ -6,6 +6,7 @@ mod browser;
 mod client;
 mod clipboard;
 mod composer;
+mod composer_attachment;
 mod display_width;
 mod history;
 mod list;

@@ -11,8 +11,9 @@ pub use manifest::{
     ProviderAuthMethod, ProviderCapability, ProviderCatalog, ProviderDiscoveryError,
     ProviderManifest, ProviderPackage,
 };
+pub(crate) use protocol::MAX_PROTOCOL_FRAME_BYTES;
 pub use protocol::{
-    CHAT_CANCEL_REQUEST_ID_FIELD, PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION,
-    PROVIDER_STREAM_EVENTS, ProviderError, ProviderEvent, ProviderRequestId, USAGE_CAPABILITY,
-    USAGE_CAPABILITY_VERSION, USAGE_METHOD,
+    CHAT_CANCEL_REQUEST_ID_FIELD, IMAGE_INPUT_CAPABILITY, IMAGE_INPUT_CAPABILITY_VERSION,
+    PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION, PROVIDER_STREAM_EVENTS, ProviderError,
+    ProviderEvent, ProviderRequestId, USAGE_CAPABILITY, USAGE_CAPABILITY_VERSION, USAGE_METHOD,
 };

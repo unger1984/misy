@@ -20,6 +20,9 @@ Read this document before making a new architecture or user-interaction choice.
 - Rust owns credentials and local tools; providers own remote protocol adaptation.
 - Every inference explicitly identifies provider and model.
 - The TUI is the first client, not the owner of agent orchestration.
+- Clipboard image paste uses visible composer placeholders while the core owns normalized image
+  bytes and capability validation. `view_image` returns the same rich image attachment contract;
+  unsupported selected models fail explicitly instead of switching models.
 
 ## Deferred Scope
 

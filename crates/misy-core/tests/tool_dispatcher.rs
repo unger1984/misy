@@ -44,9 +44,67 @@ fn dispatcher_declares_every_registered_tool() {
             "list_directory",
             "read_file",
             "run_command",
+            "view_image",
             "write_file"
         ]
     );
+}
+
+#[tokio::test]
+async fn dispatcher_returns_image_content_for_view_image() {
+    let root = test_root("view-image");
+    fs::create_dir_all(&root).expect("create view-image test directory");
+    let target = root.join("pixel.png");
+    let image = misy_core::ImageAttachment::from_rgba(1, 1, vec![255, 0, 0, 255])
+        .expect("encode test image");
+    fs::write(&target, image.bytes()).expect("write image fixture");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = dispatcher
+        .dispatch(&ToolCall::new(
+            "image-1",
+            "view_image",
+            json!({"path": target}),
+        ))
+        .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.attachments.len(), 1);
+    assert_eq!(result.attachments[0].media_type(), "image/png");
+    fs::remove_dir_all(root).expect("remove view-image test directory");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dispatcher_rejects_fifo_image_reads_without_waiting_for_a_writer() {
+    let root = test_root("view-image-fifo");
+    fs::create_dir_all(&root).expect("create view-image-fifo test directory");
+    let target = root.join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&target)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo must succeed");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.dispatch(&ToolCall::new(
+            "image-fifo",
+            "view_image",
+            json!({"path": target}),
+        )),
+    )
+    .await
+    .expect("view_image must not wait for a FIFO writer");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("regular file"),
+        "{}",
+        result.content
+    );
+    fs::remove_dir_all(root).expect("remove view-image-fifo test directory");
 }
 
 #[tokio::test]

@@ -9,13 +9,13 @@ import { type Credentials, isRecord, type Model } from "./types";
 export const DEFAULT_MODEL_ID = "kimi-for-coding";
 
 const FALLBACK_MODELS: readonly Model[] = [
-	{ id: "kimi-for-coding", display_name: "K2.7 Coding", context_window: 262_144 },
-	{
+	imageModel({ id: "kimi-for-coding", display_name: "K2.7 Coding", context_window: 262_144 }),
+	imageModel({
 		id: "kimi-for-coding-highspeed",
 		display_name: "K2.7 Coding Highspeed",
 		context_window: 262_144,
-	},
-	{ id: "k3", display_name: "K3", context_window: 1_048_576 },
+	}),
+	imageModel({ id: "k3", display_name: "K3", context_window: 1_048_576 }),
 ];
 
 /** Lists Kimi's live catalog, retaining the bundled catalog for endpoint failures. */
@@ -45,7 +45,10 @@ export async function listModels(
 
 /** Returns copies of bundled models so callers cannot mutate the fallback source. */
 export function fallbackModels(): Model[] {
-	return FALLBACK_MODELS.map((model) => ({ ...model }));
+	return FALLBACK_MODELS.map((model) => ({
+		...model,
+		input_modalities: [...model.input_modalities],
+	}));
 }
 
 function parseModels(value: unknown): Model[] {
@@ -72,5 +75,10 @@ function parseModel(value: unknown): Model | undefined {
 			typeof value["context_length"] === "number" && value["context_length"] > 0
 				? value["context_length"]
 				: 262_144,
+		input_modalities: value["supports_image_in"] === true ? ["text", "image"] : ["text"],
 	};
+}
+
+function imageModel(model: Omit<Model, "input_modalities">): Model {
+	return { ...model, input_modalities: ["text", "image"] };
 }

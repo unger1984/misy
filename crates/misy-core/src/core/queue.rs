@@ -1,7 +1,7 @@
 //! FIFO submission scheduling with exactly one session-mutating agent task.
 
 use super::{ActiveSubmission, CoreError, CoreEvent, CoreState, MisyCore, SubmissionId};
-use crate::{Message, ModelRef};
+use crate::{ImageAttachment, Message, ModelRef};
 use std::{
     collections::VecDeque,
     sync::{Arc, atomic::Ordering},
@@ -11,6 +11,7 @@ pub(super) struct QueuedSubmission {
     pub(super) id: SubmissionId,
     pub(super) model: ModelRef,
     pub(super) message: Message,
+    pub(super) attachments: Vec<ImageAttachment>,
     pub(super) active: Arc<ActiveSubmission>,
 }
 
@@ -45,12 +46,32 @@ impl MisyCore {
     /// Returns [`CoreError::NoModelSelected`] when no direct-interaction model is selected, or
     /// [`CoreError::Shutdown`] after shutdown.
     pub async fn submit(&self, message: Message) -> Result<SubmissionId, CoreError> {
+        self.submit_with_attachments(message, Vec::new()).await
+    }
+
+    /// Enqueues one message with validated image attachments for deterministic processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no model is selected, the provider or model lacks image input,
+    /// the attachment count exceeds the limit, or the core has shut down.
+    pub async fn submit_with_attachments(
+        &self,
+        message: Message,
+        attachments: Vec<ImageAttachment>,
+    ) -> Result<SubmissionId, CoreError> {
         self.inner.state.ensure_running()?;
         let model = self
             .selected_model()
             .await
             .ok_or(CoreError::NoModelSelected)?;
-        let (id, start_worker) = self.inner.state.enqueue_submission(message, model)?;
+        self.inner
+            .state
+            .validate_image_input(&model, &attachments)?;
+        let (id, start_worker) =
+            self.inner
+                .state
+                .enqueue_submission(message, attachments, model)?;
         if start_worker {
             let state = Arc::clone(&self.inner.state);
             self.inner.runtime.handle.spawn(async move {
@@ -78,6 +99,7 @@ impl CoreState {
     fn enqueue_submission(
         &self,
         message: Message,
+        attachments: Vec<ImageAttachment>,
         model: ModelRef,
     ) -> Result<(SubmissionId, bool), CoreError> {
         let mut queue = self
@@ -103,6 +125,7 @@ impl CoreState {
             id,
             model,
             message,
+            attachments,
             active,
         });
         if queue.worker_running {
@@ -191,7 +214,13 @@ impl CoreState {
                 return;
             };
             let terminal_event = self
-                .run_submission(next.id, &next.model, next.message, &next.active)
+                .run_submission(
+                    next.id,
+                    &next.model,
+                    next.message,
+                    next.attachments,
+                    &next.active,
+                )
                 .await;
             self.finish_submission(next.id);
             self.emit(&terminal_event);

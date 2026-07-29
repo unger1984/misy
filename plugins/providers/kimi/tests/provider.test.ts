@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { KimiProvider } from "../src/provider";
-import type { Credentials } from "../src/types";
+import type { Credentials, ImageAttachment } from "../src/types";
 
 type CapturedRequest = {
 	path: string;
@@ -51,16 +51,119 @@ test("discovers Kimi models dynamically and supplies default context windows", a
 	const base = fakeServer((request) => {
 		authorization = request.headers.get("authorization") ?? "";
 		return Response.json({
-			data: [{ id: "k3", display_name: "K3", context_length: 1_048_576 }, { id: "legacy" }],
+			data: [
+				{
+					id: "k3",
+					display_name: "K3",
+					context_length: 1_048_576,
+					supports_image_in: true,
+				},
+				{ id: "legacy", supports_image_in: false },
+				{ id: "missing-image-metadata" },
+				{ id: "invalid-image-metadata", supports_image_in: "true" },
+			],
 		});
 	});
 	const models = await provider(base).listModels(credentials());
 
 	expect(authorization).toBe("Bearer access");
 	expect(models).toEqual([
-		{ id: "k3", display_name: "K3", context_window: 1_048_576 },
-		{ id: "legacy", display_name: "legacy", context_window: 262_144 },
+		{
+			id: "k3",
+			display_name: "K3",
+			context_window: 1_048_576,
+			input_modalities: ["text", "image"],
+		},
+		{
+			id: "legacy",
+			display_name: "legacy",
+			context_window: 262_144,
+			input_modalities: ["text"],
+		},
+		{
+			id: "missing-image-metadata",
+			display_name: "missing-image-metadata",
+			context_window: 262_144,
+			input_modalities: ["text"],
+		},
+		{
+			id: "invalid-image-metadata",
+			display_name: "invalid-image-metadata",
+			context_window: 262_144,
+			input_modalities: ["text"],
+		},
 	]);
+});
+
+test("maps user PNGs and follows tool results with a Kimi user image message", async () => {
+	let captured: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		captured = request;
+		return new Response("data: [DONE]\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+	const image: ImageAttachment = {
+		type: "image",
+		media_type: "image/png",
+		data_base64:
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y" +
+			"AAAAASUVORK5CYII=",
+	};
+
+	await provider(base).streamChat(
+		{
+			model_id: "k3",
+			messages: [
+				{ role: "user", content: "plain" },
+				{ role: "user", content: "look", attachments: [image] },
+				{
+					role: "tool",
+					tool_results: [
+						{ tool_call_id: "call-1", content: "first", attachments: [image] },
+						{ tool_call_id: "call-2", content: "second", attachments: [image] },
+					],
+				},
+			],
+			tools: [],
+			credentials: credentials(),
+		},
+		8,
+		() => {},
+		undefined,
+	);
+
+	const imageContent = {
+		type: "image_url",
+		image_url: { url: `data:image/png;base64,${image.data_base64}` },
+	};
+	expect(captured?.body).toEqual({
+		model: "k3",
+		messages: [
+			{ role: "user", content: "plain" },
+			{
+				role: "user",
+				content: [{ type: "text", text: "look" }, imageContent],
+			},
+			{
+				role: "tool",
+				tool_results: [
+					{ tool_call_id: "call-1", content: "first" },
+					{ tool_call_id: "call-2", content: "second" },
+				],
+			},
+			{
+				role: "user",
+				content: [{ type: "text", text: "Images from tool result call-1:" }, imageContent],
+			},
+			{
+				role: "user",
+				content: [{ type: "text", text: "Images from tool result call-2:" }, imageContent],
+			},
+		],
+		tools: [],
+		stream: true,
+	});
 });
 
 test("falls back to bundled models when Kimi's catalog endpoint is unavailable", async () => {
@@ -162,7 +265,7 @@ test("streams text and fragmented tools through Kimi's OpenAI request", async ()
 	await provider(base).streamChat(
 		{
 			model_id: "k3",
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", attachments: [] }],
 			tools: [
 				{
 					name: "read_file",
@@ -178,14 +281,18 @@ test("streams text and fragmented tools through Kimi's OpenAI request", async ()
 	);
 
 	expect(captured?.path).toBe("/chat/completions");
-	expect(captured?.body).toMatchObject({
+	expect(captured?.body).toEqual({
 		model: "k3",
 		messages: [{ role: "user", content: "hello" }],
 		stream: true,
 		tools: [
 			{
 				type: "function",
-				function: { name: "read_file", parameters: { type: "object" } },
+				function: {
+					name: "read_file",
+					description: "Read a file",
+					parameters: { type: "object" },
+				},
 			},
 		],
 	});

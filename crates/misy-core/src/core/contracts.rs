@@ -1,8 +1,8 @@
 //! Public values and errors exposed by the headless core.
 
 use crate::{
-    ConfigError, CredentialError, Message, ModelInfo, ModelRef, ProviderDiscoveryError,
-    ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
+    ConfigError, CredentialError, ImageAttachment, InputModality, Message, ModelInfo, ModelRef,
+    ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
 };
 use serde_json::Value;
 use std::{error::Error, fmt};
@@ -23,6 +23,8 @@ impl SubmissionId {
 pub struct HistoryEntry {
     /// User, assistant, or tool message retained for the next provider request.
     pub message: Message,
+    /// Images supplied with this message while its submission is active.
+    pub attachments: Vec<ImageAttachment>,
     /// Tool calls emitted alongside [`Self::message`].
     pub tool_calls: Vec<ToolCall>,
     /// Local tool results emitted after [`Self::tool_calls`].
@@ -163,6 +165,27 @@ pub enum CoreError {
     InvalidModels(String),
     /// A provider returned a malformed normalized usage report.
     InvalidUsage(String),
+    /// The selected model does not accept one requested input modality.
+    UnsupportedInput {
+        /// Selected provider-scoped model.
+        model: ModelRef,
+        /// Input modality rejected by the model.
+        modality: InputModality,
+    },
+    /// A submission exceeded the bounded image count.
+    TooManyAttachments {
+        /// Number of images supplied by the client.
+        found: usize,
+        /// Maximum images accepted in one submission.
+        maximum: usize,
+    },
+    /// A submission exceeded the aggregate normalized-image budget.
+    AttachmentPayloadTooLarge {
+        /// Total normalized image bytes supplied by the client.
+        found: usize,
+        /// Maximum normalized image bytes accepted in one active request.
+        maximum: usize,
+    },
     /// The private Tokio runtime could not be started or a runtime task could not complete.
     Runtime(String),
     /// A provider does not advertise the requested optional capability revision.
@@ -202,6 +225,19 @@ impl fmt::Display for CoreError {
             Self::Provider(error) => write!(formatter, "provider error: {error}"),
             Self::InvalidModels(message) => write!(formatter, "invalid models response: {message}"),
             Self::InvalidUsage(message) => write!(formatter, "invalid usage response: {message}"),
+            Self::UnsupportedInput { model, modality } => write!(
+                formatter,
+                "model `{}` does not support {modality:?} input",
+                model.model.as_str()
+            ),
+            Self::TooManyAttachments { found, maximum } => write!(
+                formatter,
+                "submission contains {found} images; maximum is {maximum}"
+            ),
+            Self::AttachmentPayloadTooLarge { found, maximum } => write!(
+                formatter,
+                "submission images contain {found} bytes; maximum is {maximum}"
+            ),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
             Self::UnsupportedCapability {
                 provider,

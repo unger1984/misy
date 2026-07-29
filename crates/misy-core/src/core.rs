@@ -23,6 +23,7 @@ mod authentication;
 mod cache;
 mod contracts;
 mod events;
+mod images;
 mod models;
 mod queue;
 mod runtime;

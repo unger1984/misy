@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { createServer } from "node:net";
 import { postOAuthJson } from "../src/oauth-http";
 import { AnthropicProvider } from "../src/provider";
-import type { Credentials } from "../src/types";
+import type { Credentials, ImageAttachment } from "../src/types";
 
 type CapturedRequest = {
 	path: string;
@@ -296,8 +296,16 @@ test("discovers model contexts and uses the bundled fallback", async () => {
 	expect(listed).toMatchObject({
 		default_model: "claude-opus-4-8",
 		models: [
-			{ id: "claude-opus-4-8", context_window: 1_000_000 },
-			{ id: "new-model", context_window: 200_000 },
+			{
+				id: "claude-opus-4-8",
+				context_window: 1_000_000,
+				input_modalities: ["text", "image"],
+			},
+			{
+				id: "new-model",
+				context_window: 200_000,
+				input_modalities: ["text", "image"],
+			},
 		],
 	});
 	servers.pop()?.stop(true);
@@ -382,6 +390,66 @@ test("streams text and tool calls, refreshes after a 401, and honors cancellatio
 			"effort-2025-11-24,extended-cache-ttl-2025-04-11",
 	);
 	expect(userAgent ?? "").toBe("claude-cli/2.1.165");
+});
+
+test("maps user and tool-result PNGs to Anthropic base64 image blocks", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return new Response("event: message_stop\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+	const image: ImageAttachment = {
+		type: "image",
+		media_type: "image/png",
+		data_base64:
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y" +
+			"AAAAASUVORK5CYII=",
+	};
+
+	await new AnthropicProvider({ apiBaseUrl: base }).streamChat(
+		{
+			model_id: "claude-opus-4-8",
+			messages: [
+				{ role: "user", content: "plain" },
+				{ role: "user", content: "look", attachments: [image] },
+				{
+					role: "tool",
+					tool_results: [{ tool_call_id: "call-1", content: "done", attachments: [image] }],
+				},
+			],
+			tools: [],
+			credentials: credentials(),
+		},
+		10,
+		() => {},
+	);
+
+	const imageBlock = {
+		type: "image",
+		source: { type: "base64", media_type: "image/png", data: image.data_base64 },
+	};
+	expect(received?.body).toMatchObject({
+		messages: [
+			{ role: "user", content: "plain" },
+			{
+				role: "user",
+				content: [{ type: "text", text: "look" }, imageBlock],
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "call-1",
+						content: [{ type: "text", text: "done" }, imageBlock],
+						is_error: false,
+					},
+				],
+			},
+		],
+	});
 });
 
 test("returns rotated credentials when usage silently refreshes", async () => {

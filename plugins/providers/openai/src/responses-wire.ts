@@ -1,6 +1,14 @@
 /** OpenAI Responses request construction and SSE normalization. */
 import { supportsReasoning } from "./model-catalog";
-import { isRecord, type Json, type Notify, type ToolDefinition } from "./types";
+import {
+	type ImageAttachment,
+	imageAttachments,
+	imageDataUrl,
+	isRecord,
+	type Json,
+	type Notify,
+	type ToolDefinition,
+} from "./types";
 
 /** Builds the complete Responses body required by the subscription backend. */
 export function createResponsesRequest(
@@ -112,17 +120,38 @@ function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 				input.push({
 					type: "function_call_output",
 					call_id: typeof value["tool_call_id"] === "string" ? value["tool_call_id"] : "",
-					output: typeof value["content"] === "string" ? value["content"] : "",
+					output: functionOutput(value),
 				});
 			}
 			continue;
 		}
 		input.push({
 			role: typeof message["role"] === "string" ? message["role"] : "user",
-			content: typeof message["content"] === "string" ? message["content"] : "",
+			content: messageContent(message),
 		});
 	}
 	return input;
+}
+
+function messageContent(message: Record<string, unknown>): Json {
+	const text = typeof message["content"] === "string" ? message["content"] : "";
+	const attachments = imageAttachments(message["attachments"]);
+	if (message["role"] !== "user" || attachments.length === 0) return text;
+	return richContent(text, attachments);
+}
+
+function functionOutput(result: Record<string, Json>): Json {
+	const text = typeof result["content"] === "string" ? result["content"] : "";
+	const attachments = imageAttachments(result["attachments"]);
+	return attachments.length === 0 ? text : richContent(text, attachments);
+}
+
+function richContent(text: string, attachments: readonly ImageAttachment[]): Json[] {
+	const content: Json[] = text.length > 0 ? [{ type: "input_text", text }] : [];
+	for (const attachment of attachments) {
+		content.push({ type: "input_image", image_url: imageDataUrl(attachment) });
+	}
+	return content;
 }
 
 function reasoningInputs(metadata: unknown): Json[] {

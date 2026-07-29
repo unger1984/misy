@@ -34,7 +34,10 @@ fn write_fixture_manifest(root: &Path, id: &str, display_name: &str, target: &Pa
   "kind": "provider",
   "protocol_version": 2,
   "description": "TUI fixture",
-  "capabilities": {{"usage": {{"version": 1}}}},
+  "capabilities": {{
+    "usage": {{"version": 1}},
+    "image_input": {{"version": 1}}
+  }},
   "author": "Misy",
   "homepage": "https://example.test/plugin",
   "repository": "https://example.test/repository",

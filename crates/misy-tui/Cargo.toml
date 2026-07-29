@@ -8,7 +8,7 @@ name = "misy"
 path = "src/main.rs"
 
 [dependencies]
-arboard.workspace = true
+arboard = { workspace = true, features = ["image-data"] }
 base64.workspace = true
 crossterm.workspace = true
 misy-core = { path = "../misy-core" }

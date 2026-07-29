@@ -2,8 +2,9 @@
 
 use super::{ActiveSubmission, CoreEvent, CoreState, HistoryEntry, SubmissionId};
 use crate::{
-    Message, MessageRole, ModelRef, ProviderError, ProviderId, ToolCall,
-    providers::{PendingProviderRequest, ProviderEvent},
+    ImageAttachment, InputModality, MAX_ACTIVE_IMAGE_BYTES, Message, MessageRole, ModelRef,
+    ProviderError, ProviderId, ToolCall,
+    providers::{MAX_PROTOCOL_FRAME_BYTES, PendingProviderRequest, ProviderEvent},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::Ordering};
@@ -66,6 +67,7 @@ impl CoreState {
         id: SubmissionId,
         model: &ModelRef,
         message: Message,
+        attachments: Vec<ImageAttachment>,
         active: &ActiveSubmission,
     ) -> CoreEvent {
         if active.cancelled.load(Ordering::Acquire) {
@@ -77,11 +79,13 @@ impl CoreState {
         });
         self.push_history(HistoryEntry {
             message,
+            attachments,
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
             provider_metadata: Value::Null,
         });
         let outcome = self.run_agent_turns(id, model, active).await;
+        self.redact_history_images();
         match outcome {
             Ok(()) => CoreEvent::Completed { submission: id },
             Err(message) if message == "cancelled" || active.cancelled.load(Ordering::Acquire) => {
@@ -100,12 +104,14 @@ impl CoreState {
         model: &ModelRef,
         active: &ActiveSubmission,
     ) -> Result<(), String> {
+        let mut active_image_bytes = self.history_image_bytes();
         for _ in 0..MAX_MODEL_TURNS {
             self.cancel_if_requested(active).await?;
             let turn = self.run_model_turn(id, model, active).await?;
             self.cancel_if_requested(active).await?;
             self.push_history(HistoryEntry {
                 message: Message::new(MessageRole::Assistant, turn.text),
+                attachments: Vec::new(),
                 tool_calls: turn.tool_calls.clone(),
                 tool_results: Vec::new(),
                 provider_metadata: turn.metadata,
@@ -117,8 +123,28 @@ impl CoreState {
             for call in &turn.tool_calls {
                 let result = if active.cancelled.load(Ordering::Acquire) {
                     crate::ToolResult::error(&call.id, "tool dispatch cancelled")
+                } else if call.name == "view_image"
+                    && !self.model_supports(model, InputModality::Image)
+                {
+                    crate::ToolResult::error(
+                        &call.id,
+                        "view_image is unavailable because the selected model lacks image input",
+                    )
                 } else {
                     self.dispatcher.dispatch(call).await
+                };
+                let result_image_bytes = result.attachments.iter().fold(0_usize, |total, image| {
+                    total.saturating_add(image.bytes().len())
+                });
+                let next_image_bytes = active_image_bytes.saturating_add(result_image_bytes);
+                let result = if next_image_bytes > MAX_ACTIVE_IMAGE_BYTES {
+                    crate::ToolResult::error(
+                        &call.id,
+                        "tool image exceeds the active provider-request image budget",
+                    )
+                } else {
+                    active_image_bytes = next_image_bytes;
+                    result
                 };
                 self.emit(&CoreEvent::ToolResult {
                     submission: id,
@@ -128,6 +154,7 @@ impl CoreState {
             }
             self.push_history(HistoryEntry {
                 message: Message::new(MessageRole::Tool, ""),
+                attachments: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_results: results,
                 provider_metadata: Value::Null,
@@ -212,7 +239,9 @@ impl CoreState {
             "provider_id": model.provider.as_str(),
             "model_id": model.model.as_str(),
             "messages": self.serialized_history(),
-            "tools": self.dispatcher.definitions(),
+            "tools": self.dispatcher.definitions_for(
+                self.model_supports(model, InputModality::Image)
+            ),
         });
         if let Some(credentials) = self
             .load_credentials(&model.provider)
@@ -220,6 +249,23 @@ impl CoreState {
             .map_err(|error| error.to_string())?
         {
             params["credentials"] = credentials;
+        }
+        // Use the largest request ID so the preflight covers the host's complete JSON-RPC frame.
+        let envelope = json!({
+            "jsonrpc": "2.0",
+            "id": u64::MAX,
+            "method": "chat.start",
+            "params": &params,
+        });
+        let encoded_bytes = serde_json::to_vec(&envelope)
+            .map_err(|error| format!("could not encode chat request: {error}"))?
+            .len()
+            .saturating_add(1);
+        if encoded_bytes > MAX_PROTOCOL_FRAME_BYTES {
+            return Err(format!(
+                "chat request contains {encoded_bytes} bytes; provider frame limit is \
+                 {MAX_PROTOCOL_FRAME_BYTES}"
+            ));
         }
         Ok(params)
     }
@@ -428,6 +474,39 @@ impl CoreState {
             .push(entry);
     }
 
+    fn history_image_bytes(&self) -> usize {
+        self.history
+            .lock()
+            .expect("history mutex must not be poisoned")
+            .iter()
+            .fold(0_usize, |total, entry| {
+                let message_bytes = entry.attachments.iter().fold(0_usize, |sum, image| {
+                    sum.saturating_add(image.bytes().len())
+                });
+                entry.tool_results.iter().fold(
+                    total.saturating_add(message_bytes),
+                    |sum, result| {
+                        result.attachments.iter().fold(sum, |result_sum, image| {
+                            result_sum.saturating_add(image.bytes().len())
+                        })
+                    },
+                )
+            })
+    }
+
+    fn redact_history_images(&self) {
+        let mut history = self
+            .history
+            .lock()
+            .expect("history mutex must not be poisoned");
+        for entry in &mut *history {
+            entry.attachments.clear();
+            for result in &mut entry.tool_results {
+                result.attachments.clear();
+            }
+        }
+    }
+
     pub(super) fn emit(&self, event: &CoreEvent) {
         self.subscribers.emit(event);
     }
@@ -440,11 +519,15 @@ fn serialize_history_entry(entry: &HistoryEntry) -> Value {
         MessageRole::Assistant => "assistant",
         MessageRole::Tool => "tool",
     };
-    json!({
+    let mut value = json!({
         "role": role,
         "content": entry.message.content,
         "tool_calls": entry.tool_calls,
         "tool_results": entry.tool_results,
         "provider_metadata": entry.provider_metadata,
-    })
+    });
+    if !entry.attachments.is_empty() {
+        value["attachments"] = json!(entry.attachments);
+    }
+    value
 }

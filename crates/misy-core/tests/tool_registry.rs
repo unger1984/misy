@@ -4,7 +4,7 @@ use misy_core::{ToolDefinition, ToolRegistry};
 use serde_json::json;
 
 #[test]
-fn registry_exposes_the_four_builtin_tool_definitions() {
+fn registry_exposes_the_five_builtin_tool_definitions() {
     let registry = ToolRegistry::new();
     let definitions = registry.definitions();
     let names: Vec<_> = definitions
@@ -14,7 +14,13 @@ fn registry_exposes_the_four_builtin_tool_definitions() {
 
     assert_eq!(
         names,
-        ["list_directory", "read_file", "run_command", "write_file"]
+        [
+            "list_directory",
+            "read_file",
+            "run_command",
+            "view_image",
+            "write_file"
+        ]
     );
 }
 

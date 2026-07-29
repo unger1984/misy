@@ -14,6 +14,7 @@ export type Model = {
 	display_name: string;
 	context_window: number;
 	reasoning: boolean;
+	input_modalities: ("text" | "image")[];
 };
 
 type CatalogEntry = Model & { priority: number };
@@ -23,18 +24,38 @@ export const DEFAULT_MODEL_ID = "gpt-5.5";
 
 // This list keeps model selection usable during offline discovery failures.
 const FALLBACK_MODELS: readonly Model[] = [
-	{ id: "gpt-5.6-terra", display_name: "GPT-5.6 Terra", context_window: 372_000, reasoning: true },
-	{ id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol", context_window: 372_000, reasoning: true },
-	{ id: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", context_window: 372_000, reasoning: true },
-	{ id: "gpt-5.5", display_name: "GPT-5.5", context_window: 272_000, reasoning: true },
-	{ id: "gpt-5.4", display_name: "GPT-5.4", context_window: 272_000, reasoning: true },
-	{ id: "gpt-5.4-mini", display_name: "GPT-5.4 mini", context_window: 272_000, reasoning: true },
-	{
+	imageModel({
+		id: "gpt-5.6-terra",
+		display_name: "GPT-5.6 Terra",
+		context_window: 372_000,
+		reasoning: true,
+	}),
+	imageModel({
+		id: "gpt-5.6-sol",
+		display_name: "GPT-5.6 Sol",
+		context_window: 372_000,
+		reasoning: true,
+	}),
+	imageModel({
+		id: "gpt-5.6-luna",
+		display_name: "GPT-5.6 Luna",
+		context_window: 372_000,
+		reasoning: true,
+	}),
+	imageModel({ id: "gpt-5.5", display_name: "GPT-5.5", context_window: 272_000, reasoning: true }),
+	imageModel({ id: "gpt-5.4", display_name: "GPT-5.4", context_window: 272_000, reasoning: true }),
+	imageModel({
+		id: "gpt-5.4-mini",
+		display_name: "GPT-5.4 mini",
+		context_window: 272_000,
+		reasoning: true,
+	}),
+	imageModel({
 		id: "gpt-5.3-codex-spark",
 		display_name: "GPT-5.3 Codex Spark",
 		context_window: 128_000,
 		reasoning: true,
-	},
+	}),
 ];
 
 let reasoningByModel = reasoningLookup(FALLBACK_MODELS);
@@ -121,6 +142,7 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 			id,
 			display_name: nonEmptyString(value["display_name"]) ?? id,
 			context_window: positiveInteger(value["context_window"]) ?? contextWindowFallback(id),
+			input_modalities: inputModalities(value["input_modalities"]),
 			reasoning: hasReasoning(
 				value["default_reasoning_level"],
 				value["supported_reasoning_levels"],
@@ -128,6 +150,14 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 			priority: finiteNumber(value["priority"]) ?? Number.MAX_SAFE_INTEGER,
 		},
 	];
+}
+
+function inputModalities(value: unknown): ("text" | "image")[] {
+	if (!Array.isArray(value) || value.some((entry) => entry !== "text" && entry !== "image")) {
+		return ["text"];
+	}
+	const modalities = [...new Set(value)];
+	return modalities.includes("text") ? modalities : ["text"];
 }
 
 function compareModels(left: CatalogEntry, right: CatalogEntry): number {
@@ -174,9 +204,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function copyModels(models: readonly Model[]): Model[] {
-	return models.map((model) => ({ ...model }));
+	return models.map((model) => ({ ...model, input_modalities: [...model.input_modalities] }));
 }
 
 function reasoningLookup(models: readonly Model[]): Map<string, boolean> {
 	return new Map(models.map((model) => [model.id, model.reasoning]));
+}
+
+function imageModel(model: Omit<Model, "input_modalities">): Model {
+	return { ...model, input_modalities: ["text", "image"] };
 }

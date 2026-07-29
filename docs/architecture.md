@@ -46,7 +46,11 @@ flowchart LR
   queued submissions, and cached provider authentication state. Reading it never performs
   filesystem, process, or network I/O; clients refresh their projections after relevant core
   events rather than maintaining a competing source of truth.
-- Rust owns local tool definitions and execution. Provider plugins only translate between Misy's normalized contract and a remote provider protocol.
+- Rust owns local tool definitions and execution. Provider plugins only translate between Misy's
+  normalized contract and a remote provider protocol.
+- Frontends acquire clipboard media, but the core owns image validation, normalized bytes,
+  session attachment state, and `view_image` execution. Provider plugins receive only normalized
+  image data and never read local image paths.
 - One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
 
 ## Runtime Flow
@@ -70,6 +74,9 @@ flowchart LR
    injects its opaque credentials, bounds `usage.get` to 30 seconds, and strictly validates the
    normalized result. The provider retains ownership of remote endpoint selection, headers, and
    provider-specific response parsing.
+10. Image input requires both provider capability version 1 and model image modality support.
+    The core rejects unsupported submissions before acceptance, includes normalized images in the
+    provider request, and clears binary attachment data from completed in-memory history entries.
 
 ## Fixed Constraints
 
@@ -78,6 +85,8 @@ flowchart LR
 - The selected model is a default for direct interaction, not a global singleton assumption; future agents may use other provider/model pairs.
 - External clients must reuse the `misy-core` contract, including its public async operations,
   events, cancellation methods, and `CoreSnapshot` projection.
+- The multimodal public-domain additions ship with the workspace contract version `0.2.0`;
+  provider protocol v2 remains compatible because image fields are capability-gated.
 
 ## Change Impact
 

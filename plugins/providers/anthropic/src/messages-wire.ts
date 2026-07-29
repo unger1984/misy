@@ -1,5 +1,12 @@
 /** Anthropic Messages request translation and SSE event normalization. */
-import { isRecord, type Json, type Notify, type ToolDefinition } from "./types";
+import {
+	type ImageAttachment,
+	imageAttachments,
+	isRecord,
+	type Json,
+	type Notify,
+	type ToolDefinition,
+} from "./types";
 
 type ToolState = {
 	id: string;
@@ -64,6 +71,7 @@ export async function notifyMessageEvents(
 function messageBody(message: Record<string, unknown>): Json {
 	if (message["role"] === "tool") return toolResultMessage(message);
 	const blocks = toolUseBlocks(message);
+	if (message["role"] === "user") blocks.unshift(...messageContentBlocks(message));
 	return {
 		role: message["role"] === "assistant" ? "assistant" : "user",
 		content: blocks.length > 0 ? blocks : content(message),
@@ -79,10 +87,38 @@ function toolResultMessage(message: Record<string, unknown>): Json {
 			return {
 				type: "tool_result",
 				tool_use_id: text(entry["tool_call_id"]),
-				content: text(entry["content"]),
+				content: toolResultContent(entry),
 				is_error: entry["is_error"] === true,
 			};
 		}),
+	};
+}
+
+function messageContentBlocks(message: Record<string, unknown>): Json[] {
+	const attachments = imageAttachments(message["attachments"]);
+	return attachments.length === 0 ? [] : contentBlocks(content(message), attachments);
+}
+
+function toolResultContent(result: Record<string, Json>): Json {
+	const attachments = imageAttachments(result["attachments"]);
+	if (attachments.length === 0) return text(result["content"]);
+	return contentBlocks(text(result["content"]), attachments);
+}
+
+function contentBlocks(text: string, attachments: readonly ImageAttachment[]): Json[] {
+	const blocks: Json[] = text.length > 0 ? [{ type: "text", text }] : [];
+	for (const attachment of attachments) blocks.push(imageBlock(attachment));
+	return blocks;
+}
+
+function imageBlock(attachment: ImageAttachment): Json {
+	return {
+		type: "image",
+		source: {
+			type: "base64",
+			media_type: attachment.media_type,
+			data: attachment.data_base64,
+		},
 	};
 }
 

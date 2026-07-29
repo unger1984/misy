@@ -216,6 +216,11 @@ impl UiState {
         self.composer.history_len()
     }
 
+    /// Returns the number of validated images attached to the current draft.
+    pub fn composer_attachment_count(&self) -> usize {
+        self.composer.attachment_count()
+    }
+
     /// Returns whether the non-modal slash-command popup is visible.
     pub fn command_popup_visible(&self) -> bool {
         self.view.is_none() && self.composer.popup_visible()

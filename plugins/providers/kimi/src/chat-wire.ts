@@ -1,11 +1,23 @@
 /** OpenAI-compatible Kimi chat request construction and SSE stream normalization. */
-import type { Json, Notify, ToolDefinition } from "./types";
-import { isRecord } from "./types";
+import {
+	type ImageAttachment,
+	imageAttachments,
+	imageDataUrl,
+	isRecord,
+	type Json,
+	type Notify,
+	type ToolDefinition,
+} from "./types";
 
 type ToolAccumulator = {
 	id: string;
 	name: string;
 	arguments: string;
+};
+
+type ToolImageGroup = {
+	toolCallId: string;
+	attachments: ImageAttachment[];
 };
 
 /** Builds the OpenAI-compatible streaming request accepted by Kimi's coding API. */
@@ -16,7 +28,7 @@ export function createChatRequest(
 ): Record<string, unknown> {
 	return {
 		model,
-		messages,
+		messages: requestMessages(messages),
 		tools: tools.map((tool) => ({
 			type: "function",
 			function: {
@@ -26,6 +38,103 @@ export function createChatRequest(
 			},
 		})),
 		stream: true,
+	};
+}
+
+function requestMessages(
+	messages: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] {
+	if (!messages.some(needsMapping)) return messages;
+	const mapped: Record<string, unknown>[] = [];
+	for (const message of messages) {
+		const attachments = imageAttachments(message["attachments"]);
+		if (message["role"] === "user" && attachments.length > 0) {
+			mapped.push(userImageMessage(message, attachments));
+			continue;
+		}
+		const toolImages = toolResultImageGroups(message);
+		const withoutMessageAttachments = stripMessageAttachments(message);
+		mapped.push(
+			toolResultsHaveAttachments(message)
+				? stripToolResultAttachments(withoutMessageAttachments)
+				: withoutMessageAttachments,
+		);
+		for (const group of toolImages) mapped.push(toolImageUserMessage(group));
+	}
+	return mapped;
+}
+
+function needsMapping(message: Record<string, unknown>): boolean {
+	return Object.hasOwn(message, "attachments") || toolResultsHaveAttachments(message);
+}
+
+function userImageMessage(
+	message: Record<string, unknown>,
+	attachments: readonly ImageAttachment[],
+): Record<string, unknown> {
+	const mapped = { ...message };
+	delete mapped["attachments"];
+	const text = typeof message["content"] === "string" ? message["content"] : "";
+	mapped["content"] = openAiContent(text, attachments);
+	return mapped;
+}
+
+function toolImageUserMessage(group: ToolImageGroup): Record<string, unknown> {
+	const label = group.toolCallId
+		? `Images from tool result ${group.toolCallId}:`
+		: "Images from a tool result:";
+	return { role: "user", content: openAiContent(label, group.attachments) };
+}
+
+function stripMessageAttachments(message: Record<string, unknown>): Record<string, unknown> {
+	if (!Object.hasOwn(message, "attachments")) return message;
+	const mapped = { ...message };
+	delete mapped["attachments"];
+	return mapped;
+}
+
+function openAiContent(text: string, attachments: readonly ImageAttachment[]): Json[] {
+	const content: Json[] = text.length > 0 ? [{ type: "text", text }] : [];
+	for (const attachment of attachments) {
+		content.push({ type: "image_url", image_url: { url: imageDataUrl(attachment) } });
+	}
+	return content;
+}
+
+function toolResultImageGroups(message: Record<string, unknown>): ToolImageGroup[] {
+	if (message["role"] !== "tool" || !Array.isArray(message["tool_results"])) return [];
+	return message["tool_results"].flatMap((result) => toolImageGroup(result));
+}
+
+function toolImageGroup(value: unknown): ToolImageGroup[] {
+	if (!isRecord(value)) return [];
+	const attachments = imageAttachments(value["attachments"]);
+	if (attachments.length === 0) return [];
+	return [
+		{
+			toolCallId: typeof value["tool_call_id"] === "string" ? value["tool_call_id"] : "",
+			attachments,
+		},
+	];
+}
+
+function toolResultsHaveAttachments(message: Record<string, unknown>): boolean {
+	if (!Array.isArray(message["tool_results"])) return false;
+	return message["tool_results"].some(
+		(result) => isRecord(result) && Object.hasOwn(result, "attachments"),
+	);
+}
+
+function stripToolResultAttachments(message: Record<string, unknown>): Record<string, unknown> {
+	const results = Array.isArray(message["tool_results"]) ? message["tool_results"] : [];
+	return {
+		...message,
+		tool_results: results.map((result) => {
+			if (!isRecord(result)) return result;
+			const mapped = { ...result };
+			delete mapped["attachments"];
+			return mapped;
+		}),
 	};
 }
 

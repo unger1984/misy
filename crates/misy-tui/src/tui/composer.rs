@@ -1,5 +1,7 @@
 //! Editable prompt state and slash-command completion.
 
+use super::composer_attachment::{ComposerAttachments, ComposerDraft};
+use misy_core::ImageAttachment;
 use ratatui::text::Line;
 
 const MAX_HISTORY_ENTRIES: usize = 100;
@@ -70,10 +72,18 @@ impl CommandPopup {
 pub(super) struct Composer {
     text: String,
     cursor: usize,
+    attachments: ComposerAttachments,
     history: Vec<String>,
     history_index: Option<usize>,
-    history_draft: Option<String>,
+    history_draft: Option<ComposerSnapshot>,
     popup: CommandPopup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComposerSnapshot {
+    text: String,
+    cursor: usize,
+    attachments: ComposerAttachments,
 }
 
 impl Default for Composer {
@@ -81,6 +91,7 @@ impl Default for Composer {
         Self {
             text: String::new(),
             cursor: 0,
+            attachments: ComposerAttachments::default(),
             history: Vec::new(),
             history_index: None,
             history_draft: None,
@@ -110,8 +121,33 @@ impl Composer {
         self.history.len()
     }
 
+    pub(super) fn attachment_count(&self) -> usize {
+        self.attachments.len()
+    }
+
+    pub(super) fn draft(&self) -> ComposerDraft {
+        self.attachments.draft(&self.text)
+    }
+
+    pub(super) fn history_text(&self) -> String {
+        self.attachments.history_text(&self.text)
+    }
+
+    pub(super) fn matches_draft(&self, draft: &ComposerDraft) -> bool {
+        self.draft() == *draft
+    }
+
+    pub(super) fn insert_image(&mut self, image: ImageAttachment) -> Result<(), &'static str> {
+        self.detach_history();
+        self.attachments
+            .insert(&mut self.text, &mut self.cursor, image)?;
+        self.sync_popup_after_edit();
+        Ok(())
+    }
+
     pub(super) fn insert_str(&mut self, text: &str) {
         self.detach_history();
+        self.attachments.shift_for_insert(self.cursor, text.len());
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
         self.sync_popup_after_edit();
@@ -122,11 +158,11 @@ impl Composer {
     }
 
     pub(super) fn move_left(&mut self) {
-        self.cursor = previous_boundary(&self.text, self.cursor);
+        self.cursor = self.attachments.previous_cursor(&self.text, self.cursor);
     }
 
     pub(super) fn move_right(&mut self) {
-        self.cursor = next_boundary(&self.text, self.cursor);
+        self.cursor = self.attachments.next_cursor(&self.text, self.cursor);
     }
 
     pub(super) fn move_home(&mut self) {
@@ -142,8 +178,16 @@ impl Composer {
             return;
         }
         self.detach_history();
+        if self
+            .attachments
+            .remove_before(&mut self.text, &mut self.cursor)
+        {
+            self.sync_popup_after_edit();
+            return;
+        }
         let start = previous_boundary(&self.text, self.cursor);
         self.text.drain(start..self.cursor);
+        self.attachments.shift_for_remove(start..self.cursor);
         self.cursor = start;
         self.sync_popup_after_edit();
     }
@@ -153,12 +197,20 @@ impl Composer {
             return;
         }
         self.detach_history();
+        if self.attachments.remove_at(&mut self.text, &mut self.cursor) {
+            self.sync_popup_after_edit();
+            return;
+        }
         let end = next_boundary(&self.text, self.cursor);
         self.text.drain(self.cursor..end);
+        self.attachments.shift_for_remove(self.cursor..end);
         self.sync_popup_after_edit();
     }
 
     pub(super) fn popup_visible(&self) -> bool {
+        if self.attachments.len() != 0 {
+            return false;
+        }
         let Some(token) = command_token(&self.text, self.cursor) else {
             return false;
         };
@@ -236,15 +288,6 @@ impl Composer {
         true
     }
 
-    pub(super) fn take_text(&mut self) -> String {
-        let text = std::mem::take(&mut self.text);
-        self.cursor = 0;
-        self.history_index = None;
-        self.history_draft = None;
-        self.popup = CommandPopup::new();
-        text
-    }
-
     pub(super) fn record_submitted(&mut self, text: &str) -> bool {
         if text.trim().is_empty() || self.history.last().map(String::as_str) == Some(text) {
             return false;
@@ -261,6 +304,7 @@ impl Composer {
     pub(super) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.attachments.clear();
         self.history_index = None;
         self.history_draft = None;
         self.popup = CommandPopup::new();
@@ -273,12 +317,13 @@ impl Composer {
         let index = match self.history_index {
             Some(index) => index.saturating_sub(1),
             None => {
-                self.history_draft = Some(self.text.clone());
+                self.history_draft = Some(self.snapshot());
                 self.history.len() - 1
             }
         };
         self.history_index = Some(index);
         self.text.clone_from(&self.history[index]);
+        self.attachments.clear();
         self.cursor = self.text.len();
         self.dismiss_recalled_command();
     }
@@ -295,7 +340,7 @@ impl Composer {
             self.history_index = Some(next);
             self.text.clone_from(&self.history[next]);
         } else {
-            self.text = self.history_draft.take().unwrap_or_default();
+            self.restore_history_draft();
             self.history_index = None;
         }
         self.cursor = self.text.len();
@@ -326,7 +371,8 @@ impl Composer {
         for preceding in self.text.split('\n').take(target_row) {
             offset += preceding.len() + 1;
         }
-        self.cursor = offset + byte_at_display_column(line, usize::from(column));
+        let cursor = offset + byte_at_display_column(line, usize::from(column));
+        self.cursor = self.attachments.snap_cursor(cursor);
         self.detach_history();
         self.sync_popup_after_edit();
     }
@@ -334,6 +380,26 @@ impl Composer {
     fn detach_history(&mut self) {
         self.history_index = None;
         self.history_draft = None;
+    }
+
+    fn snapshot(&self) -> ComposerSnapshot {
+        ComposerSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            attachments: self.attachments.clone(),
+        }
+    }
+
+    fn restore_history_draft(&mut self) {
+        let Some(snapshot) = self.history_draft.take() else {
+            self.text.clear();
+            self.cursor = 0;
+            self.attachments.clear();
+            return;
+        };
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.attachments = snapshot.attachments;
     }
 
     fn sync_popup_after_edit(&mut self) {
@@ -395,97 +461,4 @@ fn byte_at_display_column(line: &str, column: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Composer;
-
-    #[test]
-    fn edits_unicode_at_the_cursor() {
-        let mut composer = Composer::default();
-        composer.insert_str("aйc");
-        composer.move_left();
-        composer.backspace();
-        composer.insert_str("b");
-        assert_eq!(composer.text(), "abc");
-        composer.move_home();
-        composer.delete();
-        assert_eq!(composer.text(), "bc");
-    }
-
-    #[test]
-    fn slash_popup_tracks_edits_and_dismissal() {
-        let mut composer = Composer::default();
-        composer.insert_str("/");
-        assert_eq!(composer.popup_rows().len(), 5);
-        composer.insert_str("mo");
-        assert_eq!(composer.selected_command(), Some("/model"));
-        composer.dismiss_popup();
-        assert!(!composer.popup_visible());
-        composer.insert_str("d");
-        assert!(composer.popup_visible());
-    }
-
-    #[test]
-    fn slash_popup_wraps_selection() {
-        let mut composer = Composer::default();
-        composer.insert_str("/");
-
-        composer.popup_up();
-        assert_eq!(composer.selected_command(), Some("/exit"));
-        assert_eq!(
-            composer.popup_rows(),
-            [
-                "  /provider  Configure provider authentication",
-                "  /model  Choose a model",
-                "  /status  Show provider usage and limits",
-                "  /usage  Show provider usage and limits",
-                "› /exit  Exit Misy",
-            ]
-        );
-
-        composer.popup_down();
-        assert_eq!(composer.selected_command(), Some("/provider"));
-        assert!(composer.popup_rows()[0].starts_with("› /provider"));
-    }
-
-    #[test]
-    fn tab_completion_replaces_the_filter_and_hides_the_popup() {
-        let mut composer = Composer::default();
-        composer.insert_str("/mo");
-
-        assert!(composer.complete_selected_command());
-        assert_eq!(composer.text(), "/model ");
-        assert_eq!(composer.cursor(), "/model ".len());
-        assert!(!composer.popup_visible());
-    }
-
-    #[test]
-    fn seeded_history_is_bounded_and_collapses_adjacent_duplicates() {
-        let history = (0..105)
-            .map(|index| format!("prompt-{index}"))
-            .chain(["prompt-104".to_owned()])
-            .collect();
-        let mut composer = Composer::with_history(history);
-
-        assert_eq!(composer.history_len(), 100);
-        composer.history_previous();
-        assert_eq!(composer.text(), "prompt-104");
-    }
-
-    #[test]
-    fn mouse_position_maps_display_cells_to_unicode_boundaries() {
-        let mut composer = Composer::default();
-        composer.insert_str("a界b\nnext");
-
-        composer.position_cursor(0, 2);
-        composer.insert_str("!");
-        assert_eq!(composer.text(), "a!界b\nnext");
-
-        composer.position_cursor(1, 2);
-        composer.insert_str("!");
-        assert_eq!(composer.text(), "a!界b\nne!xt");
-
-        composer.position_cursor(9, 0);
-        composer.insert_str("!");
-        assert_eq!(composer.text(), "a!界b\nne!xt!");
-    }
-}
+mod tests;

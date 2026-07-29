@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { OpenAiProvider } from "../src/provider";
-import type { Credentials } from "../src/types";
+import type { Credentials, ImageAttachment } from "../src/types";
 
 type CapturedRequest = {
 	url: string;
@@ -121,8 +121,18 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 		return Response.json({
 			models: [
 				{ slug: "zeta", display_name: "Zeta", priority: 2, context_window: 16_000 },
-				{ slug: "gpt-5.6-codex", priority: 1, default_reasoning_level: "medium" },
-				{ id: "alpha", priority: 1, supported_reasoning_levels: ["low"] },
+				{
+					slug: "gpt-5.6-codex",
+					priority: 1,
+					default_reasoning_level: "medium",
+					input_modalities: ["text", "image"],
+				},
+				{
+					id: "alpha",
+					priority: 1,
+					supported_reasoning_levels: ["low"],
+					input_modalities: ["text"],
+				},
 				{ slug: "hidden", visibility: "hidden", priority: 0 },
 				{ slug: "hide", visibility: "hide", priority: 0 },
 			],
@@ -146,14 +156,27 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 	expect(received?.headers.get("version")).toBe("0.144.1");
 	expect(received?.headers.get("accept")).toBe("application/json");
 	expect(models).toEqual([
-		{ id: "alpha", display_name: "alpha", context_window: 272_000, reasoning: true },
+		{
+			id: "alpha",
+			display_name: "alpha",
+			context_window: 272_000,
+			reasoning: true,
+			input_modalities: ["text"],
+		},
 		{
 			id: "gpt-5.6-codex",
 			display_name: "gpt-5.6-codex",
 			context_window: 372_000,
 			reasoning: true,
+			input_modalities: ["text", "image"],
 		},
-		{ id: "zeta", display_name: "Zeta", context_window: 16_000, reasoning: false },
+		{
+			id: "zeta",
+			display_name: "Zeta",
+			context_window: 16_000,
+			reasoning: false,
+			input_modalities: ["text"],
+		},
 	]);
 });
 
@@ -175,6 +198,7 @@ test("retries model discovery through the compatibility path", async () => {
 			display_name: "fallback-route",
 			context_window: 48_000,
 			reasoning: false,
+			input_modalities: ["text"],
 		},
 	]);
 });
@@ -287,6 +311,7 @@ test("sends account identity and complete subscription request fields", async ()
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 		text: { verbosity: "medium" },
 		input: expect.arrayContaining([
+			{ role: "user", content: "Hi" },
 			{
 				type: "function_call",
 				call_id: "call-1",
@@ -295,6 +320,60 @@ test("sends account identity and complete subscription request fields", async ()
 			},
 			{ type: "function_call_output", call_id: "call-1", output: "contents" },
 		]),
+	});
+});
+
+test("maps user and tool-result PNGs to Responses image content", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return new Response("event: response.completed\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+	const image: ImageAttachment = {
+		type: "image",
+		media_type: "image/png",
+		data_base64:
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y" +
+			"AAAAASUVORK5CYII=",
+	};
+
+	await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{
+			model_id: "gpt-5.5",
+			messages: [
+				{ role: "user", content: "look", attachments: [image] },
+				{
+					role: "tool",
+					tool_results: [{ tool_call_id: "call-1", content: "done", attachments: [image] }],
+				},
+			],
+			tools: [],
+			credentials: credentials(),
+		},
+		11,
+		() => {},
+	);
+
+	expect(received?.body).toMatchObject({
+		input: [
+			{
+				role: "user",
+				content: [
+					{ type: "input_text", text: "look" },
+					expect.objectContaining({ type: "input_image" }),
+				],
+			},
+			{
+				type: "function_call_output",
+				call_id: "call-1",
+				output: [
+					{ type: "input_text", text: "done" },
+					expect.objectContaining({ type: "input_image" }),
+				],
+			},
+		],
 	});
 });
 

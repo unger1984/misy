@@ -4,7 +4,10 @@ use super::{
     PendingFailure, ProviderEvent,
     router::{TransportStateLock, fail_pending, route_message},
 };
-use crate::{ProviderError, ProviderId, ProviderPackage, ProviderRequestId, fanout::Fanout};
+use crate::{
+    ProviderError, ProviderId, ProviderPackage, ProviderRequestId, fanout::Fanout,
+    providers::protocol::MAX_PROTOCOL_FRAME_BYTES,
+};
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use serde_json::{Value, json};
 use std::{
@@ -22,11 +25,6 @@ use tokio::{
 };
 
 const REAPER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Hard cap on one newline-delimited protocol message. Legitimate messages are far smaller
-/// (the usage capability caps reports at 64 KiB), so 8 MiB is generous headroom that still
-/// stops a provider streaming without a newline from growing the core's memory without bound.
-const MAX_PROTOCOL_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Owns one provider child and the state required to route its JSON-RPC responses.
 #[derive(Debug)]
@@ -201,6 +199,12 @@ impl ProviderProcess {
     async fn write_message(&self, message: &Value) -> io::Result<()> {
         let mut encoded = serde_json::to_vec(message).map_err(io::Error::other)?;
         encoded.push(b'\n');
+        if encoded.len() > MAX_PROTOCOL_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "provider protocol message exceeds 32 MiB limit",
+            ));
+        }
         // A provider has one ordered stdin stream, so the lock deliberately spans the async write.
         let mut io = self.io.lock().await;
         let stdin = io
@@ -284,16 +288,16 @@ async fn reader_loop(
 async fn read_protocol_line(reader: &mut BufReader<ChildStdout>) -> Result<String, PendingFailure> {
     let mut line = String::new();
     let read = reader
-        .take(MAX_PROTOCOL_LINE_BYTES + 1)
+        .take(MAX_PROTOCOL_FRAME_BYTES as u64 + 1)
         .read_line(&mut line)
         .await;
     match read {
         Ok(0) => Err(PendingFailure::Transport(
             "provider closed stdout".to_owned(),
         )),
-        Ok(_) if line.len() > MAX_PROTOCOL_LINE_BYTES as usize => Err(PendingFailure::Protocol(
-            format!("protocol line exceeds the {MAX_PROTOCOL_LINE_BYTES}-byte limit"),
-        )),
+        Ok(_) if line.len() > MAX_PROTOCOL_FRAME_BYTES => Err(PendingFailure::Protocol(format!(
+            "protocol line exceeds the {MAX_PROTOCOL_FRAME_BYTES}-byte limit"
+        ))),
         Ok(_) => Ok(line),
         Err(error) => Err(PendingFailure::Transport(error.to_string())),
     }

@@ -137,7 +137,8 @@ models_list() {
         while [ ! -f "$target.release" ]; do sleep 0.01; done
         reply \
           '{"models":[' \
-          '{"id":"fixture-model","display_name":"Fixture","context_window":4096},' \
+          '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+          '"input_modalities":["text","image"]},' \
           '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}'
       ) &
       return
@@ -164,14 +165,16 @@ models_list() {
     *explicit-default*)
       reply \
         '{"models":[' \
-        '{"id":"fixture-model","display_name":"Fixture","context_window":4096},' \
+        '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+        '"input_modalities":["text","image"]},' \
         '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}],' \
         '"default_model":"fixture-model-b"}'
       ;;
     *)
       reply \
         '{"models":[' \
-        '{"id":"fixture-model","display_name":"Fixture","context_window":4096},' \
+        '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+        '"input_modalities":["text","image"]},' \
         '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}'
       ;;
   esac
@@ -223,6 +226,51 @@ chat_start() {
     # Ordered most-recent prompt first: a chat request carries the whole history, so the
     # newest message's branch must win the pattern match. The cancelled pair keeps short
     # sleeps so a queued third answer drains well inside the test deadline.
+    *'"content":"image-input"'*)
+      case "$line" in
+        *'"attachments":[{'*) ;;
+        *)
+          failed 'missing image attachment'
+          reply '{}'
+          return
+          ;;
+      esac
+      case "$line" in
+        *'"type":"image"'*) ;;
+        *)
+          failed 'invalid image type'
+          reply '{}'
+          return
+          ;;
+      esac
+      case "$line" in
+        *'"media_type":"image/png"'*) ;;
+        *)
+          failed 'invalid image media type'
+          reply '{}'
+          return
+          ;;
+      esac
+      case "$line" in
+        *'"data_base64":"'*) ;;
+        *)
+          failed 'missing image data'
+          reply '{}'
+          return
+          ;;
+      esac
+      case "$line" in
+        *'"name":"view_image"'*) ;;
+        *)
+          failed 'missing view_image definition'
+          reply '{}'
+          return
+          ;;
+      esac
+      text seen
+      complete
+      reply '{}'
+      ;;
     *'"content":"queue-drain-third"'*)
       text two
       complete

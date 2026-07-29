@@ -4,7 +4,8 @@
 //! [`ProviderOperationResult`] or applies such a result back to the UI state,
 //! so the spawn site and its completion branch live next to each other.
 
-use super::{BrowserHandoff, ProviderOperationResult, TuiClient, TuiError};
+use super::{BrowserHandoff, ProviderOperationResult, SubmissionRequest, TuiClient, TuiError};
+use crate::tui::composer_attachment::ComposerDraft;
 use crate::tui::state::ProviderOperationKind;
 use misy_core::{
     AvailableModels, CoreError, Message, MisyCore, ModelRef, ProviderId, SubmissionId, UsageReport,
@@ -35,7 +36,15 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     pub(super) fn submit_prompt(&mut self, prompt: String) {
-        if self.submission_sender.send(prompt).is_err() {
+        let request = SubmissionRequest {
+            draft: ComposerDraft {
+                text: prompt,
+                images: Vec::new(),
+            },
+            clear_composer: false,
+            history_text: None,
+        };
+        if self.submission_sender.send(request).is_err() {
             self.state
                 .add_error("prompt submission worker stopped unexpectedly");
         }
@@ -120,7 +129,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Usage(model, result) => {
                 self.apply_usage_result(&model, result);
             }
-            ProviderOperationResult::Submit(result) => self.apply_submit_result(result),
+            ProviderOperationResult::Submit(request, result) => {
+                self.apply_submit_result(request, result);
+            }
         }
     }
 
@@ -246,9 +257,24 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
     }
 
-    fn apply_submit_result(&mut self, result: Result<SubmissionId, String>) {
-        if let Err(error) = result {
-            self.state.add_error(error);
+    fn apply_submit_result(
+        &mut self,
+        request: SubmissionRequest,
+        result: Result<SubmissionId, String>,
+    ) {
+        if request.clear_composer {
+            self.composer_submission_pending = false;
+        }
+        match result {
+            Ok(_) => {
+                if request.clear_composer && self.state.composer.matches_draft(&request.draft) {
+                    self.state.composer.clear();
+                }
+                if let Some(text) = request.history_text {
+                    self.record_prompt_history(&text);
+                }
+            }
+            Err(error) => self.state.add_error(error),
         }
     }
 }
@@ -256,16 +282,19 @@ impl<B: BrowserHandoff> TuiClient<B> {
 pub(super) fn spawn_submission_worker(
     core: MisyCore,
     operation_sender: UnboundedSender<ProviderOperationResult>,
-    mut submission_requests: UnboundedReceiver<String>,
+    mut submission_requests: UnboundedReceiver<SubmissionRequest>,
 ) {
     tokio::spawn(async move {
-        while let Some(prompt) = submission_requests.recv().await {
+        while let Some(request) = submission_requests.recv().await {
             let result = core
-                .submit(Message::user(prompt))
+                .submit_with_attachments(
+                    Message::user(request.draft.text.clone()),
+                    request.draft.images.clone(),
+                )
                 .await
                 .map_err(|error| error.to_string());
             // A closed channel means the client is gone, so the result has nowhere to land.
-            let _ = operation_sender.send(ProviderOperationResult::Submit(result));
+            let _ = operation_sender.send(ProviderOperationResult::Submit(request, result));
         }
     });
 }

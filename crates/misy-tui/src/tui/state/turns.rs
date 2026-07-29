@@ -44,6 +44,9 @@ impl UiState {
     }
 
     pub(in crate::tui) fn busy_label(&self, now: Instant) -> Option<String> {
+        if !self.snapshot.pending_questions.is_empty() {
+            return None;
+        }
         let started = self.submission_started_at?;
         let elapsed = now.saturating_duration_since(started);
         let phase = if self.response_started {

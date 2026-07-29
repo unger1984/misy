@@ -138,7 +138,9 @@ model, authentication, session, and tool orchestration remain in the core.
   core operation. The current root `SetTodoList` snapshot remains pinned immediately above the
   composer or question surface until cleared: pending items use a muted empty circle, in-progress
   items use an accented dotted circle and emphasis, and done items use a green check and
-  strikethrough. The question viewport keeps its selected row visible on short terminals. Completed
+  strikethrough. Long question-tab headers are truncated rather than rejected. The generation busy
+  row is hidden while a question is pending, so its `Esc` hint cannot conflict with question
+  dismissal. The question viewport keeps its selected row visible on short terminals. Completed
   `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
   JSON, including after session replay.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting

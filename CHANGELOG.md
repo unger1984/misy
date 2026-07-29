@@ -51,6 +51,8 @@
   forwarding internal metadata and tool records that upstream rejects with HTTP 400.
 - Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal
   stream failure against a second JSON-RPC error for the same chat request.
+- Treated the Kimi-style question header length as model guidance instead of rejecting the tool
+  call, truncated long tabs safely, and hid the generation indicator while awaiting an answer.
 - Rendered pending Kimi-style questions inline in the composer slot, preserving hidden drafts and
   attachments while keeping the current todo snapshot visible with status-specific markers.
 - Rendered provider prompt authentication as an explicit in-popup input field with a visible

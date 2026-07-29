@@ -3,6 +3,7 @@ use crate::tui::action::UiAction;
 use misy_core::{
     ActivityOutput, ActivitySummary, CoreEvent, ProviderAuthMethod, ProviderDisplayName, ProviderId,
 };
+use std::time::{Duration, Instant};
 
 fn activity(id: u64, kind: &str, status: &str, title: &str) -> ActivitySummary {
     serde_json::from_value(serde_json::json!({
@@ -78,6 +79,20 @@ fn question_snapshot_recovers_requests_in_fifo_order_without_a_modal() {
             .title,
         "Second question"
     );
+}
+
+#[test]
+fn pending_question_hides_the_generation_busy_label() {
+    let mut state = UiState::default();
+    let now = Instant::now();
+    state.submission_started_at = Some(now - Duration::from_secs(3));
+    assert!(state.busy_label(now).is_some());
+
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![question_request(1, "Choose")];
+    state.apply_snapshot(snapshot);
+
+    assert!(state.busy_label(now).is_none());
 }
 
 fn refreshed_choices() -> Vec<ProviderChoice> {

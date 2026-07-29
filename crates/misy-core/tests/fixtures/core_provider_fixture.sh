@@ -104,6 +104,13 @@ auth_complete() {
       fi
       ;;
   esac
+  case "$target" in
+    *auth-prompt-reflect*)
+      printf '{"jsonrpc":"2.0","id":%s,"error":' "$id"
+      printf '%s\n' '{"code":401,"message":"rejected API key sk-reflected"}}'
+      return
+      ;;
+  esac
   case "$line" in
     *'"session":{"id":"remote-error"}'*)
       printf '{"jsonrpc":"2.0","id":%s,"error":' "$id"

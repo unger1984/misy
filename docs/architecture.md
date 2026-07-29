@@ -25,7 +25,8 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The `misy-core` workspace crate owns normalized state, configuration, credentials, the persisted
+- The `misy-core` workspace crate owns normalized state, configuration, opaque OAuth or API-key
+  credentials, the persisted
   model catalog cache (`~/.misy/models.json`), persisted conversations, FIFO submission scheduling,
   agent/tool iteration, cancellation, provider supervision, and public events. Clients read the
   model cache through the core. The core also owns capability negotiation, credential injection,

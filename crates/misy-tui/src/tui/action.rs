@@ -98,6 +98,8 @@ pub enum UiMode {
     ProviderList,
     /// Settings for one provider.
     ProviderDetail,
+    /// Generic provider-owned authentication form.
+    AuthPrompt,
     /// Model selection view.
     ModelList,
     /// Shared tasks and agents picker.

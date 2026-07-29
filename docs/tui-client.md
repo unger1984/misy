@@ -155,15 +155,19 @@ model, authentication, session, and tool orchestration remain in the core.
 - Provider authentication follows the `auth.start` kind. `browser` validates and opens the URL,
   then waits for provider completion. `device` does the same while showing the user code in the
   provider operation row. `none` immediately marks the provider authenticated without opening a
-  browser. `prompt` reports that field input is not supported by this client yet.
-- `Esc` cancels an in-flight provider authentication start or browser/device completion wait,
+  browser. `prompt` opens a generic form; secret fields are masked, normal text and paste edit the
+  active field, arrows/Home/End edit or navigate, and Enter advances or submits the final field.
+  Submitted values leave `UiState` immediately and never enter the composer, prompt history, or
+  transcript. While completion runs the popup shows `Validating credentials…`.
+- `Esc` cancels an in-flight provider authentication start, prompt form, or completion wait,
   restores the provider actions in the popup, and asks the core to terminate the blocked provider
   process. The next attempt starts a clean provider process; late results from the cancelled task
   cannot change the popup or authentication state.
 - Browser and device authorization URLs are limited to validated HTTP(S) addresses and are passed
   directly to the OS opener without a shell. Unknown authentication kinds are reported as errors.
-- Authentication completion keeps the opaque provider session separate from the empty browser or
-  device completion object and passes both through the core without pasted credential JSON.
+- Authentication completion keeps the opaque provider session separate from the browser/device
+  completion object or prompt values and passes both through the core without copying secrets into
+  TUI persistence.
 - During active work, `Ctrl+C` interrupts the current operation without exiting. While idle, the
   first press highlights `press Ctrl+C again to exit` in the footer for one second; a second press
   inside that window shuts down the core/provider host, restores the terminal, and exits. Any

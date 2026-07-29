@@ -66,10 +66,11 @@ The repository already contains a working development-stage vertical slice:
   copying, command completion, provider authentication, model selection, session resume, queued
   prompts, streaming output, tool rendering, interruption, and clean terminal restoration;
 - a versioned JSON-RPC 2.0 provider protocol with manifest discovery, lazy process startup,
-  streaming chat, browser and device authentication flows, credential refresh, model discovery,
+  streaming chat, browser, device, and prompt authentication flows, credential refresh, model
+  discovery,
   request cancellation, and an optional normalized usage capability;
-- bundled subscription-based provider plugins for OpenAI, Anthropic, and Kimi, implemented in
-  TypeScript and run with Bun;
+- bundled provider plugins for OpenAI, Anthropic, Kimi, and the API-key-based AnyModel catalog,
+  implemented in TypeScript and run with Bun;
 - Rust-owned filesystem and unified `exec_command` tools, including JSON Schema validation,
   automatic foreground-to-background yielding, optional macOS/Linux PTY input through
   `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
@@ -79,7 +80,7 @@ The repository already contains a working development-stage vertical slice:
   real accounts or external network access.
 
 This is an MVP foundation, not a stable release. One process still owns one attached conversation
-at a time, and the TUI does not yet support prompt-based authentication such as entering API keys.
+at a time. Provider protocol v2 prompt forms are supported in the TUI with masked secret fields.
 
 ## Planned work
 
@@ -89,7 +90,6 @@ The following areas are intentionally deferred and remain open for future develo
 - MCP integration;
 - recursive agent trees, roles, batch spawning, and isolated agent worktrees;
 - provider marketplace installation and updates;
-- API-key and generic prompt-based authentication;
 - a daemon or public IPC boundary for multiple clients;
 - additional clients, including a possible desktop UI.
 
@@ -199,5 +199,5 @@ provider lazily.
 
 See [docs/provider-plugins.md](docs/provider-plugins.md) for the protocol and lifecycle contract,
 and the bundled [OpenAI](plugins/providers/openai/README.md),
-[Anthropic](plugins/providers/anthropic/README.md), and [Kimi](plugins/providers/kimi/README.md)
-packages for working examples.
+[Anthropic](plugins/providers/anthropic/README.md), [Kimi](plugins/providers/kimi/README.md), and
+[AnyModel](plugins/providers/anymodel/README.md) packages for working examples.

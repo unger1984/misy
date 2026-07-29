@@ -186,12 +186,9 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         && !key.modifiers.contains(KeyModifiers::ALT)
         && !key.modifiers.contains(KeyModifiers::SUPER)
     {
-        if client.state().mode() != super::action::UiMode::Input
-            && let Some(index) = character.to_digit(10)
-            && index != 0
-        {
+        if let Some(index) = number_shortcut(client.state().mode(), character) {
             // `handle_key` already records failures into the UI state, so this is a duplicate.
-            let _ = client.handle_key(UiKey::SelectIndex(index as usize));
+            let _ = client.handle_key(UiKey::SelectIndex(index));
             return;
         }
         let mut encoded = [0; 4];
@@ -202,6 +199,19 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         // `handle_key` already records failures into the UI state, so this is a duplicate.
         let _ = client.handle_key(normalized);
     }
+}
+
+fn number_shortcut(mode: super::action::UiMode, character: char) -> Option<usize> {
+    if matches!(
+        mode,
+        super::action::UiMode::Input | super::action::UiMode::AuthPrompt
+    ) {
+        return None;
+    }
+    character
+        .to_digit(10)
+        .filter(|index| *index != 0)
+        .map(|index| index as usize)
 }
 
 fn is_explicit_paste_key(key: KeyEvent) -> bool {
@@ -467,6 +477,12 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE
         )));
+    }
+
+    #[test]
+    fn prompt_auth_digits_are_text_instead_of_list_shortcuts() {
+        assert_eq!(number_shortcut(crate::UiMode::AuthPrompt, '7'), None);
+        assert_eq!(number_shortcut(crate::UiMode::ProviderList, '7'), Some(7));
     }
 
     #[test]

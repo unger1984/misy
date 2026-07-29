@@ -166,9 +166,21 @@ test("rejects missing credentials on methods that require them", async () => {
 		expect(replies).toContainEqual({
 			jsonrpc: "2.0",
 			id,
-			error: { code: -32000, message: "Fixture OAuth credentials are required" },
+			error: { code: -32000, message: "Fixture credentials are required" },
 		});
 	}
+});
+
+test("rejects a credential kind owned by another provider adapter", async () => {
+	const { replies } = await roundTrip(
+		'{"jsonrpc":"2.0","id":1,"method":"auth.refresh","params":' +
+			'{"credentials":{"api_key":"key","type":"api_key"}}}\n',
+	);
+	expect(replies).toContainEqual({
+		jsonrpc: "2.0",
+		id: 1,
+		error: { code: -32000, message: "Fixture credentials are required" },
+	});
 });
 
 test("rejects malformed auth.start, auth.complete, and chat.start params", async () => {

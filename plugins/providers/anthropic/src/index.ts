@@ -1,5 +1,5 @@
 /** Anthropic provider process entry point: wires the provider adapter to the protocol SDK. */
-import { requireOauthCredentials, serve } from "@misy/provider-sdk";
+import { oauthCredentials, requireOauthCredentials, serve } from "@misy/provider-sdk";
 import { AnthropicProvider } from "./provider";
 
 const provider = new AnthropicProvider();
@@ -7,6 +7,7 @@ const provider = new AnthropicProvider();
 serve({
 	name: "Anthropic",
 	requestFailureMessage: "Anthropic request failed",
+	parseCredentials: oauthCredentials,
 	authStatus: (credentials) => provider.authStatus(credentials),
 	startAuth: async (method) => {
 		const started = await provider.startAuth(method);

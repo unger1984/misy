@@ -51,13 +51,14 @@ Read this document before making a new architecture or user-interaction choice.
   but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
   post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1
   scopes its portable PTY guarantee to processes that stay in the created Unix process group.
+- Protocol v2 prompt authentication is rendered as a generic TUI form. Secret values are masked
+  and remain transient; the Rust core persists only the provider-owned opaque credential object.
 
 ## Deferred Scope
 
 MCP, permissions, recursive agents, agent roles/batches/worktree isolation, marketplace
-installation/update, daemon/public IPC, desktop UI,
-API-key authentication, generic prompt-based
-authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
+installation/update, daemon/public IPC, desktop UI, and a cross-process credential transaction
+policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.
 
 ## Accepted Dependency Risks

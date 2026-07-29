@@ -24,8 +24,8 @@ when bundled or the matching user plugin directory when installed. It contains `
 documentation, a license, language-native build metadata/lockfiles, source, and tests.
 
 Plugins may use any language that can run as a process and speak the protocol. Bun is the
-implementation choice for the bundled `openai`, `anthropic`, and `kimi` packages, not a global
-host dependency.
+implementation choice for the bundled `openai`, `anthropic`, `kimi`, and `anymodel` packages, not
+a global host dependency.
 
 ### Shared TypeScript SDK
 
@@ -256,6 +256,17 @@ fall back to the default on any other value.
 - `MISY_KIMI_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
 - `MISY_KIMI_DATA_DIR` — plugin data directory (default `~/.local/share/misy/kimi`).
 
+**anymodel** (`plugins/providers/anymodel/src/config.ts`)
+
+- `MISY_ANYMODEL_BASE_URL` — OpenAI-compatible API base URL (default
+  `https://anymodel.org/v1`).
+- `MISY_ANYMODEL_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+
+AnyModel accepts an API key only through its protocol v2 prompt form. The core stores the returned
+opaque credential object, while the plugin validates it against the live `/models` catalog and
+sends raw upstream IDs such as `cx/gpt-5.6-sol`. Qualified Misy identities add the provider
+namespace, for example `anymodel/cx/gpt-5.6-sol`; that outer prefix is never sent upstream.
+
 ## Change Impact
 
 Protocol changes require a version decision plus updates to host, core, provider packages,
@@ -269,4 +280,5 @@ fixtures, README, and contract tests. Do not silently widen the current protocol
 - [`plugins/providers/openai/README.md`](../plugins/providers/openai/README.md)
 - [`plugins/providers/anthropic/README.md`](../plugins/providers/anthropic/README.md)
 - [`plugins/providers/kimi/README.md`](../plugins/providers/kimi/README.md)
+- [`plugins/providers/anymodel/README.md`](../plugins/providers/anymodel/README.md)
 - [Architecture](architecture.md)

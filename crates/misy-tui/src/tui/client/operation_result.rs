@@ -115,8 +115,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Start(provider, method, result) => {
                 self.apply_start_result(provider, method, result);
             }
-            ProviderOperationResult::Complete(provider, _method, result) => {
-                self.apply_complete_result(&provider, result);
+            ProviderOperationResult::Complete(provider, _method, kind, result) => {
+                self.apply_complete_result(&provider, kind, result);
             }
             ProviderOperationResult::CancelAuth(provider, result) => {
                 self.apply_cancel_auth_result(&provider, result);
@@ -205,14 +205,16 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
     }
 
-    fn apply_complete_result(&mut self, provider: &ProviderId, result: Result<(), String>) {
-        if !self
-            .state
-            .finish_provider_operation(provider, ProviderOperationKind::Complete)
-        {
+    fn apply_complete_result(
+        &mut self,
+        provider: &ProviderId,
+        kind: ProviderOperationKind,
+        result: Result<(), String>,
+    ) {
+        if !self.state.finish_provider_operation(provider, kind) {
             return;
         }
-        self.finish_auth_task(provider, ProviderOperationKind::Complete);
+        self.finish_auth_task(provider, kind);
         match result {
             Ok(()) => self.refresh_provider_choices(),
             Err(error) => self.state.add_error(error),

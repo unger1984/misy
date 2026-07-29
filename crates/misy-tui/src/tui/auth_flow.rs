@@ -2,8 +2,9 @@
 
 use super::browser::validate_authorization_url;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PromptField {
     pub(super) id: String,
     pub(super) label: String,
@@ -90,6 +91,15 @@ fn parse_prompt(response: &Value) -> Result<AuthFlow, String> {
         .iter()
         .map(parse_prompt_field)
         .collect::<Result<Vec<_>, _>>()?;
+    let mut ids = BTreeSet::new();
+    for field in &fields {
+        if !ids.insert(field.id.as_str()) {
+            return Err(format!(
+                "provider auth.start prompt flow has duplicate field id `{}`",
+                field.id
+            ));
+        }
+    }
     Ok(AuthFlow::Prompt {
         fields,
         session: required_session(response, "prompt")?,
@@ -172,5 +182,22 @@ mod tests {
         ] {
             assert!(parse_auth_flow(&response).is_err(), "accepted {response}");
         }
+    }
+
+    #[test]
+    fn rejects_duplicate_prompt_field_ids() {
+        let response = json!({
+            "kind": "prompt",
+            "fields": [
+                {"id": "key", "label": "First"},
+                {"id": "key", "label": "Second"}
+            ],
+            "session": {}
+        });
+
+        assert!(
+            parse_auth_flow(&response)
+                .is_err_and(|error| error.contains("duplicate field id `key`"))
+        );
     }
 }

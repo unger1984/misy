@@ -326,8 +326,11 @@ async fn dispatcher_returns_when_a_detached_grandchild_holds_the_output_pipe() {
     // A plain `(sleep 30 &)` stays in the killed process group, so the escape
     // needs setsid; the marker file guarantees the grandchild has left the
     // group before the leader exits and the group kill is sent.
+    // The leader prints before daemonizing, so the run also proves the drain deadline keeps
+    // what was already read instead of discarding it with the aborted capture task.
     let script = format!(
-        "(perl -MPOSIX=setsid -e 'setsid(); \
+        "echo 'printed before the daemon held the pipe'; \
+         (perl -MPOSIX=setsid -e 'setsid(); \
          open(my $marker, \">\", $ARGV[0]); exec \"sleep\", \"30\"' '{}' &) ; \
          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
          [ -e '{}' ] && break; sleep 0.1; done; exit 0",
@@ -350,11 +353,18 @@ async fn dispatcher_returns_when_a_detached_grandchild_holds_the_output_pipe() {
     .await
     .expect("run must return even when a grandchild holds the output pipe open");
 
-    assert!(!result.is_error, "{}", result.content);
     let output: serde_json::Value =
         serde_json::from_str(&result.content).expect("parse command output");
-    assert_eq!(output["kind"], "success");
     assert_eq!(output["exit_code"], 0);
+    assert_eq!(
+        output["stdout"], "printed before the daemon held the pipe\n",
+        "output read before the drain deadline must survive the aborted capture"
+    );
+    // The pipe never reached EOF, so the captured output is real but incomplete. It travels the
+    // same path as a budget overflow: flagged truncated rather than presented as the full output.
+    assert_eq!(output["kind"], "truncated");
+    assert_eq!(output["stdout_truncated"], true);
+    assert!(result.is_error);
     fs::remove_dir_all(root).expect("remove detached-grandchild test directory");
 }
 

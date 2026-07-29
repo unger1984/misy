@@ -40,6 +40,18 @@ bun test
 bunx tsc --noEmit
 ```
 
+One rule is not covered by the tools above and needs its own check.
+
+`rustfmt` leaves macro bodies alone and Biome does not wrap single-line comments, so the 100-column
+limit from [Code Style](code-style.md#file-and-function-size) can be broken while `cargo fmt
+--check` and `biome check` stay green:
+
+```bash
+find crates -name '*.rs' -exec awk 'length>100 {print FILENAME":"FNR}' {} \;
+find plugins/providers -path '*/node_modules' -prune -o -name '*.ts' -print \
+  | xargs awk 'length>100 {print FILENAME":"FNR}'
+```
+
 ## Testing Layers
 
 1. Rust unit tests live beside the implementation in `crates/misy-core/src/` and

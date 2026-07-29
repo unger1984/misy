@@ -461,7 +461,7 @@ test("omits credentials when a stream does not refresh", async () => {
 	expect(result).not.toHaveProperty("credentials");
 });
 
-test("fails a stream whose event payload is truncated without leaking a partial delta", async () => {
+test("fails a truncated stream payload without leaking a partial delta", async () => {
 	const base = fakeServer(
 		() =>
 			new Response(

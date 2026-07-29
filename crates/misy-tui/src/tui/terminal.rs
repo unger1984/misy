@@ -305,7 +305,11 @@ mod tests {
         let transcript = client.state().transcript();
         assert!(
             transcript.iter().any(|row| {
-                matches!(row, TranscriptRow::Error(message) if message.contains("could not access the clipboard"))
+                matches!(
+                    row,
+                    TranscriptRow::Error(message)
+                        if message.contains("could not access the clipboard")
+                )
             }),
             "clipboard failure must surface as a transcript error, got {transcript:?}"
         );

@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{
     io,
     process::{ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -82,8 +83,8 @@ fn spawn_error(call: &ToolCall, command_name: &str, error: &io::Error) -> ToolRe
 async fn supervisor_error(
     call: &ToolCall,
     command_name: &str,
-    stdout: Option<JoinHandle<io::Result<CapturedStream>>>,
-    stderr: Option<JoinHandle<io::Result<CapturedStream>>>,
+    stdout: Option<Capture>,
+    stderr: Option<Capture>,
     error: tokio::sync::oneshot::error::RecvError,
 ) -> ToolResult {
     command_result(
@@ -104,50 +105,83 @@ struct CapturedStream {
     truncated: bool,
 }
 
-fn capture_stream<R>(mut reader: R) -> JoinHandle<io::Result<CapturedStream>>
+/// A running capture task together with the buffer it fills.
+///
+/// The buffer is shared with the task rather than owned by it, because a capture that has to be
+/// aborted still holds output the command already produced. Keeping it here means the drain
+/// deadline costs the completeness of the output, not the output itself.
+struct Capture {
+    captured: Arc<Mutex<CapturedStream>>,
+    task: JoinHandle<io::Result<()>>,
+}
+
+fn capture_stream<R>(mut reader: R) -> Capture
 where
     R: AsyncRead + Send + Unpin + 'static,
 {
-    tokio::spawn(async move {
-        let mut captured = CapturedStream::default();
+    let captured = Arc::new(Mutex::new(CapturedStream::default()));
+    let filled = Arc::clone(&captured);
+    let task = tokio::spawn(async move {
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             let read = reader.read(&mut buffer).await?;
             if read == 0 {
-                return Ok(captured);
+                return Ok(());
             }
-            let available = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(captured.bytes.len());
-            let kept = available.min(read);
-            captured.bytes.extend_from_slice(&buffer[..kept]);
-            captured.truncated |= kept < read;
+            append_within_budget(&filled, &buffer[..read]);
         }
-    })
+    });
+    Capture { captured, task }
 }
 
-async fn join_capture(handle: Option<JoinHandle<io::Result<CapturedStream>>>) -> CapturedStream {
-    let Some(mut handle) = handle else {
+/// Appends `chunk` up to the output budget, marking the stream truncated once it overflows.
+///
+/// # Panics
+///
+/// Panics if the capture buffer mutex is poisoned by an earlier capture-task panic.
+fn append_within_budget(captured: &Mutex<CapturedStream>, chunk: &[u8]) {
+    let mut captured = captured
+        .lock()
+        .expect("capture buffer mutex must not be poisoned");
+    let available = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(captured.bytes.len());
+    let kept = available.min(chunk.len());
+    captured.bytes.extend_from_slice(&chunk[..kept]);
+    captured.truncated |= kept < chunk.len();
+}
+
+async fn join_capture(capture: Option<Capture>) -> CapturedStream {
+    let Some(Capture { captured, mut task }) = capture else {
         return CapturedStream::default();
     };
-    match timeout(CAPTURE_DRAIN_TIMEOUT, &mut handle).await {
-        Ok(joined) => joined
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_else(capture_failed),
-        Err(_) => {
-            handle.abort();
-            CapturedStream::default()
-        }
+    let drained = matches!(
+        timeout(CAPTURE_DRAIN_TIMEOUT, &mut task).await,
+        Ok(Ok(Ok(())))
+    );
+    if !drained {
+        // The task is stopped before the buffer is taken so nothing appends behind the read.
+        task.abort();
     }
+    let mut stream = take_captured(&captured);
+    if !drained {
+        // A missed deadline, a panic, or a read error all mean the same thing to the caller:
+        // what was captured is real, but it is not everything the command printed. Reporting it
+        // as complete would read as "the command printed nothing more", which is a lie.
+        stream.truncated = true;
+    }
+    stream
 }
 
-// Silently swapping a failed capture for an empty stream would mask the failure
-// as "the command printed nothing", so surface it through the same truncated
-// marker the output budget uses.
-fn capture_failed() -> CapturedStream {
-    CapturedStream {
-        bytes: Vec::new(),
-        truncated: true,
-    }
+/// Takes the captured output, leaving the shared buffer empty.
+///
+/// # Panics
+///
+/// Panics if the capture buffer mutex is poisoned by an earlier capture-task panic.
+fn take_captured(captured: &Mutex<CapturedStream>) -> CapturedStream {
+    std::mem::take(
+        &mut *captured
+            .lock()
+            .expect("capture buffer mutex must not be poisoned"),
+    )
 }
 
 enum CommandCompletion {
@@ -233,12 +267,23 @@ fn command_result(
 mod tests {
     use super::*;
 
+    /// Builds a capture whose task runs `body` against the shared buffer.
+    fn capture_with<F>(body: F) -> Capture
+    where
+        F: FnOnce(Arc<Mutex<CapturedStream>>) -> io::Result<()> + Send + 'static,
+    {
+        let captured = Arc::new(Mutex::new(CapturedStream::default()));
+        let filled = Arc::clone(&captured);
+        let task = tokio::spawn(async move { body(filled) });
+        Capture { captured, task }
+    }
+
     #[tokio::test]
     async fn marks_output_truncated_when_the_capture_task_fails() {
-        let handle: JoinHandle<io::Result<CapturedStream>> =
-            tokio::spawn(async { Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed")) });
+        let capture =
+            capture_with(|_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed")));
 
-        let captured = join_capture(Some(handle)).await;
+        let captured = join_capture(Some(capture)).await;
 
         assert!(captured.truncated);
         assert!(captured.bytes.is_empty());
@@ -246,10 +291,9 @@ mod tests {
 
     #[tokio::test]
     async fn marks_output_truncated_when_the_capture_task_panics() {
-        let handle: JoinHandle<io::Result<CapturedStream>> =
-            tokio::spawn(async { panic!("capture task blew up") });
+        let capture = capture_with(|_| panic!("capture task blew up"));
 
-        let captured = join_capture(Some(handle)).await;
+        let captured = join_capture(Some(capture)).await;
 
         assert!(captured.truncated);
         assert!(captured.bytes.is_empty());
@@ -257,12 +301,24 @@ mod tests {
 
     #[tokio::test]
     async fn keeps_a_successful_empty_capture_clean() {
-        let handle: JoinHandle<io::Result<CapturedStream>> =
-            tokio::spawn(async { Ok(CapturedStream::default()) });
+        let capture = capture_with(|_| Ok(()));
 
-        let captured = join_capture(Some(handle)).await;
+        let captured = join_capture(Some(capture)).await;
 
         assert!(!captured.truncated);
         assert!(captured.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_output_read_before_a_failed_capture() {
+        let capture = capture_with(|captured| {
+            append_within_budget(&captured, b"printed before the failure");
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed"))
+        });
+
+        let captured = join_capture(Some(capture)).await;
+
+        assert_eq!(captured.bytes, b"printed before the failure");
+        assert!(captured.truncated);
     }
 }

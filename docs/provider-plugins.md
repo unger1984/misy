@@ -39,10 +39,13 @@ The SDK is **not** part of the protocol: plugins in other languages implement th
 contract independently, and a plugin that outgrows the SDK may do the same. Every plugin remains a
 separate process with its own `misy-plugin.json`, spawned exactly as before.
 
-Plugins consume the SDK as a local `file:../_sdk` dependency declared in their `package.json`.
-Bun copies `file:` dependencies into the plugin's `node_modules` on `bun install`, so an installed
-plugin directory stays self-contained; after editing `_sdk`, re-run `bun install` in each plugin
-to refresh the copy.
+Plugins consume the SDK as a local `file:../_sdk` dependency declared in their `package.json`. Bun
+links such a dependency file by file rather than copying it, so every plugin reads the working tree
+copy of `_sdk` and an edit there takes effect without reinstalling. The trade-off is that a bundled
+plugin directory is not relocatable on its own: the links are absolute paths into this repository,
+so moving one elsewhere without `_sdk` breaks its imports. Plugins installed under
+`~/.misy/plugins/providers` are unaffected — they declare their own dependencies and never resolve
+`file:../_sdk`.
 
 ## Discovery and Lifecycle
 

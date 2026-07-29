@@ -1,7 +1,7 @@
 //! Inline question and sticky todo rendering for the bottom interaction slot.
 
 use super::{
-    display_width::{text_width, truncate_to_width},
+    display_width::truncate_to_width,
     question_dialog::InlineQuestionPresentation,
     render::{list_line, modal_label_width, padded_line},
     state::UiState,
@@ -137,25 +137,33 @@ fn todo_line(todo: &misy_core::TodoItem, width: u16) -> Line<'static> {
 }
 
 fn question_tabs(tabs: &[(String, bool)], width: u16) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (label, active) in tabs {
-        let label = format!(" {label} ");
-        if Line::from(spans.clone())
-            .width()
-            .saturating_add(text_width(&label))
-            > usize::from(width)
-        {
-            break;
-        }
-        spans.push(Span::styled(
-            label,
-            if *active {
-                style::model_tab_active()
-            } else {
-                style::muted()
-            },
-        ));
+    let available = usize::from(width);
+    if tabs.is_empty() || available < 3 {
+        return padded_line(Vec::new(), width, Style::default());
     }
+    let visible = if available < tabs.len().saturating_mul(3) {
+        vec![tabs.iter().find(|(_, active)| *active).unwrap_or(&tabs[0])]
+    } else {
+        tabs.iter().collect::<Vec<_>>()
+    };
+    let base_width = available / visible.len();
+    let remainder = available % visible.len();
+    let spans = visible
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, active))| {
+            let slot_width = base_width + usize::from(index < remainder);
+            let label = truncate_to_width(label, slot_width.saturating_sub(2));
+            Span::styled(
+                format!(" {label} "),
+                if *active {
+                    style::model_tab_active()
+                } else {
+                    style::muted()
+                },
+            )
+        })
+        .collect();
     padded_line(spans, width, Style::default())
 }
 
@@ -190,6 +198,24 @@ mod tests {
                 .style
                 .add_modifier
                 .contains(Modifier::CROSSED_OUT)
+        );
+    }
+
+    #[test]
+    fn long_question_header_remains_visible_as_a_truncated_tab() {
+        let line = question_tabs(&[("Подробный способ проверки".to_owned(), true)], 14);
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(line.width() <= 14);
+        assert!(rendered.contains('…'), "{rendered:?}");
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style == style::model_tab_active())
         );
     }
 }

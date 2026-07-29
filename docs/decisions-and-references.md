@@ -50,11 +50,13 @@ Read this document before making a new architecture or user-interaction choice.
 - `SetTodoList` and `AskUserQuestion` follow Kimi's model-visible names and payload shapes.
   Checklists replace a complete ordered snapshot with `pending`, `in_progress`, and `done`
   statuses. Questions accept one to four tabs, two to four choices, single or multiple selection,
-  and a client-synthesized `Other` choice. Codex contributes only typed request identity and
-  snapshot recovery. In the TUI, a pending question replaces the composer bottom slot while the
-  current root todo snapshot stays pinned directly above it; questions are not modal popups. The
-  core owns both tools; question capability version 1 is immutable for the core lifetime, and three
-  dismissals suppress further dialogs for the same turn owner.
+  and a client-synthesized `Other` choice. The recommended twelve-character header length remains
+  model guidance, matching Kimi; clients truncate longer labels instead of rejecting the request.
+  Codex contributes only typed request identity and snapshot recovery. In the TUI, a pending
+  question replaces the composer bottom slot while the current root todo snapshot stays pinned
+  directly above it; questions are not modal popups. The core owns both tools; question capability
+  version 1 is immutable for the core lifetime, and three dismissals suppress further dialogs for
+  the same turn owner.
 - Misy always reads the optional global `~/.misy/AGENTS.md` and project-root `AGENTS.md` for a new
   root conversation. Nested `AGENTS.md` files are discovered only on the ancestor chain of an
   actual filesystem target, cached per main/child session, and applied before tool side effects.

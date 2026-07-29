@@ -283,7 +283,9 @@ pub(crate) fn definition() -> ToolDefinition {
             "properties": {"questions": {"type": "array", "minItems": 1, "maxItems": 4,
                 "items": {"type": "object", "required": ["question", "options"],
                     "properties": {
-                        "question": {"type": "string"}, "header": {"type": "string"},
+                        "question": {"type": "string"},
+                        "header": {"type": "string", "description":
+                            "Short category tag (max 12 chars, e.g. 'Auth', 'Style')."},
                         "multi_select": {"type": "boolean"},
                         "options": {"type": "array", "minItems": 2, "maxItems": 4,
                             "items": {"type": "object", "required": ["label"],
@@ -324,9 +326,6 @@ fn validate_question(question: &QuestionItem, seen: &mut BTreeSet<String>) -> Re
     }
     if !seen.insert(question.question.clone()) {
         return Err("question texts must be unique".to_owned());
-    }
-    if question.header.chars().count() > 12 {
-        return Err("question header must be at most 12 characters".to_owned());
     }
     let mut labels = BTreeSet::new();
     for option in &question.options {
@@ -438,7 +437,7 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
 mod tests {
     use super::{
         QuestionItem, QuestionOption, QuestionRegistry, QuestionResolution, QuestionResponse,
-        QuestionSource, parse_questions,
+        QuestionSource, definition, parse_questions,
     };
     use crate::core::SubmissionId;
     use serde_json::json;
@@ -468,6 +467,27 @@ mod tests {
                 multi_select: false,
             }]
         );
+    }
+
+    #[test]
+    fn long_header_is_advisory_like_kimi_contract() {
+        let header = "Подробный способ проверки";
+        let questions = parse_questions(&json!({"questions": [{
+            "question": "Choose",
+            "header": header,
+            "options": [{"label": "A"}, {"label": "B"}]
+        }]}))
+        .expect("Kimi treats the short header limit as model guidance");
+        assert_eq!(questions[0].header, header);
+
+        let schema = definition().input_schema;
+        let header_schema = &schema["properties"]["questions"]["items"]["properties"]["header"];
+        assert!(
+            header_schema["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("max 12 chars"))
+        );
+        assert!(header_schema.get("maxLength").is_none());
     }
 
     #[test]

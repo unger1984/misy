@@ -28,8 +28,12 @@ afterEach(async () => {
 test("serves auth, models, chat, and unsupported usage over NDJSON", async () => {
 	let model = "";
 	let observeChat: () => void = () => undefined;
+	let observeRateLimit: () => void = () => undefined;
 	const chatStarted = new Promise<void>((resolve) => {
 		observeChat = resolve;
+	});
+	const rateLimitStarted = new Promise<void>((resolve) => {
+		observeRateLimit = resolve;
 	});
 	const api = Bun.serve({
 		hostname: "127.0.0.1",
@@ -39,6 +43,10 @@ test("serves auth, models, chat, and unsupported usage over NDJSON", async () =>
 				return Response.json({ data: [{ id: "cx/gpt-5.6-sol" }] });
 			}
 			const body = (await request.json()) as { model: string };
+			if (body.model === "am/rate-limited") {
+				observeRateLimit();
+				return new Response(null, { status: 429 });
+			}
 			model = body.model;
 			observeChat();
 			return new Response(
@@ -58,10 +66,13 @@ test("serves auth, models, chat, and unsupported usage over NDJSON", async () =>
 			'{"jsonrpc":"2.0","id":3,"method":"chat.start","params":' +
 			'{"model_id":"cx/gpt-5.6-sol","messages":[],"tools":[],' +
 			'"credentials":{"type":"api_key","api_key":"key"}}}\n' +
+			'{"jsonrpc":"2.0","id":5,"method":"chat.start","params":' +
+			'{"model_id":"am/rate-limited","messages":[],"tools":[],' +
+			'"credentials":{"type":"api_key","api_key":"key"}}}\n' +
 			'{"jsonrpc":"2.0","id":4,"method":"usage.get","params":' +
 			'{"credentials":{"type":"api_key","api_key":"key"}}}\n',
 	);
-	await chatStarted;
+	await Promise.all([chatStarted, rateLimitStarted]);
 	await Bun.sleep(20);
 	end(child);
 	const stdout = await read(child.stdout);
@@ -82,6 +93,20 @@ test("serves auth, models, chat, and unsupported usage over NDJSON", async () =>
 			session: { method: "api_key" },
 		},
 	});
+	expect(replies).toContainEqual({
+		jsonrpc: "2.0",
+		method: "failed",
+		params: {
+			request_id: 5,
+			message: "AnyModel rate limit exceeded (429); retry later or select another model",
+		},
+	});
+	expect(replies).toContainEqual({
+		jsonrpc: "2.0",
+		id: 5,
+		result: { metadata: { completed: false, failed: true } },
+	});
+	expect(replies).not.toContainEqual(expect.objectContaining({ id: 5, error: expect.anything() }));
 	expect(replies).toContainEqual({
 		jsonrpc: "2.0",
 		method: "text_delta",

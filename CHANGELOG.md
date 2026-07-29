@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal
+  stream failure against a second JSON-RPC error for the same chat request.
 - Rendered pending Kimi-style questions inline in the composer slot, preserving hidden drafts and
   attachments while keeping the current todo snapshot visible with status-specific markers.
 - Rendered provider prompt authentication as an explicit in-popup input field with a visible

@@ -90,7 +90,7 @@ export class AnyModelProvider {
 				},
 				this.config.requestTimeoutMs,
 			);
-			if (!response.ok) throw new Error(`AnyModel chat request failed (${response.status})`);
+			if (!response.ok) throw chatResponseError(response);
 			if (!response.body) throw new Error("AnyModel chat stream did not include a body");
 			return {
 				metadata: await notifyChatEvents(
@@ -107,7 +107,16 @@ export class AnyModelProvider {
 					? safeMessage(cause.message, request.credentials.api_key)
 					: "AnyModel chat request failed";
 			notify("failed", { request_id: requestId, message });
-			throw new Error(message);
+			// The terminal notification is the stream's authoritative failure. Returning a normal
+			// response keeps the SDK from racing it with a second JSON-RPC error for the same request.
+			return { metadata: { completed: false, failed: true } };
 		}
 	}
+}
+
+function chatResponseError(response: Response): Error {
+	if (response.status === 429) {
+		return new Error("AnyModel rate limit exceeded (429); retry later or select another model");
+	}
+	return new Error(`AnyModel chat request failed (${response.status})`);
 }

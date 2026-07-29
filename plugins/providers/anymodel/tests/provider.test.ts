@@ -166,16 +166,35 @@ test("sanitizes reflected secrets and emits one failed notification", async () =
 			}),
 	);
 	const notifications: Array<Record<string, unknown>> = [];
-	await expect(
-		provider(baseUrl).streamChat(
-			{ model_id: "cx/model", messages: [], tools: [], credentials: credentials() },
-			9,
-			(method, params) => notifications.push({ method, ...params }),
-			undefined,
-		),
-	).rejects.not.toThrow("not-for-logs");
+	const result = await provider(baseUrl).streamChat(
+		{ model_id: "cx/model", messages: [], tools: [], credentials: credentials() },
+		9,
+		(method, params) => notifications.push({ method, ...params }),
+		undefined,
+	);
+	expect(result).toEqual({ metadata: { completed: false, failed: true } });
 	expect(JSON.stringify(notifications)).not.toContain("not-for-logs");
 	expect(notifications.filter((event) => event["method"] === "failed")).toHaveLength(1);
+});
+
+test("reports a rate limit once with an actionable message", async () => {
+	const baseUrl = fakeServer(() => new Response(null, { status: 429 }));
+	const notifications: Array<Record<string, unknown>> = [];
+	const result = await provider(baseUrl).streamChat(
+		{ model_id: "am/glm-5.2", messages: [], tools: [], credentials: credentials() },
+		10,
+		(method, params) => notifications.push({ method, ...params }),
+		undefined,
+	);
+
+	expect(result).toEqual({ metadata: { completed: false, failed: true } });
+	expect(notifications).toEqual([
+		{
+			method: "failed",
+			request_id: 10,
+			message: "AnyModel rate limit exceeded (429); retry later or select another model",
+		},
+	]);
 });
 
 test("stops an active stream when the caller cancels", async () => {
@@ -257,19 +276,27 @@ test("does not treat an absent finish reason as a terminal event", async () => {
 	expect(notifications).toContainEqual({ method: "text_delta", request_id: 12, delta: "second" });
 });
 
-test("rejects an oversized unterminated SSE frame", async () => {
+test("reports an oversized unterminated SSE frame once", async () => {
 	const baseUrl = fakeServer(
 		() =>
 			new Response(`data: ${"x".repeat(1024 * 1024 + 1)}`, {
 				headers: { "content-type": "text/event-stream" },
 			}),
 	);
-	await expect(
-		provider(baseUrl).streamChat(
-			{ model_id: "cx/model", messages: [], tools: [], credentials: credentials() },
-			13,
-			() => undefined,
-			undefined,
-		),
-	).rejects.toThrow("AnyModel chat stream frame exceeded its size limit");
+	const notifications: Array<Record<string, unknown>> = [];
+	const result = await provider(baseUrl).streamChat(
+		{ model_id: "cx/model", messages: [], tools: [], credentials: credentials() },
+		13,
+		(method, params) => notifications.push({ method, ...params }),
+		undefined,
+	);
+
+	expect(result).toEqual({ metadata: { completed: false, failed: true } });
+	expect(notifications).toEqual([
+		{
+			method: "failed",
+			request_id: 13,
+			message: "AnyModel chat stream frame exceeded its size limit",
+		},
+	]);
 });

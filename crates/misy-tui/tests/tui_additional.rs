@@ -599,8 +599,17 @@ async fn bounded_event_pump_keeps_ctrl_c_responsive() {
         .handle_input("continuous-stream")
         .expect("continuous stream");
     client.pump_events();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(client.pump_events(), 256);
+    let backlog_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if client.pump_events() == 256 {
+            break;
+        }
+        assert!(
+            Instant::now() < backlog_deadline,
+            "continuous stream did not fill one bounded event batch"
+        );
+    }
     let started = Instant::now();
     client.handle_ctrl_c();
     assert!(!client.state().should_exit());

@@ -424,7 +424,7 @@ impl UiState {
                 back_hint: true,
                 tabs: Vec::new(),
                 loading: false,
-                help_hint: Some("enter continue  tab next  esc cancel".to_owned()),
+                help_hint: Some("type value  enter validate  tab next  esc cancel".to_owned()),
             }),
         }
     }

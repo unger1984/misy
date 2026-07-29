@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- Rendered provider prompt authentication as an explicit in-popup input field with a visible
+  editing cursor and validation hint, so AnyModel API-key entry is discoverable and actionable.
 - Kept active conversations usable after session-storage failures, tolerated malformed trailing
   JSONL records, and rejected missing, ambiguous, incompatible, or active-work resume attempts.
 - Prevented foreground commands from being terminated when they transition to background while

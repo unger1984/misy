@@ -114,6 +114,7 @@ cd plugins/providers/_sdk && bun install --frozen-lockfile
 cd ../openai && bun install --frozen-lockfile
 cd ../anthropic && bun install --frozen-lockfile
 cd ../kimi && bun install --frozen-lockfile
+cd ../anymodel && bun install --frozen-lockfile
 cd ../../..
 ```
 

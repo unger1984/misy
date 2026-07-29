@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_BOX_WIDTH: usize = 88;
 const DUAL_COLUMN_MIN_WIDTH: usize = 64;
+const TERMINAL_SPIRIT: [&str; 4] = [".-----.", "|  >_  |", "| .__. |", "'--..--'"];
 
 #[derive(Clone, Debug)]
 pub(super) struct StartupHeader {
@@ -58,10 +59,10 @@ impl StartupHeader {
         let directory = format!("directory: {}", self.directory);
         [
             ("Welcome back!", "Tips for getting started"),
-            ("", "Type a task to begin"),
-            ("   ╭─────╮", "/provider  Connect an account"),
-            ("   │ Misy│", "/model     Choose a model"),
-            ("   ╰─────╯", "Shift+Enter  Insert a new line"),
+            (TERMINAL_SPIRIT[0], "Type a task to begin"),
+            (TERMINAL_SPIRIT[1], "/provider  Connect an account"),
+            (TERMINAL_SPIRIT[2], "/model     Choose a model"),
+            (TERMINAL_SPIRIT[3], "Shift+Enter  Insert a new line"),
             (model.as_str(), "?          Show shortcuts"),
             (directory.as_str(), ""),
         ]
@@ -75,10 +76,10 @@ impl StartupHeader {
             };
             let left_style = if index == 0 {
                 Style::default().add_modifier(Modifier::BOLD)
-            } else if index >= 5 {
-                style::muted()
+            } else if index <= 4 {
+                style::accent()
             } else {
-                Style::default()
+                style::muted()
             };
             let right_style = if index == 0 {
                 style::accent()
@@ -107,7 +108,10 @@ impl StartupHeader {
                 Alignment::Center,
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            ("Misy", Alignment::Center, style::accent()),
+            (TERMINAL_SPIRIT[0], Alignment::Center, style::accent()),
+            (TERMINAL_SPIRIT[1], Alignment::Center, style::accent()),
+            (TERMINAL_SPIRIT[2], Alignment::Center, style::accent()),
+            (TERMINAL_SPIRIT[3], Alignment::Center, style::accent()),
             (model.as_str(), Alignment::Left, style::muted()),
             (directory.as_str(), Alignment::Left, style::muted()),
             ("", Alignment::Left, Style::default()),
@@ -234,5 +238,24 @@ mod tests {
                 std::path::MAIN_SEPARATOR
             )
         );
+    }
+
+    #[test]
+    fn header_contains_the_terminal_spirit_at_wide_and_narrow_widths() {
+        let header = StartupHeader::new(None, None);
+
+        for width in [48, 96] {
+            let rendered = header
+                .lines(width)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+
+            assert!(rendered.contains(".-----."));
+            assert!(rendered.contains("|  >_  |"));
+            assert!(rendered.contains("| .__. |"));
+            assert!(rendered.contains("'--..--'"));
+        }
     }
 }

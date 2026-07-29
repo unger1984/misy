@@ -55,7 +55,7 @@ fn render_frame(frame: &mut ratatui::Frame, layout: &PopupLayout, modal: &ModalP
         layout.area,
     );
     frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {}", modal.title), style::accent())),
+        Paragraph::new(Line::styled(modal.title.clone(), style::accent())),
         Rect::new(layout.inner.x, layout.inner.y, layout.inner.width, 1),
     );
     frame.render_widget(
@@ -85,7 +85,7 @@ fn popup_layout(screen: Rect, tabs: &[(String, bool)]) -> Option<PopupLayout> {
     let margin = u16::from(!compact);
     let available_width = screen.width.saturating_sub(margin.saturating_mul(2));
     let width = available_width.min(MAX_POPUP_WIDTH);
-    if width < 4 || screen.height < 7 {
+    if width < 6 || screen.height < 7 {
         return None;
     }
     let available_height = screen.height.saturating_sub(margin.saturating_mul(2));
@@ -93,7 +93,7 @@ fn popup_layout(screen: Rect, tabs: &[(String, bool)]) -> Option<PopupLayout> {
         .saturating_sub(POPUP_FIXED_ROWS.saturating_add(1))
         .max(1);
     let tab_lines = visible_tab_lines(
-        tabs_lines(tabs, width.saturating_sub(2)),
+        tabs_lines(tabs, width.saturating_sub(4)),
         usize::from(max_tab_rows),
     );
     let tab_height = u16::try_from(tab_lines.len()).unwrap_or(u16::MAX);
@@ -106,9 +106,9 @@ fn popup_layout(screen: Rect, tabs: &[(String, bool)]) -> Option<PopupLayout> {
 
 fn layout_inside(area: Rect, tabs: Vec<Line<'static>>) -> PopupLayout {
     let inner = Rect::new(
-        area.x.saturating_add(1),
+        area.x.saturating_add(2),
         area.y.saturating_add(1),
-        area.width.saturating_sub(2),
+        area.width.saturating_sub(4),
         area.height.saturating_sub(2),
     );
     let tab_height = u16::try_from(tabs.len()).unwrap_or(u16::MAX);
@@ -261,33 +261,74 @@ fn model_list_line(
     let mut spans = vec![
         Span::styled(if row.selected { "› " } else { "  " }, marker_style),
         Span::styled(if row.current { "✓ " } else { "  " }, current_style),
-        Span::raw(format!("{:<label_width$}", row.label)),
     ];
+    spans.extend(styled_activity_label(&row.label, label_width));
     if let Some(description) = &row.description {
         spans.push(Span::styled(format!("  {description}"), style::muted()));
     }
     padded_line(spans, width, Style::default())
 }
 
+fn styled_activity_label(label: &str, width: usize) -> Vec<Span<'static>> {
+    let padded = format!("{label:<width$}");
+    for (marker, marker_style) in [
+        ("● ", style::success()),
+        ("○ ", style::muted()),
+        ("× ", style::error()),
+        ("■ ", style::muted()),
+    ] {
+        if let Some(rest) = padded.strip_prefix(marker) {
+            return vec![
+                Span::styled(marker.to_owned(), marker_style),
+                Span::raw(rest.to_owned()),
+            ];
+        }
+    }
+    vec![Span::raw(padded)]
+}
+
 fn model_help_line(width: u16) -> Line<'static> {
     let hint = if width < 48 {
         "esc"
     } else {
-        " ↑↓ select  ←→ section  enter apply  esc close"
+        "↑↓ select  ←→ section  enter apply  esc close"
     };
     Line::styled(hint, style::muted())
 }
 
 fn help_line(modal: &ModalPresentation, width: u16) -> Line<'static> {
+    if let Some(hint) = &modal.help_hint {
+        return Line::styled(
+            if width < 42 { "esc" } else { hint.as_str() }.to_owned(),
+            style::muted(),
+        );
+    }
     if !modal.tabs.is_empty() {
         return model_help_line(width);
     }
     let hint = if width < 42 {
         "esc"
     } else if modal.back_hint {
-        " ↑↓ select  enter apply  esc back"
+        "↑↓ select  enter apply  esc back"
     } else {
-        " ↑↓ select  enter open  esc close"
+        "↑↓ select  enter open  esc close"
     };
     Line::styled(hint, style::muted())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::layout_inside;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn popup_text_regions_keep_one_blank_column_inside_each_border() {
+        let area = Rect::new(10, 4, 60, 24);
+        let layout = layout_inside(area, Vec::new());
+
+        assert_eq!(layout.inner.x, area.x + 2);
+        assert_eq!(layout.inner.right(), area.right() - 2);
+        assert_eq!(layout.content.x, layout.inner.x);
+        assert_eq!(layout.help.x, layout.inner.x);
+    }
 }

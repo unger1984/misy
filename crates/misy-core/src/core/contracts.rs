@@ -1,8 +1,9 @@
 //! Public values and errors exposed by the headless core.
 
 use crate::{
-    ConfigError, CredentialError, ImageAttachment, InputModality, Message, ModelInfo, ModelRef,
-    ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
+    ActivitySummary, ConfigError, CredentialError, ImageAttachment, InputModality, Message,
+    ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId,
+    ToolCall, ToolResult,
 };
 use serde_json::Value;
 use std::{error::Error, fmt};
@@ -58,6 +59,19 @@ pub struct ProviderModelError {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreEvent {
+    /// A background activity was added or changed state.
+    ActivityChanged {
+        /// Latest bounded activity projection.
+        activity: ActivitySummary,
+    },
+    /// A published background activity reached a terminal state.
+    ///
+    /// The final bounded output travels with the event so clients can commit one complete
+    /// transcript item without racing a follow-up output query.
+    ActivityFinished {
+        /// Final metadata and bounded process output.
+        output: crate::ActivityOutput,
+    },
     /// A package was discovered during core construction.
     ProviderDiscovered {
         /// Discovered provider identifier.

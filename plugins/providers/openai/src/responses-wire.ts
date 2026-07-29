@@ -92,6 +92,7 @@ export async function notifyResponseEvents(
 	}
 	return metadata;
 }
+
 function record(value: unknown): Record<string, Json> {
 	return isRecord(value) ? value : {};
 }
@@ -100,8 +101,10 @@ function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 	for (const message of messages) {
 		if (message["role"] === "system") continue;
 		input.push(...reasoningInputs(message["provider_metadata"]));
-		if (message["role"] === "assistant" && Array.isArray(message["tool_calls"]))
-			for (const call of message["tool_calls"]) {
+		if (message["role"] === "assistant") {
+			const content = typeof message["content"] === "string" ? message["content"] : "";
+			if (content.length > 0) input.push({ role: "assistant", content });
+			for (const call of Array.isArray(message["tool_calls"]) ? message["tool_calls"] : []) {
 				const value = record(call);
 				input.push({
 					type: "function_call",
@@ -110,6 +113,8 @@ function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 					arguments: JSON.stringify(value["arguments"] ?? {}),
 				});
 			}
+			continue;
+		}
 		if (message["role"] === "tool" && Array.isArray(message["tool_results"])) {
 			for (const result of message["tool_results"]) {
 				const value = record(result);
@@ -177,7 +182,9 @@ function collectReasoningInputs(value: unknown, inputs: Json[], seen: Set<string
 	const encrypted = item["encrypted_content"];
 	if (item["type"] === "reasoning" && typeof encrypted === "string" && !seen.has(encrypted)) {
 		seen.add(encrypted);
-		inputs.push({ type: "reasoning", encrypted_content: encrypted });
+		// Responses validates opaque reasoning items as a unit. Replaying only the encrypted blob
+		// drops server-owned fields such as `id` and `summary` and makes the next tool turn invalid.
+		inputs.push({ ...item });
 	}
 	for (const nested of Object.values(item)) collectReasoningInputs(nested, inputs, seen);
 }

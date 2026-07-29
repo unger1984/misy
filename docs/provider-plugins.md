@@ -126,8 +126,12 @@ or a manifest without `usage` version 1, does not implement usage and must not r
 
 A provider declares `capabilities.image_input.version` as `1` when it can translate normalized
 image attachments. Models that accept them also include `"image"` in `input_modalities`; both
-declarations are required before the core accepts an image submission. Missing model metadata is
-treated as text-only.
+declarations are required before the core accepts an image submission. Missing or invalid
+modalities in a provider's normalized `models.list` result are treated as text-only. A provider
+may apply a documented compatibility rule while translating its upstream catalog, but it must
+emit explicit normalized modalities. The bundled OpenAI provider follows the Codex legacy rule:
+an omitted upstream field means text and image, while explicit or malformed metadata remains
+authoritative and conservative.
 
 User messages and rich tool results may include an `attachments` array. Each entry has the
 following capability-scoped shape:

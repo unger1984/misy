@@ -30,6 +30,12 @@ call_write() {
   printf '"arguments":{"path":"%s","content":"%s"}}}\n' "$2" "$3"
 }
 
+call_background_shell() {
+  printf '{"jsonrpc":"2.0","method":"tool_call","params":'
+  printf '{"request_id":%s,"id":"background-1","name":"exec_command",' "$id"
+  printf '%s\n' '"arguments":{"cmd":"sleep 0.05; printf background-done","description":"Background fixture","run_in_background":true}}}'
+}
+
 failed() {
   printf '{"jsonrpc":"2.0","method":"failed","params":'
   printf '{"request_id":%s,"message":"%s"}}\n' "$id" "$1"
@@ -300,6 +306,11 @@ chat_start() {
       complete
       reply '{}'
       ;;
+    *'"tool_call_id":"background-1"'*)
+      text launched
+      complete
+      reply '{}'
+      ;;
     *'"tool_call_id":"bad-1"'*|*'"tool_call_id":"unknown-1"'*)
       complete
       reply '{}'
@@ -333,6 +344,11 @@ chat_start() {
       call_read read-1 "$target"
       complete
       reply '{"metadata":{"turn":"one"}}'
+      ;;
+    *'"content":"background-command"'*)
+      call_background_shell
+      complete
+      reply '{}'
       ;;
     *'"content":"refresh-before-chat"'*)
       case "$line" in

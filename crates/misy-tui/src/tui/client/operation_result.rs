@@ -133,6 +133,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Submit(request, result) => {
                 self.apply_submit_result(request, result);
             }
+            ProviderOperationResult::ActivityOutput(_id, output) => {
+                self.activity_output_pending = false;
+                if let Some(output) = output {
+                    self.state.set_activity_output(output);
+                }
+            }
         }
     }
 

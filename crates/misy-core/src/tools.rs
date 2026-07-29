@@ -2,14 +2,20 @@
 //! arguments, and asynchronous execution of the built-ins. The dispatcher's definition list is
 //! the single source of truth for the tools declared to the model, and per-tool budgets (read
 //! and listing caps, command timeout) keep one call from growing a response without bound.
-use crate::{ToolCall, ToolDefinition, ToolResult};
+use crate::{ActivityId, ActivityOutput, ActivitySummary, ToolCall, ToolDefinition, ToolResult};
 use jsonschema::{Draft, Validator};
 use serde_json::Value;
 use std::{collections::BTreeMap, error::Error, fmt, fs, io::Read};
 use tokio::task::spawn_blocking;
 
+mod activity;
 mod command;
 mod image_view;
+mod stdin;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use activity::ActivityEvent;
 
 /// Upper bound for one `read_file` result; larger files are truncated with a marker.
 const MAX_READ_FILE_BYTES: usize = 4 * 1024 * 1024;
@@ -147,7 +153,8 @@ impl Error for ToolRegistryError {}
 #[derive(Clone, Debug)]
 pub struct ToolDispatcher {
     registry: ToolRegistry,
-    command_timeout: std::time::Duration,
+    activities: activity::ActivityManager,
+    command_timeout: Option<std::time::Duration>,
 }
 
 impl ToolDispatcher {
@@ -155,7 +162,8 @@ impl ToolDispatcher {
     pub fn new(registry: ToolRegistry) -> Self {
         Self {
             registry,
-            command_timeout: command::COMMAND_TIMEOUT,
+            activities: activity::ActivityManager::new(),
+            command_timeout: None,
         }
     }
 
@@ -178,20 +186,69 @@ impl ToolDispatcher {
             .collect()
     }
 
-    /// Replaces the command execution timeout used by `run_command`.
+    /// Replaces the command execution timeout used by `exec_command`.
     #[cfg(feature = "test-support")]
     pub fn with_command_limits(self, command_timeout: std::time::Duration) -> Self {
         Self {
-            command_timeout,
+            command_timeout: Some(command_timeout),
             ..self
         }
+    }
+
+    /// Returns active activities followed by the most recent terminal activities.
+    pub fn activities(&self) -> Vec<ActivitySummary> {
+        self.activities.activities()
+    }
+
+    /// Subscribes to activity lifecycle changes.
+    pub(crate) fn subscribe_activities(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<ActivityEvent> {
+        self.activities.subscribe()
+    }
+
+    /// Returns bounded output for a command activity.
+    pub async fn activity_output(
+        &self,
+        id: ActivityId,
+        wait: Option<std::time::Duration>,
+    ) -> Option<ActivityOutput> {
+        self.activities.output(id, wait).await
+    }
+
+    /// Requests termination of one active command activity.
+    pub fn stop_activity(&self, id: ActivityId) -> bool {
+        self.activities.stop(id)
+    }
+
+    /// Stops and reaps every active command activity.
+    pub async fn shutdown(&self) {
+        self.activities.shutdown().await;
+        self.activities.flush_events().await;
     }
 
     /// Validates and executes one local tool call.
     ///
     /// Failures are encoded in [`ToolResult`] so a provider receives the execution outcome rather
     /// than an out-of-band core error.
+    #[cfg(feature = "test-support")]
     pub async fn dispatch(&self, call: &ToolCall) -> ToolResult {
+        self.dispatch_inner(call, None).await
+    }
+
+    pub(crate) async fn dispatch_cancellable(
+        &self,
+        call: &ToolCall,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> ToolResult {
+        self.dispatch_inner(call, Some(cancellation)).await
+    }
+
+    async fn dispatch_inner(
+        &self,
+        call: &ToolCall,
+        cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> ToolResult {
         if let Err(error) = self
             .registry
             .validate_arguments(&call.name, &call.arguments)
@@ -202,7 +259,10 @@ impl ToolDispatcher {
             "list_directory" => self.list_directory(call).await,
             "read_file" => self.read_file(call).await,
             "view_image" => image_view::execute(call).await,
-            "run_command" => self.run_command(call).await,
+            "exec_command" => self.exec_command(call, cancellation).await,
+            "task_list" => self.task_list(call),
+            "task_stop" => self.task_stop(call),
+            "write_stdin" => stdin::execute(call, &self.activities, cancellation).await,
             "write_file" => self.write_file(call).await,
             _ => ToolResult::error(&call.id, format!("tool `{}` is not executable", call.name)),
         }
@@ -257,8 +317,33 @@ impl ToolDispatcher {
         }
     }
 
-    async fn run_command(&self, call: &ToolCall) -> ToolResult {
-        command::run(call, self.command_timeout).await
+    async fn exec_command(
+        &self,
+        call: &ToolCall,
+        cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> ToolResult {
+        command::run(call, &self.activities, self.command_timeout, cancellation).await
+    }
+
+    fn task_list(&self, call: &ToolCall) -> ToolResult {
+        match serde_json::to_string(&self.activities.activities()) {
+            Ok(content) => ToolResult::success(&call.id, content),
+            Err(error) => ToolResult::error(&call.id, format!("could not encode tasks: {error}")),
+        }
+    }
+
+    fn task_stop(&self, call: &ToolCall) -> ToolResult {
+        let Some(id) = task_id(call) else {
+            return ToolResult::error(&call.id, "arguments.task_id must have the form `task-N`");
+        };
+        if self.activities.stop(id) {
+            ToolResult::success(&call.id, format!("stop requested for {id}"))
+        } else {
+            ToolResult::error(
+                &call.id,
+                format!("task `{id}` is unknown or already finished"),
+            )
+        }
     }
 
     async fn write_file(&self, call: &ToolCall) -> ToolResult {
@@ -288,7 +373,7 @@ impl ToolDispatcher {
     }
 }
 
-fn builtin_definitions() -> [ToolDefinition; 5] {
+fn builtin_definitions() -> [ToolDefinition; 8] {
     [
         ToolDefinition::new(
             "list_directory",
@@ -311,16 +396,42 @@ fn builtin_definitions() -> [ToolDefinition; 5] {
             }),
         ),
         image_view::definition(),
+        exec_command_definition(),
         ToolDefinition::new(
-            "run_command",
-            "Run a local command without a shell.",
+            "task_list",
+            "List active and recent background tasks.",
+            serde_json::json!({"type": "object", "additionalProperties": false}),
+        ),
+        ToolDefinition::new(
+            "task_stop",
+            "Stop an active background task and its child processes.",
             serde_json::json!({
                 "type": "object",
-                "required": ["command"],
+                "required": ["task_id"],
                 "properties": {
-                    "command": {"type": "string"},
-                    "args": {"type": "array", "items": {"type": "string"}},
-                    "cwd": {"type": "string"},
+                    "task_id": {"type": "string", "pattern": "^task-[1-9][0-9]*$"}
+                },
+                "additionalProperties": false,
+            }),
+        ),
+        ToolDefinition::new(
+            "write_stdin",
+            "Poll new output from any live exec_command session, or write to a PTY session. \
+             Empty chars only polls and never closes stdin. No completion notification is sent; \
+             keep polling until exit_code is returned. Non-empty input to a pipe session returns \
+             StdinClosed.",
+            serde_json::json!({
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": "string", "pattern": "^task-[1-9][0-9]*$"},
+                    "chars": {"type": "string", "default": ""},
+                    "yield_time_ms": {
+                        "type": "integer", "minimum": 250, "maximum": 300000
+                    },
+                    "max_output_tokens": {
+                        "type": "integer", "minimum": 1, "maximum": 1000000, "default": 10000
+                    }
                 },
                 "additionalProperties": false,
             }),
@@ -339,6 +450,51 @@ fn builtin_definitions() -> [ToolDefinition; 5] {
             }),
         ),
     ]
+}
+
+fn exec_command_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "exec_command",
+        "Run a shell command. Fast commands return inline; long commands continue as sessions. \
+         No completion notification is sent to the model, so poll a returned task_id with an \
+         empty write_stdin until exit_code is present. PTY mode is supported on macOS and Linux.",
+        serde_json::json!({
+            "type": "object",
+            "required": ["cmd"],
+            "properties": {
+                "cmd": {"type": "string"},
+                "cwd": {"type": "string"},
+                "description": {"type": "string"},
+                "run_in_background": {"type": "boolean", "default": false},
+                "yield_time_ms": command_yield_schema(),
+                "timeout_seconds": command_timeout_schema(),
+                "tty": {"type": "boolean", "default": false},
+                "max_output_tokens": {
+                    "type": "integer", "minimum": 1, "maximum": 1000000, "default": 10000
+                }
+            },
+            "additionalProperties": false,
+        }),
+    )
+}
+
+fn command_yield_schema() -> Value {
+    serde_json::json!({
+        "type": "integer", "minimum": 250, "maximum": 30000, "default": 10000
+    })
+}
+
+fn command_timeout_schema() -> Value {
+    serde_json::json!({
+        "type": "integer", "minimum": 0, "maximum": 86400, "default": 0
+    })
+}
+
+fn task_id(call: &ToolCall) -> Option<ActivityId> {
+    call.arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .and_then(activity::parse_activity_id)
 }
 
 fn compile_schema(schema: &Value) -> Result<Validator, ToolRegistryError> {
@@ -388,7 +544,7 @@ fn read_file_contents(path: &str) -> Result<String, String> {
     if truncated {
         content.push_str(&format!(
             "\n[... truncated: showing the first {MAX_READ_FILE_BYTES} of {} bytes. \
-             Use run_command, e.g. `sed -n` or `tail`, to read the rest ...]",
+             Use exec_command, e.g. `sed -n` or `tail`, to read the rest ...]",
             metadata.len()
         ));
     }

@@ -135,6 +135,8 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 				},
 				{ slug: "hidden", visibility: "hidden", priority: 0 },
 				{ slug: "hide", visibility: "hide", priority: 0 },
+				{ slug: "null-modalities", priority: 3, input_modalities: null },
+				{ slug: "invalid-modalities", priority: 4, input_modalities: ["text", "audio"] },
 			],
 		});
 	});
@@ -176,6 +178,20 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			context_window: 16_000,
 			reasoning: false,
 			input_modalities: ["text", "image"],
+		},
+		{
+			id: "null-modalities",
+			display_name: "null-modalities",
+			context_window: 272_000,
+			reasoning: false,
+			input_modalities: ["text"],
+		},
+		{
+			id: "invalid-modalities",
+			display_name: "invalid-modalities",
+			context_window: 272_000,
+			reasoning: false,
+			input_modalities: ["text"],
 		},
 	]);
 });
@@ -310,7 +326,7 @@ test("sends account identity and complete subscription request fields", async ()
 		reasoning: { effort: "medium", summary: "auto" },
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 		text: { verbosity: "medium" },
-		input: expect.arrayContaining([
+		input: [
 			{ role: "user", content: "Hi" },
 			{
 				type: "function_call",
@@ -319,7 +335,7 @@ test("sends account identity and complete subscription request fields", async ()
 				arguments: '{"path":"README.md"}',
 			},
 			{ type: "function_call_output", call_id: "call-1", output: "contents" },
-		]),
+		],
 	});
 });
 
@@ -391,8 +407,8 @@ test("replays encrypted reasoning from completed metadata on the next turn", asy
 		bodies.push(request.body);
 		return new Response(
 			"event: response.completed\n" +
-				'data: {"response":{"output":[{"type":"reasoning",' +
-				'"encrypted_content":"opaque-reasoning"}]}}\n\n',
+				'data: {"response":{"output":[{"type":"reasoning","id":"reasoning-1",' +
+				'"summary":[],"encrypted_content":"opaque-reasoning"}]}}\n\n',
 			{ headers: { "content-type": "text/event-stream" } },
 		);
 	});
@@ -425,7 +441,14 @@ test("replays encrypted reasoning from completed metadata on the next turn", asy
 		() => {},
 	);
 	expect(bodies[1]).toMatchObject({
-		input: expect.arrayContaining([{ type: "reasoning", encrypted_content: "opaque-reasoning" }]),
+		input: expect.arrayContaining([
+			{
+				type: "reasoning",
+				id: "reasoning-1",
+				summary: [],
+				encrypted_content: "opaque-reasoning",
+			},
+		]),
 	});
 });
 
@@ -651,4 +674,29 @@ test("fails a stream cut off mid-event without leaking a partial delta", async (
 		{ method: "text_delta", request_id: 19, delta: "hello" },
 		{ method: "failed", request_id: 19, message: "OpenAI Responses stream ended mid-event" },
 	]);
+});
+
+test("preserves the nested Responses failure message", async () => {
+	const message = "Function call output did not match any pending tool call";
+	const payload = JSON.stringify({
+		type: "response.failed",
+		response: { status: "failed", error: { code: "invalid_request_error", message } },
+	});
+	const base = fakeServer(
+		() =>
+			new Response(`event: response.failed\ndata: ${payload}\n\n`, {
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+	const notifications: Array<Record<string, unknown>> = [];
+
+	await expect(
+		provider.streamChat(
+			{ model_id: "gpt-5.5", messages: [], tools: [], credentials: credentials() },
+			20,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow(message);
+	expect(notifications).toEqual([{ method: "failed", request_id: 20, message }]);
 });

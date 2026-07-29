@@ -23,6 +23,25 @@ Read this document before making a new architecture or user-interaction choice.
 - Clipboard image paste uses visible composer placeholders while the core owns normalized image
   bytes and capability validation. `view_image` returns the same rich image attachment contract;
   unsupported selected models fail explicitly instead of switching models.
+- Models launch local commands through one `exec_command` shell-string contract. Fast commands
+  return inline; explicit background commands publish immediately, and other long commands publish
+  the same process after the bounded yield. `timeout_seconds = 0` means no hard deadline.
+- Misy follows the Codex pull model for command sessions: no model notification is injected on
+  completion, and empty `write_stdin` calls retrieve incremental output and the final `exit_code`.
+  `ActivityChanged` and `ActivityFinished` remain client events used by the TUI.
+- `tty` is optional and defaults to false. Pipe sessions have closed stdin but remain pollable.
+  PTY input and bounded process-group `TERM` to `KILL` cleanup are supported on macOS and Linux;
+  Windows ConPTY and Job Object support is deferred and never silently falls back to pipes.
+- The command contract deliberately differs from Codex by using `cwd` and `timeout_seconds`, and
+  by adding `description` and `run_in_background`. Its initial and incremental output projections
+  share the Codex-style 10,000-token default without claiming wire compatibility.
+- The shared activity UI follows the local Codex and Oh My Pi session/task picker patterns while
+  retaining Misy's core/client boundary. Agent sessions remain deferred, but their activity kind,
+  tabs, and `Main` navigation slot are reserved by the contract.
+- Kimi's push notification delivery and Oh My Pi's push-oriented task presentation were considered
+  but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
+  post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1
+  scopes its portable PTY guarantee to processes that stay in the created Unix process group.
 
 ## Deferred Scope
 

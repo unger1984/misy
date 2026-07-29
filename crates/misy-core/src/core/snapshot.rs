@@ -1,7 +1,7 @@
 //! Cheap, in-memory state snapshots for headless-core clients.
 
 use super::{MisyCore, SubmissionId};
-use crate::{ModelRef, ProviderId};
+use crate::{ActivitySummary, ModelRef, ProviderId};
 
 /// One provider's cached local authentication state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +17,8 @@ pub struct ProviderAuthState {
 /// A point-in-time projection of client-visible core state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreSnapshot {
+    /// Active activities followed by the most recent terminal activities.
+    pub activities: Vec<ActivitySummary>,
     /// Model selected for direct interaction, if any.
     pub selected_model: Option<ModelRef>,
     /// Submission currently occupying the FIFO session slot, if any.
@@ -57,6 +59,7 @@ impl MisyCore {
             .expect("credential state mutex must not be poisoned");
         let (active_submission, queued_submissions) = submission_queue.snapshot();
         CoreSnapshot {
+            activities: state.dispatcher.activities(),
             selected_model: selected_model.clone(),
             active_submission,
             queued_submissions,

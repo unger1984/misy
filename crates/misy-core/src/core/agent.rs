@@ -133,7 +133,9 @@ impl CoreState {
                         "view_image is unavailable because the selected model lacks image input",
                     )
                 } else {
-                    self.dispatcher.dispatch(call).await
+                    self.dispatcher
+                        .dispatch_cancellable(call, active.cancellation_receiver())
+                        .await
                 };
                 let result_image_bytes = result.attachments.iter().fold(0_usize, |total, image| {
                     total.saturating_add(image.bytes().len())

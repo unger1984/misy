@@ -1,11 +1,13 @@
 //! Core-event projection into transcript rows.
 
 use super::{TranscriptRow, UiState};
-use misy_core::{CoreEvent, SubmissionId, ToolResult};
+use misy_core::{ActivityOutput, CoreEvent, SubmissionId, ToolResult};
 
 impl UiState {
     pub(in crate::tui) fn apply_core_event(&mut self, event: CoreEvent) {
         match event {
+            CoreEvent::ActivityChanged { .. } => {}
+            CoreEvent::ActivityFinished { output } => self.add_activity_finished(output),
             CoreEvent::ProviderDiscovered { .. } | CoreEvent::ModelsListed { .. } => {}
             CoreEvent::AuthenticationChanged { .. } | CoreEvent::ModelSelected { .. } => {}
             CoreEvent::SubmissionAccepted {
@@ -63,6 +65,11 @@ impl UiState {
             is_error: result.is_error,
             content: Some(result.content),
         });
+    }
+
+    fn add_activity_finished(&mut self, output: ActivityOutput) {
+        self.transcript
+            .push(TranscriptRow::ActivityFinished(output));
     }
 
     fn note_cancellation(&mut self, submission: SubmissionId) {

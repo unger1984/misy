@@ -69,8 +69,9 @@ The repository already contains a working development-stage vertical slice:
   request cancellation, and an optional normalized usage capability;
 - bundled subscription-based provider plugins for OpenAI, Anthropic, and Kimi, implemented in
   TypeScript and run with Bun;
-- Rust-owned `list_directory`, `read_file`, `write_file`, and `run_command` tools, including JSON
-  Schema validation and bounded execution;
+- Rust-owned filesystem and unified `exec_command` tools, including JSON Schema validation,
+  automatic foreground-to-background yielding, optional macOS/Linux PTY input through
+  `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
 - unit, integration, end-to-end, and provider contract tests that use local fixtures instead of
   real accounts or external network access.
 

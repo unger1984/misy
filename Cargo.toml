@@ -13,6 +13,8 @@ base64 = "0.22.1"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 crossterm = "0.28.1"
 jsonschema = { version = "0.49.1", default-features = false }
+nix = { version = "0.28", features = ["process", "signal"] }
+portable-pty = "0.9"
 image = { version = "0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 semver = { version = "1", features = ["serde"] }

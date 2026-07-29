@@ -17,6 +17,7 @@ async fn input_mapping_and_reducer_keep_state_explicit() {
     assert_eq!(map_input("/provider"), Ok(UiAction::ShowProviders));
     assert_eq!(map_input("/status"), Ok(UiAction::ShowUsage));
     assert_eq!(map_input("/usage"), Ok(UiAction::ShowUsage));
+    assert_eq!(map_input("/tasks"), Ok(UiAction::ShowActivities));
     assert_eq!(map_input("/exit"), Ok(UiAction::CancelAndExit));
     assert_eq!(
         map_input("/status now"),
@@ -239,10 +240,10 @@ async fn capability_rejection_retains_text_and_images_for_retry() {
 async fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     let (_temporary, mut client, _) = test_client().await;
     client.insert_text("/");
-    assert_eq!(client.state().command_popup_rows().len(), 5);
+    assert_eq!(client.state().command_popup_rows().len(), 6);
     let cursor = client.state().composer_cursor();
     client.handle_key(UiKey::Up).expect("wrap to last command");
-    assert!(client.state().command_popup_rows()[4].contains("/exit"));
+    assert!(client.state().command_popup_rows()[5].contains("/exit"));
     client
         .handle_key(UiKey::Down)
         .expect("wrap to first command");
@@ -262,6 +263,28 @@ async fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     client.handle_key(UiKey::Home).expect("home");
     client.insert_text("x");
     assert!(!client.state().command_popup_visible());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn activities_action_opens_the_shared_tabbed_picker_at_main() {
+    let (_temporary, mut client, _) = test_client().await;
+
+    client
+        .handle_key(UiKey::OpenActivities)
+        .expect("open activities");
+
+    assert_eq!(client.state().mode(), UiMode::ActivityList);
+    assert_eq!(client.state().picker_labels(), ["Main"]);
+    assert_eq!(
+        client.state().picker_tabs(),
+        [
+            ("All".to_owned(), true),
+            ("Agents".to_owned(), false),
+            ("Tasks".to_owned(), false)
+        ]
+    );
+    client.handle_key(UiKey::Enter).expect("return to main");
+    assert_eq!(client.state().mode(), UiMode::Input);
 }
 
 #[tokio::test(flavor = "current_thread")]

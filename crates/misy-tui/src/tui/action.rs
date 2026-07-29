@@ -13,6 +13,8 @@ pub enum UiAction {
     StartAuth(ProviderId),
     /// Open the model picker.
     ShowModels,
+    /// Open the shared tasks and agents picker.
+    ShowActivities,
     /// Fetch account-limit usage for the selected model's provider.
     ShowUsage,
     /// Select a model.
@@ -70,6 +72,10 @@ pub enum UiKey {
     Escape,
     /// Explicit composer newline, normally Shift+Enter.
     Newline,
+    /// Open the shared tasks and agents picker.
+    OpenActivities,
+    /// Stop the selected activity immediately.
+    StopActivity,
     /// Direct one-based selection from a numbered modal list.
     SelectIndex(usize),
 }
@@ -86,6 +92,10 @@ pub enum UiMode {
     ProviderDetail,
     /// Model selection view.
     ModelList,
+    /// Shared tasks and agents picker.
+    ActivityList,
+    /// Output for one command activity.
+    ActivityDetail,
 }
 
 /// Maps navigation keys to their old action vocabulary for API compatibility.
@@ -100,8 +110,12 @@ pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     match key {
         UiKey::Up => UiAction::PickerUp,
         UiKey::Down => UiAction::PickerDown,
-        UiKey::Left if mode == UiMode::ModelList => UiAction::PickerTabLeft,
-        UiKey::Right if mode == UiMode::ModelList => UiAction::PickerTabRight,
+        UiKey::Left if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+            UiAction::PickerTabLeft
+        }
+        UiKey::Right if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+            UiAction::PickerTabRight
+        }
         UiKey::Enter => UiAction::PickerConfirm,
         UiKey::Escape => UiAction::PickerBack,
         UiKey::SelectIndex(_) => UiAction::Noop,
@@ -124,6 +138,7 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
     match input.trim() {
         "/provider" => Ok(UiAction::ShowProviders),
         "/model" => Ok(UiAction::ShowModels),
+        "/tasks" => Ok(UiAction::ShowActivities),
         "/status" | "/usage" => Ok(UiAction::ShowUsage),
         "/exit" => Ok(UiAction::CancelAndExit),
         command if command.starts_with("/provider ") => {
@@ -131,6 +146,9 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/model ") => {
             Err("use `/model` and choose from the picker".to_owned())
+        }
+        command if command.starts_with("/tasks ") => {
+            Err("use `/tasks` without arguments".to_owned())
         }
         command if command.starts_with("/usage ") => {
             Err("use `/usage` without arguments".to_owned())

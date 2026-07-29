@@ -46,6 +46,8 @@
 
 /// Normalized provider account-limit reports.
 pub(crate) mod account_limits;
+/// Core-owned foreground and background activity contracts.
+pub(crate) mod activity;
 /// Versioned local configuration and opaque credential persistence.
 pub(crate) mod config;
 /// Headless orchestration, sessions, and normalized core events.
@@ -65,6 +67,10 @@ pub(crate) mod tools;
 
 pub use account_limits::{
     UsageAmount, UsageLimit, UsageReport, UsageStatus, UsageUnit, UsageWindow,
+};
+pub use activity::{
+    ActivityId, ActivityKind, ActivityOutput, ActivityOutputFragment, ActivityOutputStream,
+    ActivityStatus, ActivitySummary,
 };
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, MisyPaths};
 pub use core::{

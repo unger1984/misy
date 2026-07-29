@@ -33,8 +33,9 @@ model, authentication, session, and tool orchestration remain in the core.
   application-owned render state while Misy is open, with the newest transcript rows above the
   composer. Leaving Misy restores the terminal screen and scrollback that existed before startup.
 - The fullscreen layout is ordered transcript, optional one-line busy indicator,
-  persistent bordered composer, an optional slash-command popup, and a footer. Provider and model
-  workflows use centered modal popups over that layout.
+  persistent bordered composer, an optional slash-command popup, an activity row when active or
+  recent work exists, and a footer. Provider, model, and activity workflows use centered modal
+  popups.
 - A responsive startup card is the first item in the transcript flow. It shows the Misy version,
   initial model, working directory, and brief input hints; it scrolls off the top with earlier
   conversation content and is never a persistent header.
@@ -73,6 +74,22 @@ model, authentication, session, and tool orchestration remain in the core.
   out, or the report is invalid, the TUI renders the error without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
+- `/tasks` opens the shared activity popup. The row below the composer remains visible while active
+  or recent activities exist and separately counts running tasks, terminal tasks, and active
+  agents. `Down` from an empty composer focuses it and `Enter` opens it. The popup has `All`,
+  `Agents`, and `Tasks` tabs, includes `Main`, supports filtering, and shows a bounded tail preview
+  for the selected task. `Enter` opens its ordered output in a fullscreen log viewer. `Up`, `Down`,
+  `PageUp`, and `PageDown` scroll; live output follows the tail until the user scrolls upward, and
+  `Escape` restores the same popup tab, filter, and selection. `Ctrl+X` immediately stops the
+  selected running task. This stop shortcut is named
+  `activities.stop` in config version 2 and may be rebound; popup hints use the effective binding.
+
+  ```toml
+  version = 2
+
+  [keybindings]
+  "activities.stop" = ["Ctrl+X"]
+  ```
 - `/provider` opens a centered provider popup. Selecting a provider replaces the popup contents
   with its available `Authorize` or `Log out` actions; authorization progress, device codes, and
   logout progress remain in the same popup. `/model` immediately opens a centered model popup from
@@ -131,6 +148,13 @@ model, authentication, session, and tool orchestration remain in the core.
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event and background-operation processing are bounded per tick so continuous streaming cannot
   starve input handling.
+- The TUI never owns task processes. It polls bounded client output while an activity preview or
+  log viewer is visible and sends stop requests through the core; core shutdown remains responsible
+  for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the
+  core capture tasks, with stderr labelled in place.
+- A background command's terminal core event adds one transcript item with its task ID, label,
+  final output, and exit status. The initial tool result is rendered as a compact background-start
+  notice instead of raw command-result JSON.
 - `Esc` interrupts the active turn identified by the current core snapshot. Repeated presses are
   idempotent for that turn and never clear the remaining FIFO queue; the next queued prompt starts
   after cancellation.

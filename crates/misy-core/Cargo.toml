@@ -9,11 +9,15 @@ base64.workspace = true
 command-group.workspace = true
 image.workspace = true
 jsonschema.workspace = true
+portable-pty.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [features]
 # Exposes crate internals to integration tests; never enabled for production clients.

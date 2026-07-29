@@ -140,6 +140,10 @@ fn route_mouse(
 }
 
 fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboard, key: KeyEvent) {
+    if let Some(configured) = client.configured_key(key) {
+        let _ = client.handle_key(configured);
+        return;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         client.handle_ctrl_c();
         return;

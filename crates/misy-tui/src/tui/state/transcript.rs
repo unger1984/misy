@@ -5,6 +5,7 @@
 //! surface shared by the event projection ([`super::events`]) and the client.
 
 use super::UiState;
+use misy_core::ActivityOutput;
 use std::fmt;
 
 /// A renderable, user-visible transcript item.
@@ -48,6 +49,8 @@ pub enum TranscriptRow {
         /// The user-visible local tool result, when available.
         content: Option<String>,
     },
+    /// Final output delivered when a background command exits.
+    ActivityFinished(ActivityOutput),
     /// Informational lifecycle message.
     Info(String),
     /// User-visible failure.

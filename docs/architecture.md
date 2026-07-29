@@ -32,7 +32,7 @@ flowchart LR
   deadlines, and validation for
   provider-normalized account-limit reports.
 - `config.toml`, the credential files, and `models.json` each carry an independent format version.
-  Config version 1 is atomically migrated to version 2, which retains frontend-owned named
+  Config version 1 is atomically migrated to version 2, which adds frontend-owned named
   keybindings; newer unknown revisions are rejected. Credential storage remains version 1 and the
   model cache has its own migration. Every future version bump MUST ship with a migration or an
   explicit reset-with-notice policy.
@@ -41,8 +41,8 @@ flowchart LR
   future. Its public async operations are safe to call from a client's runtime.
 - The `misy-tui` workspace crate and future desktop or third-party programs are clients of the
   core. They do not duplicate orchestration state.
-- `CoreSnapshot` is the cheap, in-memory client projection of the selected model, active and
-  queued submissions, and cached provider authentication state. Reading it never performs
+- `CoreSnapshot` is the cheap, in-memory client projection of activities, the selected model,
+  active and queued submissions, and cached provider authentication state. Reading it never performs
   filesystem, process, or network I/O; clients refresh their projections after relevant core
   events rather than maintaining a competing source of truth.
 - Rust owns local tool definitions and execution. Provider plugins only translate between Misy's
@@ -77,6 +77,20 @@ flowchart LR
     The core refreshes stale selected-provider metadata before rejecting a submission, includes
     normalized images in bounded in-memory history for visual follow-ups, and replaces older image
     payloads when the user attaches a new image set. Text-only models receive image-free history.
+11. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
+    Every live process reserves one of 64 permits before spawn; foreground calls may publish the
+    same process after a bounded yield without acquiring another permit. Pipe commands use process
+    groups with closed stdin. On macOS and Linux, optional PTY commands use a writable terminal and
+    a dedicated process group; stop and shutdown close input and escalate bounded `TERM` to `KILL`
+    before reaping. Windows PTY support remains deferred and `tty = true` fails explicitly there.
+    Ordered stdout/stderr capture has one 1 MiB data-plus-metadata budget per activity, model
+    delivery has a separate `max_output_tokens` projection, and the latest twenty terminal tasks
+    remain available to clients.
+12. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
+    refresh its activity popup, fullscreen log viewer, and transcript after cleanup and output
+    draining. The model is not notified when a background command finishes: it must pull new output
+    and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed
+    once, while the terminal summary and client snapshot remain in the recent-task registry.
 
 ## Fixed Constraints
 

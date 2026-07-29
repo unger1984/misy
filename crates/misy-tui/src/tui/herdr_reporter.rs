@@ -90,13 +90,13 @@ impl HerdrConfiguration {
         vec![
             "pane".to_owned(),
             "report-agent".to_owned(),
+            self.pane_id.clone(),
             "--source".to_owned(),
             SOURCE.to_owned(),
             "--agent".to_owned(),
             AGENT_LABEL.to_owned(),
             "--state".to_owned(),
             state.as_str().to_owned(),
-            self.pane_id.clone(),
         ]
     }
 
@@ -104,11 +104,11 @@ impl HerdrConfiguration {
         vec![
             "pane".to_owned(),
             "release-agent".to_owned(),
+            self.pane_id.clone(),
             "--source".to_owned(),
             SOURCE.to_owned(),
             "--agent".to_owned(),
             AGENT_LABEL.to_owned(),
-            self.pane_id.clone(),
         ]
     }
 }
@@ -353,13 +353,13 @@ mod tests {
             [
                 "pane",
                 "report-agent",
+                "pane-7",
                 "--source",
                 "misy:cli",
                 "--agent",
                 "misy",
                 "--state",
-                "blocked",
-                "pane-7"
+                "blocked"
             ]
         );
         assert_eq!(
@@ -367,11 +367,11 @@ mod tests {
             [
                 "pane",
                 "release-agent",
+                "pane-7",
                 "--source",
                 "misy:cli",
                 "--agent",
-                "misy",
-                "pane-7"
+                "misy"
             ]
         );
     }
@@ -417,8 +417,8 @@ mod tests {
             .expect("test call mutex must not be poisoned")
             .clone();
         assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0][7], "working");
-        assert_eq!(calls[1][7], "working");
+        assert_eq!(calls[0][8], "working");
+        assert_eq!(calls[1][8], "working");
         assert_eq!(calls[2][1], "release-agent");
     }
 

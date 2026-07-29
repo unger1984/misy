@@ -7,6 +7,11 @@
 - Added optional, best-effort Herdr pane lifecycle reporting for interactive Misy sessions, with
   semantic idle/working/blocked state, coalesced shell-free subprocess calls, and shutdown release.
 
+### Fixed
+
+- Passed the pane identifier before reporting options as required by the Herdr CLI, allowing Misy
+  sessions to appear in the Herdr Agents sidebar.
+
 ## 2026-07-29
 
 ### Added

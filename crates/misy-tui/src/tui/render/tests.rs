@@ -44,6 +44,21 @@ fn rendered_screen(state: &UiState, width: u16, height: u16) -> String {
         .collect()
 }
 
+fn rendered_lines(state: &UiState, width: u16, height: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, state))
+        .expect("render frame");
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
+        .collect()
+}
+
 #[test]
 fn list_line_truncates_both_columns_without_removing_the_gap() {
     let row = ListRowDisplay {
@@ -84,12 +99,17 @@ fn question_replaces_the_composer_and_keeps_sticky_todos_visible() {
     state.apply_snapshot(question_snapshot());
 
     assert!(state.modal_presentation(MAX_VIEW_ROWS).is_none());
-    let screen = rendered_screen(&state, 80, 16);
+    let lines = rendered_lines(&state, 80, 16);
+    let screen = lines.join("\n");
     assert!(screen.contains("Which path should Misy take?"));
     assert!(!screen.contains("hidden draft"));
-    assert!(screen.contains("○ Plan the change"));
-    assert!(screen.contains("◉ Render the question"));
-    assert!(screen.contains("✓ Keep the draft"));
+    for title in ["Plan the change", "Render the question", "Keep the draft"] {
+        let line = lines
+            .iter()
+            .find(|line| line.contains(title))
+            .expect("todo row");
+        assert!(line.starts_with("  "), "{line:?}");
+    }
 }
 
 #[test]

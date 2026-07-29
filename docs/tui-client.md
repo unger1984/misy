@@ -140,7 +140,8 @@ model, authentication, session, and tool orchestration remain in the core.
   items use an accented dotted circle and emphasis, and done items use a green check and
   strikethrough. Long question-tab headers are truncated rather than rejected. The generation busy
   row is hidden while a question is pending, so its `Esc` hint cannot conflict with question
-  dismissal. The question viewport keeps its selected row visible on short terminals. Completed
+  dismissal. Both the generation row and sticky todos align with the transcript content inset. The
+  question viewport keeps its selected row visible on short terminals. Completed
   `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
   JSON, including after session replay.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting

@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- Aligned the live generation indicator and sticky todo rows with the transcript content inset.
 - Translated Misy history into strict OpenAI Chat Completions messages for AnyModel instead of
   forwarding internal metadata and tool records that upstream rejects with HTTP 400.
 - Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal

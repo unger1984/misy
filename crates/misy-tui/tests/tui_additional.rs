@@ -238,10 +238,11 @@ async fn renderer_shows_and_removes_the_single_line_busy_indicator() {
     })
     .await;
     let busy = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
-    assert!(
-        busy.iter()
-            .any(|line| line.contains("Thinking…") && line.contains("esc to interrupt"))
-    );
+    let busy_line = busy
+        .iter()
+        .find(|line| line.contains("Thinking…") && line.contains("esc to interrupt"))
+        .expect("busy indicator");
+    assert!(busy_line.starts_with("  "), "{busy_line:?}");
     client.handle_key(UiKey::Escape).expect("interrupt work");
     wait_for(&mut client, |client| {
         client.state().active_submission().is_none()

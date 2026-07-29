@@ -24,7 +24,7 @@ use std::time::Instant;
 const MAX_VIEW_ROWS: usize = 8;
 const MAX_QUEUED_PROMPT_ROWS: usize = 3;
 const POPUP_TOP_SPACE: u16 = 1;
-const TRANSCRIPT_INSET: u16 = 2;
+const CONTENT_INSET: u16 = 2;
 
 /// Renders the complete fullscreen client.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
@@ -85,10 +85,10 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     if let Some(label) = busy {
         frame.render_widget(
             Paragraph::new(Line::styled(label, style::accent())),
-            areas[2],
+            inset_content_area(areas[2]),
         );
     }
-    render_todos(frame, areas[3], state);
+    render_todos(frame, inset_content_area(areas[3]), state);
     if let Some(probe) = state.question_presentation(1) {
         let visible_rows = question_rows(areas[4], probe.tabs.len() > 1);
         if let Some(question) = state.question_presentation(visible_rows) {
@@ -189,7 +189,7 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
         return;
     }
     let mut lines = state.startup_header.lines(area.width);
-    let transcript_width = area.width.saturating_sub(TRANSCRIPT_INSET);
+    let transcript_width = area.width.saturating_sub(CONTENT_INSET);
     lines.extend(
         transcript_lines(
             state.transcript(),
@@ -208,8 +208,18 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
 
 fn inset_transcript_line(mut line: Line<'static>) -> Line<'static> {
     line.spans
-        .insert(0, Span::raw(" ".repeat(usize::from(TRANSCRIPT_INSET))));
+        .insert(0, Span::raw(" ".repeat(usize::from(CONTENT_INSET))));
     line
+}
+
+fn inset_content_area(area: Rect) -> Rect {
+    let inset = CONTENT_INSET.min(area.width);
+    Rect::new(
+        area.x.saturating_add(inset),
+        area.y,
+        area.width.saturating_sub(inset),
+        area.height,
+    )
 }
 
 fn render_composer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {

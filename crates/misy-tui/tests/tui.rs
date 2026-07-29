@@ -18,6 +18,12 @@ async fn input_mapping_and_reducer_keep_state_explicit() {
     assert_eq!(map_input("/status"), Ok(UiAction::ShowUsage));
     assert_eq!(map_input("/usage"), Ok(UiAction::ShowUsage));
     assert_eq!(map_input("/tasks"), Ok(UiAction::ShowActivities));
+    assert_eq!(map_input("/new"), Ok(UiAction::NewSession));
+    assert_eq!(map_input("/resume"), Ok(UiAction::ShowSessions));
+    assert_eq!(
+        map_input("/resume abc123"),
+        Ok(UiAction::ResumeSession("abc123".to_owned()))
+    );
     assert_eq!(map_input("/exit"), Ok(UiAction::CancelAndExit));
     assert_eq!(
         map_input("/status now"),
@@ -32,6 +38,66 @@ async fn input_mapping_and_reducer_keep_state_explicit() {
     let mut state = UiState::default();
     state.reduce(&UiAction::CancelAndExit);
     assert!(state.should_exit());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_and_resume_commands_switch_persisted_conversations() {
+    let (_temporary, core) =
+        core_with_providers(&[("fixture", "Fixture AI", "session-command-output.txt")]);
+    let mut client = TuiClient::new(core.clone(), RecordingBrowser::default()).await;
+    select_first_model(&mut client).await;
+    client.insert_text("session-one");
+    client.submit_composer().expect("submit session message");
+    wait_for(&mut client, |client| {
+        let snapshot = core.snapshot();
+        snapshot.active_submission.is_none()
+            && snapshot.queued_submissions.is_empty()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::AssistantText(text) if text == "one"))
+    })
+    .await;
+    client.pump_events();
+
+    client.handle_input("/new").expect("start new session");
+    assert!(
+        !client
+            .state()
+            .transcript()
+            .iter()
+            .any(|row| matches!(row, TranscriptRow::UserPrompt(text) if text == "session-one"))
+    );
+
+    client.handle_input("/resume").expect("open session picker");
+    assert_eq!(client.state().mode(), UiMode::SessionList);
+    assert!(
+        client
+            .state()
+            .picker_labels()
+            .iter()
+            .any(|label| label == "session-one")
+    );
+    client
+        .handle_key(UiKey::Enter)
+        .expect("resume selected session");
+
+    assert_eq!(client.state().mode(), UiMode::Input);
+    assert!(
+        client
+            .state()
+            .transcript()
+            .iter()
+            .any(|row| matches!(row, TranscriptRow::UserPrompt(text) if text == "session-one"))
+    );
+    assert!(
+        client
+            .state()
+            .transcript()
+            .iter()
+            .any(|row| matches!(row, TranscriptRow::AssistantText(text) if text == "one"))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -259,10 +325,10 @@ async fn capability_rejection_retains_text_and_images_for_retry() {
 async fn slash_popup_filters_selects_and_dismisses_without_changing_text() {
     let (_temporary, mut client, _) = test_client().await;
     client.insert_text("/");
-    assert_eq!(client.state().command_popup_rows().len(), 6);
+    assert_eq!(client.state().command_popup_rows().len(), 8);
     let cursor = client.state().composer_cursor();
     client.handle_key(UiKey::Up).expect("wrap to last command");
-    assert!(client.state().command_popup_rows()[5].contains("/exit"));
+    assert!(client.state().command_popup_rows()[7].contains("/exit"));
     client
         .handle_key(UiKey::Down)
         .expect("wrap to first command");

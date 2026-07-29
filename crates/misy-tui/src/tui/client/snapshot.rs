@@ -18,6 +18,7 @@ pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
         | CoreEvent::Completed { .. }
         | CoreEvent::Cancelled { .. }
         | CoreEvent::Failed { .. } => true,
+        CoreEvent::SessionPersistenceFailed { .. } => false,
         CoreEvent::ProviderDiscovered { .. }
         | CoreEvent::ModelsListed { .. }
         | CoreEvent::TextDelta { .. }
@@ -50,6 +51,7 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
         | CoreEvent::Completed { .. }
         | CoreEvent::Cancelled { .. }
         | CoreEvent::Failed { .. }
+        | CoreEvent::SessionPersistenceFailed { .. }
         | CoreEvent::Shutdown => false,
     }
 }
@@ -57,6 +59,7 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
 impl<B: BrowserHandoff> TuiClient<B> {
     pub(super) fn refresh_core_projection(&mut self) {
         self.state.apply_snapshot(self.core.snapshot());
+        self.state.set_session_id(self.core.current_session_id());
     }
 
     pub(super) fn refresh_provider_choices(&mut self) {

@@ -61,6 +61,11 @@ impl MisyPaths {
         self.root.join("models.json")
     }
 
+    /// Returns the directory containing append-only conversation sessions.
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
+
     /// Returns the directory containing user-installed provider packages.
     pub fn provider_plugins_dir(&self) -> PathBuf {
         self.root.join("plugins").join("providers")

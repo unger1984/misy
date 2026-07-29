@@ -57,8 +57,9 @@ find plugins/providers -path '*/node_modules' -prune -o -name '*.ts' -print \
 1. Rust unit tests live beside the implementation in `crates/misy-core/src/` and
    `crates/misy-tui/src/`.
 2. Rust integration and end-to-end tests live in `crates/misy-core/tests/` for core, provider-host,
-   configuration, credential, domain, and tool flows, and in `crates/misy-tui/tests/` for terminal
-   client flows. They use fake provider processes from `crates/misy-core/tests/fixtures/`.
+   configuration, credential, session, domain, and tool flows, and in `crates/misy-tui/tests/` for
+   terminal client flows. They use fake provider processes from
+   `crates/misy-core/tests/fixtures/`.
    Integration tests reach core internals (`ProviderHost`, `ProviderCatalog`, `CredentialStore`,
    tool types, deadline-tuning constructors) through the crate's `test-support` feature, enabled
    by a self dev-dependency in `crates/misy-core/Cargo.toml`; production clients never see them.
@@ -67,6 +68,9 @@ find plugins/providers -path '*/node_modules' -prune -o -name '*.ts' -print \
 
 Prefer observable behavior over implementation details. Add concurrency/lifecycle tests where
 dropped events, blocked input, leaked processes, or credential exposure are plausible.
+Session tests use an injected `MisyPaths` root and must cover lazy creation, private permissions,
+append/resume round trips, malformed tails, schema rejection, cwd filtering, model fallback, and
+the active-submission switch guard without reading the user's real session directory.
 
 ## Sources of Truth
 

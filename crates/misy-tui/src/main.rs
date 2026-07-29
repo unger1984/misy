@@ -10,9 +10,10 @@ use std::{error::Error, path::Path};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let bundled_providers = bundled_providers();
-    let paths = Arguments::from_env()?.paths()?;
+    let arguments = Arguments::from_env()?;
+    let paths = arguments.paths()?;
     let core = MisyCore::discover(paths.clone(), bundled_providers)?;
-    run(core, &paths).await?;
+    run(core, &paths, arguments.session_start()).await?;
     Ok(())
 }
 

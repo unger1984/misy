@@ -477,7 +477,8 @@ impl CoreState {
         self.history
             .lock()
             .expect("history mutex must not be poisoned")
-            .push(entry);
+            .push(entry.clone());
+        self.persist_history(entry);
     }
 
     fn history_image_bytes(&self) -> usize {

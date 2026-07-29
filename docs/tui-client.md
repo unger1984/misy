@@ -74,6 +74,17 @@ model, authentication, session, and tool orchestration remain in the core.
   out, or the report is invalid, the TUI renders the error without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
+- `/new` and `/clear` start the same clean conversation while retaining the previous persisted
+  session. `/resume` opens a filterable, newest-first picker for sessions whose canonical cwd
+  exactly matches the current directory; `/resume <id>` accepts an exact id or unambiguous prefix.
+  The picker shows the first user message, relative modification time, and a short id. Resume
+  rebuilds both the core's provider history and the visible user/assistant/tool transcript, then
+  continues appending to the same session file. These operations are rejected while a submission
+  is active or queued. The footer shows the attached short session id once persistence begins.
+- CLI startup is fresh by default. `--continue` resumes the newest session for the current cwd;
+  `--resume` opens the picker; and `--resume <id>` resumes a specific session. The options are
+  mutually exclusive. If a saved model is no longer available, Misy keeps the current selection
+  and renders a warning instead of failing the resume.
 - `/tasks` opens the shared activity popup. The row below the composer remains visible while active
   or recent activities exist and separately counts running tasks, terminal tasks, and active
   agents. `Down` from an empty composer focuses it and `Enter` opens it. The popup has `All`,
@@ -157,6 +168,8 @@ model, authentication, session, and tool orchestration remain in the core.
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event and background-operation processing are bounded per tick so continuous streaming cannot
   starve input handling.
+- Conversation persistence belongs to the core. The TUI only requests list/new/resume operations
+  and projects the returned canonical history; it never reads or writes session JSONL directly.
 - The TUI never owns task processes. It polls bounded client output while an activity preview or
   log viewer is visible and sends stop requests through the core; core shutdown remains responsible
   for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the

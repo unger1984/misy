@@ -38,11 +38,12 @@ flowchart LR
     Core --> Host[Provider host]
     Host <-->|JSON-RPC 2.0 over NDJSON| Plugin[Provider plugin]
     Plugin --> API[Remote model API]
-    Core --> Data[Config and credentials]
+    Core --> Data[Config, credentials, and sessions]
 ```
 
-- **The Rust core is the harness.** It owns conversation state, the FIFO submission queue, the
-  agent/tool loop, provider supervision, authentication, cancellation, and normalized events.
+- **The Rust core is the harness.** It owns persisted conversation state, the FIFO submission
+  queue, the agent/tool loop, provider supervision, authentication, cancellation, and normalized
+  events.
 - **Frontends are clients.** The TUI renders core state and sends user actions; it does not
   reimplement orchestration. Other clients can be built on the same core contract later.
 - **Providers are adapters.** Each provider is a standalone, language-independent process that
@@ -59,11 +60,11 @@ documentation index is at [docs/README.md](docs/README.md).
 The repository already contains a working development-stage vertical slice:
 
 - a reusable async `misy-core` crate with configuration, opaque credential storage, model caching,
-  in-memory conversations, FIFO prompt scheduling, streaming events, cancellation, and provider
-  process lifecycle management;
+  append-only conversation sessions, FIFO prompt scheduling, streaming events, cancellation, and
+  provider process lifecycle management;
 - a fullscreen Ratatui client with a multiline composer, prompt history, transcript scrolling and
-  copying, command completion, provider authentication, model selection, queued prompts, streaming
-  output, tool rendering, interruption, and clean terminal restoration;
+  copying, command completion, provider authentication, model selection, session resume, queued
+  prompts, streaming output, tool rendering, interruption, and clean terminal restoration;
 - a versioned JSON-RPC 2.0 provider protocol with manifest discovery, lazy process startup,
   streaming chat, browser and device authentication flows, credential refresh, model discovery,
   request cancellation, and an optional normalized usage capability;
@@ -75,9 +76,8 @@ The repository already contains a working development-stage vertical slice:
 - unit, integration, end-to-end, and provider contract tests that use local fixtures instead of
   real accounts or external network access.
 
-This is an MVP foundation, not a stable release. In particular, conversations are not persisted,
-the process represents a single agent session, and the TUI does not yet support prompt-based
-authentication such as entering API keys.
+This is an MVP foundation, not a stable release. One process still owns one attached conversation
+at a time, and the TUI does not yet support prompt-based authentication such as entering API keys.
 
 ## Planned work
 
@@ -85,7 +85,6 @@ The following areas are intentionally deferred and remain open for future develo
 
 - explicit permissions and approval flows for local tools;
 - MCP integration;
-- persisted conversations and session recovery;
 - subagents and richer orchestration;
 - provider marketplace installation and updates;
 - API-key and generic prompt-based authentication;

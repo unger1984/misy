@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added private, versioned, append-only conversation sessions with automatic incremental
+  persistence, cwd-scoped resume, model restoration, transcript replay, `/new`, `/clear`,
+  `/resume [id]`, `--continue`, and `--resume [id]`.
 - Added clipboard image paste through `Ctrl+V` and `Cmd+V`, including image-only prompts,
   removable composer placeholders, multimodal OpenAI, Anthropic, and Kimi requests, and the
   core-owned `view_image` tool.
@@ -22,6 +25,8 @@
 
 ### Fixed
 
+- Kept active conversations usable after session-storage failures, tolerated malformed trailing
+  JSONL records, and rejected missing, ambiguous, incompatible, or active-work resume attempts.
 - Prevented foreground commands from being terminated when they transition to background while
   all remaining process permits are occupied.
 - Preserved pasted images when recalling the latest submitted prompt with `Up`, while keeping

@@ -75,7 +75,7 @@ pub use activity::{
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, MisyPaths};
 pub use core::{
     AvailableModels, CoreError, CoreEvent, CoreSnapshot, HistoryEntry, MisyCore, ProviderAuthState,
-    ProviderModelError, SubmissionId,
+    ProviderModelError, ResumeOutcome, SessionError, SessionSummary, SubmissionId,
 };
 pub use domain::{
     Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderDisplayName, ProviderId, ToolCall,

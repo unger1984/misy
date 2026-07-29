@@ -19,6 +19,7 @@ mod model_view;
 mod presentation;
 mod render;
 mod screen_selection;
+mod session_picker;
 mod startup_header;
 mod state;
 mod style;
@@ -35,4 +36,4 @@ pub use browser::{BrowserHandoff, BrowserPlatform, browser_command, validate_aut
 pub use client::TuiClient;
 pub use render::render;
 pub use state::{TranscriptRow, UiState};
-pub use terminal::run;
+pub use terminal::{SessionStart, run};

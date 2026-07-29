@@ -38,6 +38,11 @@ Read this document before making a new architecture or user-interaction choice.
 - The shared activity UI follows the local Codex and Oh My Pi session/task picker patterns while
   retaining Misy's core/client boundary. Agent sessions remain deferred, but their activity kind,
   tabs, and `Main` navigation slot are reserved by the contract.
+- Conversations are always persisted incrementally in flat, versioned, append-only JSONL files
+  under `~/.misy/sessions`. Headers carry canonical cwd and model identity; the resume picker and
+  `--continue` are scoped to an exact canonical cwd match. Resume is explicit, appends to the same
+  file, tolerates malformed trailing records, and fails on a missing, ambiguous, or unsupported
+  session instead of silently creating a new one. `/clear` and `/new` share one handler.
 - Kimi's push notification delivery and Oh My Pi's push-oriented task presentation were considered
   but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
   post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1
@@ -45,8 +50,8 @@ Read this document before making a new architecture or user-interaction choice.
 
 ## Deferred Scope
 
-MCP, permissions, subagents, marketplace installation/update, persisted
-conversations, daemon/public IPC, desktop UI, API-key authentication, generic prompt-based
+MCP, permissions, subagents, marketplace installation/update, daemon/public IPC, desktop UI,
+API-key authentication, generic prompt-based
 authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.
 

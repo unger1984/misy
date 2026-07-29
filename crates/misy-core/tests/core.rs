@@ -32,6 +32,8 @@ mod limits;
 mod models;
 #[path = "core/queue.rs"]
 mod queue;
+#[path = "core/sessions.rs"]
+mod sessions;
 #[path = "core/snapshots.rs"]
 mod snapshots;
 #[path = "core/streaming.rs"]

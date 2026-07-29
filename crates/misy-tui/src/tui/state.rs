@@ -2,6 +2,7 @@
 
 mod activities;
 mod events;
+mod sessions;
 #[cfg(test)]
 mod tests;
 mod transcript;
@@ -20,6 +21,7 @@ use super::{
         list_presentation, model_picker_presentation, operation_label, provider_action_rows,
         provider_settings,
     },
+    session_picker::SessionPicker,
     startup_header::StartupHeader,
 };
 use misy_core::{
@@ -57,6 +59,7 @@ pub(super) enum ActiveView {
     },
     Models(ModelPicker),
     Activities(ActivityPicker),
+    Sessions(SessionPicker),
     ActivityLog(activities::ActivityLogView),
 }
 
@@ -118,6 +121,7 @@ pub struct UiState {
     pub(super) transcript_expand_hint: String,
     tool_output_expanded: bool,
     pub(super) activity_preview: Option<ActivityOutput>,
+    session_id: Option<String>,
 }
 
 impl Default for UiState {
@@ -152,6 +156,7 @@ impl Default for UiState {
             transcript_expand_hint: "Ctrl+O".to_owned(),
             tool_output_expanded: false,
             activity_preview: None,
+            session_id: None,
         }
     }
 }
@@ -183,6 +188,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { .. }) => UiMode::ProviderDetail,
             Some(ActiveView::Models(_)) => UiMode::ModelList,
             Some(ActiveView::Activities(_)) => UiMode::ActivityList,
+            Some(ActiveView::Sessions(_)) => UiMode::SessionList,
             Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
         }
     }
@@ -221,6 +227,7 @@ impl UiState {
                 .into_iter()
                 .map(|row| row.label)
                 .collect(),
+            Some(ActiveView::Sessions(view)) => view.labels(),
             Some(ActiveView::ActivityLog(view)) => view
                 .output
                 .as_ref()
@@ -288,6 +295,9 @@ impl UiState {
             | UiAction::StartAuth(_)
             | UiAction::ShowModels
             | UiAction::ShowActivities
+            | UiAction::ShowSessions
+            | UiAction::NewSession
+            | UiAction::ResumeSession(_)
             | UiAction::ShowUsage
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
@@ -320,6 +330,10 @@ impl UiState {
         directory: Option<&std::path::Path>,
     ) {
         self.startup_header = StartupHeader::new(model, directory);
+    }
+
+    pub(super) fn set_startup_notice(&mut self, notice: Option<String>) {
+        self.startup_header.set_notice(notice);
     }
 
     pub(super) fn open_providers(&mut self, providers: Vec<ProviderChoice>) {
@@ -435,6 +449,15 @@ impl UiState {
                 visible_rows,
                 &self.activity_stop_hint,
             )),
+            Some(ActiveView::Sessions(view)) => Some(ModalPresentation {
+                title: "Resume session".to_owned(),
+                rows: view.visible_rows(visible_rows),
+                operation: None,
+                back_hint: false,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: None,
+            }),
             Some(ActiveView::ActivityLog(_)) => None,
             Some(ActiveView::ProviderSettings {
                 display_name,
@@ -474,7 +497,11 @@ impl UiState {
             .get(&model.provider)
             .map(ProviderDisplayName::as_str)
             .unwrap_or(model.provider.as_str());
-        format!("{provider} · {}", model.model.as_str())
+        let status = format!("{provider} · {}", model.model.as_str());
+        self.session_id.as_ref().map_or(status.clone(), |id| {
+            let short_id: String = id.chars().take(8).collect();
+            format!("{status} · session {short_id}")
+        })
     }
 
     pub(super) fn composer_cursor_position(&self) -> (u16, u16) {
@@ -519,6 +546,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.insert_filter(text),
             Some(ActiveView::Models(view)) => view.insert_filter(text),
             Some(ActiveView::Activities(view)) => view.insert_filter(text),
+            Some(ActiveView::Sessions(view)) => view.insert_filter(text),
             Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
@@ -530,6 +558,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.backspace_filter(),
             Some(ActiveView::Models(view)) => view.backspace_filter(),
             Some(ActiveView::Activities(view)) => view.backspace_filter(),
+            Some(ActiveView::Sessions(view)) => view.backspace_filter(),
             Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
@@ -567,6 +596,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.select_number(one_based),
             Some(ActiveView::Models(view)) => view.select_number(one_based),
             Some(ActiveView::Activities(view)) => view.select_number(one_based),
+            Some(ActiveView::Sessions(view)) => view.select_number(one_based),
             Some(ActiveView::ActivityLog(_)) => false,
             None => false,
         }
@@ -578,6 +608,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_up(),
             Some(ActiveView::Models(view)) => view.move_up(),
             Some(ActiveView::Activities(view)) => view.move_up(),
+            Some(ActiveView::Sessions(view)) => view.move_up(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
             None => {}
         }
@@ -589,6 +620,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_down(),
             Some(ActiveView::Models(view)) => view.move_down(),
             Some(ActiveView::Activities(view)) => view.move_down(),
+            Some(ActiveView::Sessions(view)) => view.move_down(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
             None => {}
         }
@@ -615,7 +647,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { .. }) => {
                 self.view = Some(ActiveView::Providers(self.provider_list()));
             }
-            Some(ActiveView::Providers(_) | ActiveView::Models(_)) => {
+            Some(ActiveView::Providers(_) | ActiveView::Models(_) | ActiveView::Sessions(_)) => {
                 self.view = None;
                 self.provider_operation = None;
                 self.provider_device_code = None;

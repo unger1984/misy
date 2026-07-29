@@ -28,6 +28,8 @@ mod images;
 mod models;
 mod queue;
 mod runtime;
+mod session;
+mod session_api;
 mod snapshot;
 mod usage;
 use authentication::{CredentialMethodChange, ProviderCredentialState, credential_states};
@@ -42,6 +44,7 @@ use runtime::RuntimeControl;
 pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
 };
+pub use session::{ResumeOutcome, SessionError, SessionSummary};
 // These public snapshot names are part of the headless-client contract.
 #[allow(clippy::module_name_repetitions)]
 pub use snapshot::{CoreSnapshot, ProviderAuthState};
@@ -78,6 +81,7 @@ pub(super) struct CoreState {
     pub(super) selected_model: Mutex<Option<ModelRef>>,
     pub(super) keybindings: BTreeMap<String, Vec<String>>,
     pub(super) history: Mutex<Vec<HistoryEntry>>,
+    pub(super) session: Mutex<session::SessionState>,
     pub(super) dispatcher: ToolDispatcher,
     pub(super) subscribers: EventSubscribers,
     pub(super) routes: ProviderRoutes,
@@ -190,6 +194,7 @@ impl MisyCore {
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
         let credential_store = CredentialStore::new(paths.clone());
+        let sessions_dir = paths.sessions_dir();
         let credential_states = credential_states(&catalog, &credential_store);
         let (runtime, owner) = RuntimeControl::new()?;
         let state = Arc::new(CoreState {
@@ -206,6 +211,7 @@ impl MisyCore {
             selected_model: Mutex::new(config.default_model),
             keybindings: config.keybindings,
             history: Mutex::new(Vec::new()),
+            session: Mutex::new(session::SessionState::new(sessions_dir)?),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
             subscribers: EventSubscribers::default(),
             routes: Mutex::new(BTreeMap::new()),
@@ -438,6 +444,7 @@ impl MisyCore {
             .selected_model
             .lock()
             .expect("selected model mutex must not be poisoned") = Some(model.clone());
+        self.inner.state.persist_model_change(model.clone());
         self.emit(&CoreEvent::ModelSelected { model });
         Ok(())
     }

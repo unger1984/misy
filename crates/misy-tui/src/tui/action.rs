@@ -15,6 +15,12 @@ pub enum UiAction {
     ShowModels,
     /// Open the shared tasks and agents picker.
     ShowActivities,
+    /// Open the saved-session picker.
+    ShowSessions,
+    /// Start a clean conversation while retaining the current saved session.
+    NewSession,
+    /// Resume a saved conversation by id or unambiguous prefix.
+    ResumeSession(String),
     /// Fetch account-limit usage for the selected model's provider.
     ShowUsage,
     /// Select a model.
@@ -96,6 +102,8 @@ pub enum UiMode {
     ModelList,
     /// Shared tasks and agents picker.
     ActivityList,
+    /// Saved conversation-session picker.
+    SessionList,
     /// Output for one command activity.
     ActivityDetail,
 }
@@ -141,6 +149,8 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         "/provider" => Ok(UiAction::ShowProviders),
         "/model" => Ok(UiAction::ShowModels),
         "/tasks" => Ok(UiAction::ShowActivities),
+        "/new" | "/clear" => Ok(UiAction::NewSession),
+        "/resume" => Ok(UiAction::ShowSessions),
         "/status" | "/usage" => Ok(UiAction::ShowUsage),
         "/exit" => Ok(UiAction::CancelAndExit),
         command if command.starts_with("/provider ") => {
@@ -151,6 +161,18 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/tasks ") => {
             Err("use `/tasks` without arguments".to_owned())
+        }
+        command if command.starts_with("/new ") => Err("use `/new` without arguments".to_owned()),
+        command if command.starts_with("/clear ") => {
+            Err("use `/clear` without arguments".to_owned())
+        }
+        command if command.starts_with("/resume ") => {
+            let id = command.strip_prefix("/resume ").unwrap_or_default().trim();
+            if id.is_empty() {
+                Ok(UiAction::ShowSessions)
+            } else {
+                Ok(UiAction::ResumeSession(id.to_owned()))
+            }
         }
         command if command.starts_with("/usage ") => {
             Err("use `/usage` without arguments".to_owned())

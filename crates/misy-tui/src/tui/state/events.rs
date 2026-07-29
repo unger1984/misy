@@ -49,6 +49,9 @@ impl UiState {
                 self.discard_terminal_turn(submission);
                 self.add_error(message);
             }
+            CoreEvent::SessionPersistenceFailed { message } => {
+                self.add_error(format!("could not save session: {message}"));
+            }
             CoreEvent::Shutdown => {
                 self.terminal_turn = None;
                 self.should_exit = true;

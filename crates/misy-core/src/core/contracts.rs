@@ -1,10 +1,12 @@
 //! Public values and errors exposed by the headless core.
 
+use super::session::SessionError;
 use crate::{
     ActivitySummary, ConfigError, CredentialError, ImageAttachment, InputModality, Message,
     ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId,
     ToolCall, ToolResult,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{error::Error, fmt};
 
@@ -20,7 +22,7 @@ impl SubmissionId {
 }
 
 /// A canonical history item retained by the Rust core. Provider metadata stays opaque.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct HistoryEntry {
     /// User, assistant, or tool message retained for the next provider request.
     pub message: Message,
@@ -160,6 +162,11 @@ pub enum CoreEvent {
         /// User-facing failure description.
         message: String,
     },
+    /// Conversation persistence failed while the in-memory turn continued.
+    SessionPersistenceFailed {
+        /// User-facing description of the local storage failure.
+        message: String,
+    },
     /// The core shut down and no longer accepts work.
     Shutdown,
 }
@@ -228,6 +235,10 @@ pub enum CoreError {
     NoModelSelected,
     /// No active submission has this identifier.
     UnknownSubmission(SubmissionId),
+    /// Conversation-session storage or lookup failed.
+    Session(SessionError),
+    /// A session switch was requested while queued or active work still owns the conversation.
+    SessionBusy,
     /// The core has been shut down.
     Shutdown,
 }
@@ -279,6 +290,10 @@ impl fmt::Display for CoreError {
             }
             Self::NoModelSelected => formatter.write_str("no model is selected"),
             Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
+            Self::Session(error) => write!(formatter, "session error: {error}"),
+            Self::SessionBusy => {
+                formatter.write_str("cannot switch sessions while a submission is active or queued")
+            }
             Self::Shutdown => formatter.write_str("misy core has shut down"),
         }
     }
@@ -291,8 +306,15 @@ impl Error for CoreError {
             Self::Credentials(error) => Some(error),
             Self::Discovery(error) => Some(error),
             Self::Provider(error) => Some(error),
+            Self::Session(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<SessionError> for CoreError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
     }
 }
 

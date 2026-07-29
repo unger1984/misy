@@ -22,7 +22,7 @@ fn edits_unicode_at_the_cursor() {
 fn slash_popup_tracks_edits_and_dismissal() {
     let mut composer = Composer::default();
     composer.insert_str("/");
-    assert_eq!(composer.popup_rows().len(), 6);
+    assert_eq!(composer.popup_rows().len(), 8);
     composer.insert_str("mo");
     assert_eq!(composer.selected_command(), Some("/model"));
     composer.dismiss_popup();
@@ -41,9 +41,11 @@ fn slash_popup_wraps_selection() {
     assert_eq!(
         composer.popup_rows(),
         [
-            "  /provider  Configure provider authentication",
             "  /model  Choose a model",
             "  /tasks  Show background tasks and agents",
+            "  /new  Start a new conversation",
+            "  /clear  Start a new conversation",
+            "  /resume  Resume a saved conversation",
             "  /status  Show provider usage and limits",
             "  /usage  Show provider usage and limits",
             "› /exit  Exit Misy",

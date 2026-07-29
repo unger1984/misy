@@ -25,13 +25,14 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The `misy-core` workspace crate owns normalized state, configuration, credentials, the persisted model catalog
-  cache (`~/.misy/models.json`), the in-memory conversation, FIFO submission scheduling,
+- The `misy-core` workspace crate owns normalized state, configuration, credentials, the persisted
+  model catalog cache (`~/.misy/models.json`), persisted conversations, FIFO submission scheduling,
   agent/tool iteration, cancellation, provider supervision, and public events. Clients read the
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
-- `config.toml`, the credential files, and `models.json` each carry an independent format version.
+- `config.toml`, the credential files, `models.json`, and session JSONL headers each carry an
+  independent format version.
   Config version 1 is atomically migrated to version 2, which adds frontend-owned named
   keybindings; newer unknown revisions are rejected. Credential storage remains version 1 and the
   model cache has its own migration. Every future version bump MUST ship with a migration or an
@@ -50,7 +51,10 @@ flowchart LR
 - Frontends acquire clipboard media, but the core owns image validation, normalized bytes,
   session attachment state, and `view_image` execution. Provider plugins receive only normalized
   image data and never read local image paths.
-- One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
+- One Misy process owns one attached conversation at a time. Conversations are incrementally
+  persisted as private append-only files in `~/.misy/sessions/*.jsonl`; starting a new session
+  detaches the current file, and resuming restores canonical core history before appending to the
+  same file. A daemon or shared multi-client service is not part of the MVP.
 
 ## Runtime Flow
 
@@ -68,16 +72,20 @@ flowchart LR
 8. Direct-interaction submissions enter one core-owned FIFO queue. Exactly one submission mutates
    session history at a time; cancelling the active submission advances the next queued item,
    while cancelling all submissions prevents every pending item from starting.
-9. Optional provider capabilities are negotiated from the discovered manifest before a request.
+9. Every canonical history entry is appended to the attached versioned session JSONL after it
+   enters memory. The first entry lazily creates the file with mode `0600`, a canonical cwd, model,
+   and schema header. Persistence failure emits `SessionPersistenceFailed` without discarding the
+   in-memory turn. Session switching is rejected while active or queued work exists.
+10. Optional provider capabilities are negotiated from the discovered manifest before a request.
    For usage capability version 1, the core snapshots the selected `ModelRef`, refreshes and
    injects its opaque credentials, bounds `usage.get` to 30 seconds, and strictly validates the
    normalized result. The provider retains ownership of remote endpoint selection, headers, and
    provider-specific response parsing.
-10. Image input requires both provider capability version 1 and model image modality support.
+11. Image input requires both provider capability version 1 and model image modality support.
     The core refreshes stale selected-provider metadata before rejecting a submission, includes
     normalized images in bounded in-memory history for visual follow-ups, and replaces older image
     payloads when the user attaches a new image set. Text-only models receive image-free history.
-11. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
+12. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
     Every live process reserves one of 64 permits before spawn; foreground calls may publish the
     same process after a bounded yield without acquiring another permit. Pipe commands use process
     groups with closed stdin. On macOS and Linux, optional PTY commands use a writable terminal and
@@ -86,7 +94,7 @@ flowchart LR
     Ordered stdout/stderr capture has one 1 MiB data-plus-metadata budget per activity, model
     delivery has a separate `max_output_tokens` projection, and the latest twenty terminal tasks
     remain available to clients.
-12. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
+13. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
     refresh its activity popup, fullscreen log viewer, and transcript after cleanup and output
     draining. The model is not notified when a background command finishes: it must pull new output
     and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed

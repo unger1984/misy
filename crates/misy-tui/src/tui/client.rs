@@ -3,6 +3,7 @@
 mod authentication;
 mod interrupts;
 mod operation_result;
+mod sessions;
 mod snapshot;
 mod submission;
 
@@ -419,6 +420,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::ShowProviders => self.show_providers()?,
             UiAction::ShowModels => self.start_model_refresh(),
             UiAction::ShowActivities => self.state.open_activities(),
+            UiAction::ShowSessions => self.show_sessions()?,
+            UiAction::NewSession => self.start_new_session()?,
+            UiAction::ResumeSession(id) => self.resume_session(&id)?,
             UiAction::ShowUsage => self.show_usage()?,
             UiAction::SubmitPrompt(prompt) => self.submit_prompt(prompt),
             UiAction::SelectModel(model) => self.select_model(model),
@@ -519,6 +523,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 }
                 None => {}
             },
+            UiMode::SessionList => {
+                if let Some(id) = self.state.selected_session_id() {
+                    self.resume_session(&id)?;
+                }
+            }
             UiMode::ActivityDetail => {}
             UiMode::Input => {}
         }

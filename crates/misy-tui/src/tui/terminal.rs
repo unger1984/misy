@@ -32,15 +32,36 @@ use std::{io, io::Write, time::Duration};
 const ENABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4m";
 
+/// Conversation selection requested by command-line arguments before the terminal opens.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum SessionStart {
+    /// Start with an empty in-memory conversation.
+    #[default]
+    Fresh,
+    /// Resume the newest saved session for the current directory.
+    ResumeLatest,
+    /// Resume a saved session by id or unambiguous prefix.
+    ResumeId(String),
+    /// Open the saved-session picker immediately.
+    ResumePicker,
+}
+
 /// Starts the fullscreen interactive client and restores the prior terminal screen on exit.
 ///
 /// # Errors
 ///
 /// Returns terminal setup, event-read, clipboard-transfer, or draw failures.
-pub async fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
+pub async fn run(
+    core: MisyCore,
+    paths: &MisyPaths,
+    session_start: SessionStart,
+) -> Result<(), io::Error> {
     let stdout = io::stdout();
     let mut guard = TerminalGuard::enter()?;
     let mut client = TuiClient::with_persistent_history(core, SystemBrowser, paths).await;
+    client
+        .apply_session_start(session_start)
+        .map_err(io::Error::other)?;
     let result = (|| {
         let backend = CrosstermBackend::new(stdout.lock());
         let mut terminal = Terminal::new(backend)?;

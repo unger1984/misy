@@ -5,7 +5,7 @@
 //! surface shared by the event projection ([`super::events`]) and the client.
 
 use super::UiState;
-use misy_core::ActivityOutput;
+use misy_core::{ActivityOutput, HistoryEntry, MessageRole};
 use std::{fmt, time::Duration};
 
 /// A renderable, user-visible transcript item.
@@ -84,5 +84,61 @@ impl UiState {
 
     pub(in crate::tui) fn add_info(&mut self, message: impl Into<String>) {
         self.transcript.push(TranscriptRow::Info(message.into()));
+    }
+
+    pub(in crate::tui) fn clear_conversation(&mut self) {
+        self.transcript.clear();
+        self.prompt_text.clear();
+        self.response_submission = None;
+        self.cancelled_submissions.clear();
+        self.submission_started_at = None;
+        self.turn_had_tool_activity = false;
+        self.terminal_turn = None;
+        self.response_started = false;
+        self.view = None;
+    }
+
+    pub(in crate::tui) fn replay_history(&mut self, history: &[HistoryEntry]) {
+        self.clear_conversation();
+        for entry in history {
+            self.replay_entry(entry);
+        }
+        self.response_submission = None;
+    }
+
+    fn replay_entry(&mut self, entry: &HistoryEntry) {
+        match entry.message.role {
+            MessageRole::User => {
+                let mut text = (1..=entry.attachments.len())
+                    .map(|index| format!("[Image #{index}]"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !entry.message.content.is_empty() {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(&entry.message.content);
+                }
+                self.transcript.push(TranscriptRow::UserPrompt(text));
+            }
+            MessageRole::Assistant if !entry.message.content.is_empty() => {
+                self.append_assistant_text(None, entry.message.content.clone());
+            }
+            MessageRole::System | MessageRole::Assistant | MessageRole::Tool => {}
+        }
+        for call in &entry.tool_calls {
+            self.transcript.push(TranscriptRow::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: serde_json::to_string(&call.arguments).ok(),
+            });
+        }
+        for result in &entry.tool_results {
+            self.transcript.push(TranscriptRow::ToolResult {
+                id: result.tool_call_id.clone(),
+                is_error: result.is_error,
+                content: Some(result.content.clone()),
+            });
+        }
     }
 }

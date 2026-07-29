@@ -46,15 +46,23 @@ cargo test
 cd plugins/providers/openai
 bun test
 bunx tsc --noEmit
+bunx biome check .
 cd ../anthropic
 bun test
 bunx tsc --noEmit
+bunx biome check .
 cd ../kimi
 bun test
 bunx tsc --noEmit
+bunx biome check .
+cd ../anymodel
+bun test
+bunx tsc --noEmit
+bunx biome check .
 cd ../_sdk
 bun test
 bunx tsc --noEmit
+bunx biome check .
 ```
 
 One source-code rule is not covered by the tools above and needs its own check when Rust or
@@ -98,5 +106,6 @@ the active-submission switch guard without reading the user's real session direc
 - [`plugins/providers/openai/package.json`](../plugins/providers/openai/package.json)
 - [`plugins/providers/anthropic/package.json`](../plugins/providers/anthropic/package.json)
 - [`plugins/providers/kimi/package.json`](../plugins/providers/kimi/package.json)
+- [`plugins/providers/anymodel/package.json`](../plugins/providers/anymodel/package.json)
 - [`plugins/providers/_sdk/package.json`](../plugins/providers/_sdk/package.json)
 - [Architecture](architecture.md)

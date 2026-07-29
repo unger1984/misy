@@ -4,6 +4,7 @@ mod activities;
 mod context;
 mod events;
 mod input;
+mod providers;
 mod questions;
 mod sessions;
 mod spinner;
@@ -19,13 +20,13 @@ pub use transcript::TranscriptRow;
 use super::{
     action::{UiAction, UiMode},
     activity_picker::ActivityPicker,
+    auth_prompt::AuthPromptView,
     composer::Composer,
     context_view::ContextView,
-    list::{ListRow, ListView},
+    list::ListView,
     model_picker::ModelPicker,
     presentation::{
-        list_presentation, model_picker_presentation, operation_label, provider_action_rows,
-        provider_settings,
+        list_presentation, model_picker_presentation, operation_label, provider_settings,
     },
     question_dialog::QuestionDialog,
     session_picker::SessionPicker,
@@ -64,6 +65,7 @@ pub(super) enum ActiveView {
         credential_method: Option<String>,
         actions: ListView<ProviderAction>,
     },
+    AuthPrompt(AuthPromptView),
     Models(ModelPicker),
     Activities(ActivityPicker),
     Sessions(SessionPicker),
@@ -89,6 +91,7 @@ pub(super) struct ModalPresentation {
 pub(super) enum ProviderOperationKind {
     Start,
     Complete,
+    PromptComplete,
     CancelAuth,
     Logout,
     Models,
@@ -201,6 +204,7 @@ impl UiState {
             None => UiMode::Input,
             Some(ActiveView::Providers(_)) => UiMode::ProviderList,
             Some(ActiveView::ProviderSettings { .. }) => UiMode::ProviderDetail,
+            Some(ActiveView::AuthPrompt(_)) => UiMode::AuthPrompt,
             Some(ActiveView::Models(_)) => UiMode::ModelList,
             Some(ActiveView::Activities(_)) => UiMode::ActivityList,
             Some(ActiveView::Sessions(_)) => UiMode::SessionList,
@@ -239,6 +243,15 @@ impl UiState {
                     actions.labels()
                 }
             }
+            Some(ActiveView::AuthPrompt(view)) => view
+                .form
+                .rows()
+                .into_iter()
+                .map(|row| {
+                    let value = row.description.unwrap_or_default();
+                    format!("{}: {value}", row.label)
+                })
+                .collect(),
             Some(ActiveView::Models(view)) => view.labels(),
             Some(ActiveView::Activities(view)) => view
                 .visible_rows(usize::MAX)
@@ -343,102 +356,6 @@ impl UiState {
         self.startup_header.set_notice(notice);
     }
 
-    pub(super) fn open_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.replace_providers(providers);
-        self.view = Some(ActiveView::Providers(self.provider_list()));
-    }
-
-    pub(super) fn refresh_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.replace_providers(providers);
-        match &self.view {
-            Some(ActiveView::ProviderSettings { provider, .. }) => {
-                let Some(choice) = self.providers.get(provider).cloned() else {
-                    return;
-                };
-                let rows = provider_action_rows(&choice);
-                // Rows are swapped into the live views instead of rebuilding
-                // them so a background refresh keeps the user's filter and
-                // highlight (review finding #10).
-                if let Some(ActiveView::ProviderSettings {
-                    display_name,
-                    credential_method,
-                    actions,
-                    ..
-                }) = &mut self.view
-                {
-                    *display_name = choice.display_name;
-                    *credential_method = choice.credential_method;
-                    actions.replace_rows(rows);
-                }
-            }
-            Some(ActiveView::Providers(_)) => {
-                let rows = self.provider_rows();
-                if let Some(ActiveView::Providers(view)) = &mut self.view {
-                    view.replace_rows(rows);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn replace_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.providers = providers
-            .into_iter()
-            .map(|provider| (provider.id.clone(), provider))
-            .collect();
-    }
-
-    pub(super) fn open_provider_settings(&mut self, provider: &ProviderId) {
-        let Some(choice) = self.providers.get(provider).cloned() else {
-            return;
-        };
-        self.view = Some(provider_settings(choice));
-    }
-
-    pub(super) fn finish_provider_operation(
-        &mut self,
-        provider: &ProviderId,
-        kind: ProviderOperationKind,
-    ) -> bool {
-        let scope = OperationScope::Provider(provider.clone());
-        if self.provider_operation.as_ref() == Some(&(scope, kind)) {
-            self.provider_operation = None;
-            self.provider_device_code = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn set_provider_operation(
-        &mut self,
-        provider: ProviderId,
-        kind: ProviderOperationKind,
-        device_code: Option<String>,
-    ) {
-        self.provider_operation = Some((OperationScope::Provider(provider), kind));
-        self.provider_device_code = device_code;
-    }
-
-    pub(super) fn set_model_catalog_operation(&mut self) {
-        self.provider_operation =
-            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models));
-        self.provider_device_code = None;
-    }
-
-    pub(super) fn finish_model_catalog_operation(&mut self) -> bool {
-        if matches!(
-            self.provider_operation,
-            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models))
-        ) {
-            self.provider_operation = None;
-            self.provider_device_code = None;
-            true
-        } else {
-            false
-        }
-    }
-
     pub(super) fn modal_presentation(&self, visible_rows: usize) -> Option<ModalPresentation> {
         match &self.view {
             None => None,
@@ -500,6 +417,15 @@ impl UiState {
                     help_hint: None,
                 })
             }
+            Some(ActiveView::AuthPrompt(view)) => Some(ModalPresentation {
+                title: format!("{} — authentication", view.display_name),
+                rows: view.form.rows(),
+                operation: None,
+                back_hint: true,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: Some("enter continue  tab next  esc cancel".to_owned()),
+            }),
         }
     }
 
@@ -523,31 +449,11 @@ impl UiState {
         })
     }
 
-    fn provider_list(&self) -> ListView<ProviderId> {
-        ListView::new("Providers", self.provider_rows())
-    }
-
-    fn provider_rows(&self) -> Vec<ListRow<ProviderId>> {
-        self.providers
-            .values()
-            .map(|provider| {
-                ListRow::selectable(
-                    provider.id.clone(),
-                    provider.display_name.clone(),
-                    Some(if provider.authenticated {
-                        "✓ authenticated".to_owned()
-                    } else {
-                        "not authenticated".to_owned()
-                    }),
-                )
-            })
-            .collect()
-    }
-
     pub(super) fn insert_filter(&mut self, text: &str) {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.insert_filter(text),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.insert_filter(text),
+            Some(ActiveView::AuthPrompt(view)) => view.form.insert(text),
             Some(ActiveView::Models(view)) => view.insert_filter(text),
             Some(ActiveView::Activities(view)) => view.insert_filter(text),
             Some(ActiveView::Sessions(view)) => view.insert_filter(text),
@@ -563,6 +469,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.backspace_filter(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.backspace_filter(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.backspace(),
             Some(ActiveView::Models(view)) => view.backspace_filter(),
             Some(ActiveView::Activities(view)) => view.backspace_filter(),
             Some(ActiveView::Sessions(view)) => view.backspace_filter(),
@@ -604,6 +511,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.select_number(one_based),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.select_number(one_based),
+            Some(ActiveView::AuthPrompt(_)) => false,
             Some(ActiveView::Models(view)) => view.select_number(one_based),
             Some(ActiveView::Activities(view)) => view.select_number(one_based),
             Some(ActiveView::Sessions(view)) => view.select_number(one_based),
@@ -619,6 +527,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.move_up(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_up(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.previous(),
             Some(ActiveView::Models(view)) => view.move_up(),
             Some(ActiveView::Activities(view)) => view.move_up(),
             Some(ActiveView::Sessions(view)) => view.move_up(),
@@ -634,6 +543,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.move_down(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_down(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.next(),
             Some(ActiveView::Models(view)) => view.move_down(),
             Some(ActiveView::Activities(view)) => view.move_down(),
             Some(ActiveView::Sessions(view)) => view.move_down(),
@@ -667,6 +577,21 @@ impl UiState {
         match &self.view {
             Some(ActiveView::ProviderSettings { .. }) => {
                 self.view = Some(ActiveView::Providers(self.provider_list()));
+            }
+            Some(ActiveView::AuthPrompt(view)) => {
+                let provider = view.provider.clone();
+                self.view = Some(provider_settings(
+                    self.providers
+                        .get(&provider)
+                        .cloned()
+                        .unwrap_or_else(|| ProviderChoice {
+                            id: provider,
+                            display_name: view.display_name.clone(),
+                            authenticated: false,
+                            credential_method: None,
+                            auth_methods: Vec::new(),
+                        }),
+                ));
             }
             Some(
                 ActiveView::Providers(_)

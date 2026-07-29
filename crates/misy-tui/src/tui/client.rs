@@ -15,7 +15,7 @@ use super::{
     composer_attachment::ComposerDraft,
     history::PromptHistoryStore,
     keymap::Keymap,
-    state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
+    state::{ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
     ActivityId, ActivityOutput, AgentId, AgentTranscript, AvailableModels, CoreError, CoreEvent,
@@ -69,7 +69,12 @@ impl From<CoreError> for TuiError {
 
 pub(super) enum ProviderOperationResult {
     Start(ProviderId, String, Result<Value, String>),
-    Complete(ProviderId, String, Result<(), String>),
+    Complete(
+        ProviderId,
+        String,
+        ProviderOperationKind,
+        Result<(), String>,
+    ),
     CancelAuth(ProviderId, Result<(), String>),
     Logout(ProviderId, Result<(), String>),
     Models(u64, Result<AvailableModels, String>),
@@ -209,6 +214,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.state.activity_bar_focused = false;
         if self.state.mode() == UiMode::Question {
             self.state.insert_filter(text);
+        } else if self.state.mode() == UiMode::AuthPrompt {
+            self.state.auth_prompt_insert(text);
         } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(text);
@@ -225,6 +232,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
         let normalized = normalize_paste(text);
         if self.state.mode() == UiMode::Question {
             self.state.insert_filter(&normalized);
+        } else if self.state.mode() == UiMode::AuthPrompt {
+            self.state
+                .auth_prompt_insert(&normalized.replace(['\n', '\t'], " "));
         } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(&normalized);
@@ -373,6 +383,22 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 UiKey::End => self.state.scroll_context_edge(true),
                 UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
                 _ => {}
+            }
+            return Ok(());
+        }
+        if self.state.mode() == UiMode::AuthPrompt {
+            match key {
+                UiKey::Escape => {
+                    if let Some(provider) = self.state.cancel_auth_prompt() {
+                        self.cancel_authentication(provider, None);
+                    }
+                }
+                UiKey::Enter => {
+                    if let Some(submission) = self.state.finish_auth_prompt_field() {
+                        self.complete_prompt_auth(submission);
+                    }
+                }
+                _ => self.state.auth_prompt_key(key),
             }
             return Ok(());
         }
@@ -569,6 +595,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     }
                 }
             }
+            UiMode::AuthPrompt => {}
             UiMode::ModelList => {
                 if let Some(model) = self.state.selected_model_choice() {
                     self.select_model(model);
@@ -648,44 +675,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
         {
             self.auth_task = None;
         }
-    }
-
-    fn cancel_active_authentication(&mut self) -> bool {
-        let Some((OperationScope::Provider(provider), kind)) =
-            self.state.provider_operation.clone()
-        else {
-            return false;
-        };
-        if !matches!(
-            kind,
-            ProviderOperationKind::Start | ProviderOperationKind::Complete
-        ) {
-            return false;
-        }
-        let Some((task_provider, task_kind, task)) = self.auth_task.take() else {
-            return false;
-        };
-        if task_provider != provider || task_kind != kind {
-            self.auth_task = Some((task_provider, task_kind, task));
-            return false;
-        }
-        task.abort();
-        self.state.finish_provider_operation(&provider, kind);
-        self.state.set_provider_operation(
-            provider.clone(),
-            ProviderOperationKind::CancelAuth,
-            None,
-        );
-        let core = self.core.clone();
-        let sender = self.operation_sender.clone();
-        tokio::spawn(async move {
-            let result = core
-                .cancel_authentication(&provider)
-                .await
-                .map_err(|error| error.to_string());
-            let _ = sender.send(ProviderOperationResult::CancelAuth(provider, result));
-        });
-        true
     }
 }
 

@@ -1,5 +1,5 @@
 /** Kimi provider process entry point: wires the provider adapter to the protocol SDK. */
-import { serve } from "@misy/provider-sdk";
+import { oauthCredentials, serve } from "@misy/provider-sdk";
 import { KimiProvider } from "./provider";
 
 const provider = new KimiProvider();
@@ -7,6 +7,7 @@ const provider = new KimiProvider();
 serve({
 	name: "Kimi",
 	requestFailureMessage: "Kimi provider request failed",
+	parseCredentials: oauthCredentials,
 	authStatus: (credentials) => provider.authStatus(credentials),
 	startAuth: (method) => provider.startAuth(method),
 	// Device flows intentionally ignore completion data; the SDK still validates its shape.

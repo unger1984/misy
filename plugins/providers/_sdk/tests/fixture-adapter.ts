@@ -7,11 +7,12 @@
  * `FIXTURE_SHUTDOWN_FILE` so tests can observe the EOF lifecycle.
  */
 import { writeFileSync } from "node:fs";
-import { serve } from "../src/index";
+import { oauthCredentials, serve } from "../src/index";
 
 serve({
 	name: "Fixture",
 	requestFailureMessage: "Fixture request failed",
+	parseCredentials: oauthCredentials,
 	authStatus: (credentials) => ({ authenticated: credentials !== undefined }),
 	startAuth: async (method) => await Promise.resolve({ kind: "none", method }),
 	completeAuth: async (session, completion) =>

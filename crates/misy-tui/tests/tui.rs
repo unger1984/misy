@@ -474,20 +474,87 @@ async fn no_auth_flow_marks_the_provider_authenticated_without_a_browser() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_auth_reports_unsupported_input_without_authenticating() {
+async fn prompt_auth_masks_the_secret_and_completes_without_using_the_composer() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-prompt")]);
     let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
 
     start_first_provider_auth(&mut client).await;
     wait_for(&mut client, |client| {
-        client.state().transcript().iter().any(
-            |row| matches!(row, TranscriptRow::Error(message) if message.contains("not supported")),
-        )
+        client.state().mode() == UiMode::AuthPrompt
+    })
+    .await;
+    client.paste_text("sk-secret\n12");
+    let rendered = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
+    assert!(rendered.iter().any(|line| line.contains("API key")));
+    assert!(rendered.iter().any(|line| line.contains("••••••••••••")));
+    assert!(!rendered.iter().any(|line| line.contains("sk-secret")));
+    assert!(client.state().composer_input().is_empty());
+
+    client.handle_key(UiKey::Enter).expect("submit credentials");
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    assert_eq!(client.state().picker_labels(), ["Validating credentials…"]);
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Log out"]
     })
     .await;
 
-    assert_eq!(client.state().picker_labels(), ["Authorize"]);
     assert!(client.browser().opened.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn escape_cancels_prompt_auth_and_discards_the_secret_buffer() {
+    let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "auth-prompt")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+
+    start_first_provider_auth(&mut client).await;
+    wait_for(&mut client, |client| {
+        client.state().mode() == UiMode::AuthPrompt
+    })
+    .await;
+    client.insert_text("never-render-after-cancel");
+    client
+        .handle_key(UiKey::Escape)
+        .expect("cancel prompt auth");
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    assert_eq!(
+        client.state().picker_labels(),
+        ["Cancelling authentication…"]
+    );
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Authorize"]
+    })
+    .await;
+    let rendered = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
+    assert!(
+        !rendered
+            .iter()
+            .any(|line| line.contains("never-render-after-cancel"))
+    );
+    assert_eq!(client.running_provider_count().await, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_auth_redacts_an_exact_secret_reflected_by_the_provider() {
+    let (_temporary, core) =
+        core_with_providers(&[("fixture", "Fixture AI", "auth-prompt-reflect")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+
+    start_first_provider_auth(&mut client).await;
+    wait_for(&mut client, |client| {
+        client.state().mode() == UiMode::AuthPrompt
+    })
+    .await;
+    client.insert_text("sk-reflected");
+    client.handle_key(UiKey::Enter).expect("submit credentials");
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Authorize"]
+    })
+    .await;
+
+    let transcript = format!("{:?}", client.state().transcript());
+    assert!(!transcript.contains("sk-reflected"));
+    assert!(transcript.contains("[redacted]"), "got {transcript}");
+    assert_eq!(client.state().picker_labels(), ["Authorize"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

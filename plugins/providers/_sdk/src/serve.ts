@@ -7,33 +7,37 @@
  * {@link ProviderAdapter}. Validation is strict on purpose: params cross a process boundary, so a
  * malformed request fails with a JSON-RPC error instead of a blind cast.
  */
-import { oauthCredentials, requireOauthCredentials } from "./credentials";
+import { requireCredentials } from "./credentials";
 import { type InputFrame, NdjsonFramer } from "./ndjson";
 import {
 	type ChatMessage,
 	type ChatRequest,
-	type Credentials,
+	type CredentialParser,
 	isImageAttachment,
 	isRecord,
 	type Json,
 	type Notify,
+	type OAuthCredentials,
+	type ProviderCredentials,
 	type ToolDefinition,
 } from "./types";
 
 /** Provider-specific seams the protocol dispatch delegates to. */
-export type ProviderAdapter = {
+export type ProviderAdapter<TCredentials extends ProviderCredentials = OAuthCredentials> = {
 	/** Display name used in validation and fallback error messages. */
 	readonly name: string;
 	/** Error text used when a handler throws a value that is not an Error. */
 	readonly requestFailureMessage: string;
+	/** Narrows the provider-owned credential object before any handler sees it. */
+	readonly parseCredentials: CredentialParser<TCredentials>;
 	/** Reports credential presence and expiry without a network request. */
-	authStatus(credentials: Credentials | undefined): unknown;
+	authStatus(credentials: TCredentials | undefined): unknown;
 	/** Starts the named authentication flow. */
 	startAuth(method: string): Promise<unknown>;
 	/** Completes an authentication attempt; `session` is the opaque `auth.start` marker. */
 	completeAuth(session: unknown, completion: Record<string, Json>): Promise<unknown>;
 	/** Refreshes opaque credentials on explicit core request. */
-	refreshAuth(credentials: Credentials): Promise<unknown>;
+	refreshAuth(credentials: TCredentials): Promise<unknown>;
 	/** Drops local authentication state; the core owns persisted credentials. */
 	logout(): unknown;
 	/**
@@ -42,9 +46,9 @@ export type ProviderAdapter = {
 	 * Credentials are optional at the protocol layer; an adapter that needs them must reject
 	 * undefined itself, because some providers can serve a bundled catalog unauthenticated.
 	 */
-	listModels(credentials: Credentials | undefined): Promise<unknown>;
+	listModels(credentials: TCredentials | undefined): Promise<unknown>;
 	/** Returns the normalized usage capability version 1 report. */
-	usage(credentials: Credentials): Promise<unknown>;
+	usage(credentials: TCredentials): Promise<unknown>;
 	/**
 	 * Streams one chat request and resolves to the JSON-RPC result.
 	 *
@@ -52,7 +56,7 @@ export type ProviderAdapter = {
 	 * transport passes it through untouched for the core to persist.
 	 */
 	chat(
-		request: ChatRequest,
+		request: ChatRequest<TCredentials>,
 		requestId: number,
 		notify: Notify,
 		signal: AbortSignal,
@@ -62,14 +66,16 @@ export type ProviderAdapter = {
 };
 
 /** Starts the NDJSON protocol loop for one provider adapter and runs it until stdin closes. */
-export function serve(adapter: ProviderAdapter): void {
+export function serve<TCredentials extends ProviderCredentials>(
+	adapter: ProviderAdapter<TCredentials>,
+): void {
 	void new ProtocolServer(adapter).run();
 }
 
-class ProtocolServer {
+class ProtocolServer<TCredentials extends ProviderCredentials> {
 	private readonly chats = new Map<number, AbortController>();
 
-	constructor(private readonly adapter: ProviderAdapter) {}
+	constructor(private readonly adapter: ProviderAdapter<TCredentials>) {}
 
 	/** Reads NDJSON frames until EOF, then aborts live chats and drains in-flight replies. */
 	async run(): Promise<void> {
@@ -146,7 +152,7 @@ class ProtocolServer {
 	private async dispatch(method: string, id: Json, params: Record<string, Json>): Promise<unknown> {
 		switch (method) {
 			case "auth.status":
-				return this.adapter.authStatus(oauthCredentials(params));
+				return this.adapter.authStatus(this.parseCredentials(params));
 			case "auth.start":
 				return await this.adapter.startAuth(authMethod(params));
 			case "auth.complete":
@@ -156,7 +162,7 @@ class ProtocolServer {
 			case "auth.logout":
 				return this.adapter.logout();
 			case "models.list":
-				return await this.adapter.listModels(oauthCredentials(params));
+				return await this.adapter.listModels(this.parseCredentials(params));
 			case "usage.get":
 				return await this.adapter.usage(this.requiredCredentials(params));
 			case "chat.start":
@@ -167,8 +173,12 @@ class ProtocolServer {
 		}
 	}
 
-	private requiredCredentials(params: Record<string, Json>): Credentials {
-		return requireOauthCredentials(oauthCredentials(params), this.adapter.name);
+	private parseCredentials(params: Record<string, Json>): TCredentials | undefined {
+		return this.adapter.parseCredentials(params["credentials"]);
+	}
+
+	private requiredCredentials(params: Record<string, Json>): TCredentials {
+		return requireCredentials(this.parseCredentials(params), this.adapter.name);
 	}
 
 	private async chat(id: Json, params: Record<string, Json>): Promise<undefined> {
@@ -188,7 +198,10 @@ class ProtocolServer {
 	}
 }
 
-function chatRequest(params: Record<string, Json>, credentials: Credentials): ChatRequest {
+function chatRequest<TCredentials extends ProviderCredentials>(
+	params: Record<string, Json>,
+	credentials: TCredentials,
+): ChatRequest<TCredentials> {
 	const modelId = params["model_id"];
 	if (typeof modelId !== "string" || modelId.trim().length === 0) {
 		throw new Error("chat.start requires a non-empty model_id");

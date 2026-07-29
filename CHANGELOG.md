@@ -14,6 +14,10 @@
   preflight before filesystem side effects.
 - Added a scrollable `/context` popup backed by a content-free core report for model window,
   estimated prompt categories, active instruction sources, decoded image bytes, and warnings.
+- Added the bundled AnyModel provider with masked API-key authentication, a dynamic namespaced
+  model catalog, OpenAI-compatible streaming, tool calls, and image input.
+- Added generic protocol v2 prompt forms to the TUI with secret masking, editing, paste,
+  cancellation, and transient credential buffers.
 - Added independent synchronous and background child agents with inherited context, correlated
   provider streams, scoped command ownership, addressable messaging, bounded transcripts, and a
   pull-based completion mailbox.

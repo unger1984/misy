@@ -55,8 +55,9 @@ Read this document before making a new architecture or user-interaction choice.
   Codex contributes only typed request identity and snapshot recovery. In the TUI, a pending
   question replaces the composer bottom slot while the current root todo snapshot stays pinned
   directly above it; questions are not modal popups. The core owns both tools; question capability
-  version 1 is immutable for the core lifetime, and three dismissals suppress further dialogs for
-  the same turn owner.
+  version 1 is immutable for the core lifetime. One question submits immediately; multiple
+  questions use a separate review-and-submit tab. Three dismissals suppress further dialogs for the
+  same turn owner.
 - Misy always reads the optional global `~/.misy/AGENTS.md` and project-root `AGENTS.md` for a new
   root conversation. Nested `AGENTS.md` files are discovered only on the ancestor chain of an
   actual filesystem target, cached per main/child session, and applied before tool side effects.

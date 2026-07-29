@@ -275,7 +275,7 @@ fn todo_update_renders_the_ordered_semantic_list() {
     assert_eq!(
         rendered,
         [
-            "● Update todo list",
+            "● Used TodoList",
             "  └ - [done] Inspect",
             "    - [in_progress] Implement"
         ]
@@ -302,6 +302,7 @@ fn answered_question_renders_in_original_question_order() {
         ),
     ];
     let rendered = text(&tool_blocks(&rows, 100, false, "Ctrl+O")[&0]);
+    assert_eq!(rendered[0], "● Used AskUserQuestion");
     assert_eq!(rendered[1], "  └ Second lexically: B");
     assert_eq!(rendered[2], "    First lexically: A");
 }

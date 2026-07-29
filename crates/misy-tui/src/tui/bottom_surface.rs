@@ -23,6 +23,7 @@ pub(super) fn todo_height(state: &UiState, available: u16) -> u16 {
     }
     u16::try_from(state.snapshot.todos.len())
         .unwrap_or(u16::MAX)
+        .saturating_add(1)
         .min(available)
 }
 
@@ -31,7 +32,10 @@ pub(super) fn question_height(state: &UiState, available: u16) -> u16 {
         return 0;
     };
     let fixed_rows = 4_u16.saturating_add(u16::from(question.tabs.len() > 1));
-    let rows = u16::try_from(question.rows.len()).unwrap_or(u16::MAX);
+    let rows = u16::try_from(question.rows.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(u16::from(question.submit_page))
+        .saturating_add(u16::from(question.submit_page && !question.submit_ready));
     fixed_rows.saturating_add(rows).min(available)
 }
 
@@ -51,13 +55,21 @@ pub(super) fn render_todos(frame: &mut ratatui::Frame, area: Rect, state: &UiSta
     if area.is_empty() {
         return;
     }
-    let lines = state
+    let done = state
         .snapshot
         .todos
         .iter()
-        .take(usize::from(area.height))
-        .map(|todo| todo_line(todo, area.width))
-        .collect::<Vec<_>>();
+        .filter(|todo| todo.status == TodoStatus::Done)
+        .count();
+    let mut lines = vec![todo_header(done, state.snapshot.todos.len(), area.width)];
+    lines.extend(
+        state
+            .snapshot
+            .todos
+            .iter()
+            .take(usize::from(area.height.saturating_sub(1)))
+            .map(|todo| todo_line(todo, area.width)),
+    );
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -100,13 +112,17 @@ pub(super) fn render_question_surface(
             layout[1],
         );
     }
-    let label_width = modal_label_width(&question.rows, inner.width);
-    let lines = question
-        .rows
-        .iter()
-        .take(usize::from(rows_height))
-        .map(|row| list_line(row, inner.width, label_width))
-        .collect::<Vec<_>>();
+    let lines = if question.submit_page {
+        review_lines(question, inner.width, rows_height)
+    } else {
+        let label_width = modal_label_width(&question.rows, inner.width);
+        question
+            .rows
+            .iter()
+            .take(usize::from(rows_height))
+            .map(|row| list_line(row, inner.width, label_width))
+            .collect::<Vec<_>>()
+    };
     frame.render_widget(Paragraph::new(Text::from(lines)), layout[2]);
     if inner.height > 1 {
         frame.render_widget(
@@ -134,6 +150,54 @@ fn todo_line(todo: &misy_core::TodoItem, width: u16) -> Line<'static> {
         Span::styled(marker, marker_style),
         Span::styled(title, text_style),
     ])
+}
+
+fn todo_header(done: usize, total: usize, width: u16) -> Line<'static> {
+    Line::styled(
+        truncate_to_width(&format!("☑ {done}/{total} Tasks"), usize::from(width)),
+        style::accent(),
+    )
+}
+
+fn review_lines(
+    question: &InlineQuestionPresentation,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    if height == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if !question.submit_ready {
+        lines.push(Line::styled(
+            truncate_to_width("Some questions are still unanswered.", usize::from(width)),
+            style::warning(),
+        ));
+    }
+    let summary_rows = usize::from(height)
+        .saturating_sub(lines.len())
+        .saturating_sub(1);
+    lines.extend(question.rows.iter().take(summary_rows).map(|row| {
+        let answer = row.description.as_deref().unwrap_or("Not answered");
+        let text = format!("{}. {}: {answer}", row.number, row.label);
+        Line::styled(
+            truncate_to_width(&text, usize::from(width)),
+            if row.current {
+                style::muted()
+            } else {
+                style::warning()
+            },
+        )
+    }));
+    lines.push(Line::styled(
+        truncate_to_width("› Submit", usize::from(width)),
+        if question.submit_ready {
+            style::accent()
+        } else {
+            style::muted()
+        },
+    ));
+    lines
 }
 
 fn question_tabs(tabs: &[(String, bool)], width: u16) -> Line<'static> {
@@ -203,7 +267,8 @@ mod tests {
 
     #[test]
     fn long_question_header_remains_visible_as_a_truncated_tab() {
-        let line = question_tabs(&[("Подробный способ проверки".to_owned(), true)], 14);
+        let tabs = [("Подробный способ проверки".to_owned(), true)];
+        let line = question_tabs(&tabs, 14);
         let rendered = line
             .spans
             .iter()

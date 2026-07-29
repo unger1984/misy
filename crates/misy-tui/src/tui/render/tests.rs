@@ -29,6 +29,16 @@ fn question_snapshot() -> misy_core::CoreSnapshot {
     snapshot
 }
 
+fn multi_question_snapshot() -> misy_core::CoreSnapshot {
+    let mut snapshot = question_snapshot();
+    let second = &snapshot.pending_questions[0].questions[0];
+    let mut second = second.clone();
+    second.question = "Which demonstration?".to_owned();
+    second.header = "Demo".to_owned();
+    snapshot.pending_questions[0].questions.push(second);
+    snapshot
+}
+
 fn rendered_screen(state: &UiState, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -103,6 +113,7 @@ fn question_replaces_the_composer_and_keeps_sticky_todos_visible() {
     let screen = lines.join("\n");
     assert!(screen.contains("Which path should Misy take?"));
     assert!(!screen.contains("hidden draft"));
+    assert!(screen.contains("  ☑ 1/3 Tasks"));
     for title in ["Plan the change", "Render the question", "Keep the draft"] {
         let line = lines
             .iter()
@@ -110,6 +121,19 @@ fn question_replaces_the_composer_and_keeps_sticky_todos_visible() {
             .expect("todo row");
         assert!(line.starts_with("  "), "{line:?}");
     }
+}
+
+#[test]
+fn multiple_questions_end_on_a_separate_review_and_submit_tab() {
+    let mut state = UiState::default();
+    state.apply_snapshot(multi_question_snapshot());
+    assert!(state.confirm_question().is_none());
+    assert!(state.confirm_question().is_none());
+
+    assert_eq!(question_height(&state, 20), 8);
+    let screen = rendered_screen(&state, 80, 16);
+    assert!(screen.contains("Review your answers before submit"));
+    assert!(screen.contains("Submit"));
 }
 
 #[test]
@@ -156,4 +180,12 @@ fn clearing_the_todo_snapshot_hides_the_pinned_rows() {
     let screen = rendered_screen(&state, 80, 16);
     assert!(!screen.contains("Plan the change"));
     assert_eq!(super::super::bottom_surface::todo_height(&state, 12), 0);
+}
+
+#[test]
+fn todo_height_includes_the_kimi_style_header() {
+    let mut state = UiState::default();
+    state.apply_snapshot(question_snapshot());
+
+    assert_eq!(super::super::bottom_surface::todo_height(&state, 12), 4);
 }

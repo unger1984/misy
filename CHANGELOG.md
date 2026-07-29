@@ -47,7 +47,10 @@
 
 ### Fixed
 
-- Aligned the live generation indicator and sticky todo rows with the transcript content inset.
+- Added a Kimi-style progress header to sticky todos and aligned them and the live generation
+  indicator with the transcript content inset.
+- Added a separate review-and-submit tab for multi-question requests while preserving immediate
+  submission for a single question, and compacted completed interactive-tool headers to `Used`.
 - Translated Misy history into strict OpenAI Chat Completions messages for AnyModel instead of
   forwarding internal metadata and tool records that upstream rejects with HTTP 400.
 - Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal

@@ -92,7 +92,7 @@ fn call_block(
     };
     let mut lines = vec![Line::from(vec![
         ratatui::text::Span::styled(format!("{marker} "), marker_style),
-        ratatui::text::Span::raw(friendly_header(name, arguments, width)),
+        ratatui::text::Span::raw(tool_header(name, arguments, result, width)),
     ])];
     let Some(TranscriptRow::ToolResult {
         is_error, content, ..
@@ -103,6 +103,28 @@ fn call_block(
     let output = tool_output(name, arguments, *is_error, content.as_deref());
     lines.extend(bounded_output(&output, width, expanded, expand_hint));
     lines
+}
+
+fn tool_header(
+    name: &str,
+    arguments: Option<&str>,
+    result: Option<&TranscriptRow>,
+    width: u16,
+) -> String {
+    if matches!(
+        result,
+        Some(TranscriptRow::ToolResult {
+            is_error: false,
+            ..
+        })
+    ) {
+        match name {
+            "SetTodoList" => return "Used TodoList".to_owned(),
+            "AskUserQuestion" => return "Used AskUserQuestion".to_owned(),
+            _ => {}
+        }
+    }
+    friendly_header(name, arguments, width)
 }
 
 fn orphan_result_block(

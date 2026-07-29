@@ -138,12 +138,16 @@ model, authentication, session, and tool orchestration remain in the core.
   core operation. The current root `SetTodoList` snapshot remains pinned immediately above the
   composer or question surface until cleared: pending items use a muted empty circle, in-progress
   items use an accented dotted circle and emphasis, and done items use a green check and
-  strikethrough. Long question-tab headers are truncated rather than rejected. The generation busy
-  row is hidden while a question is pending, so its `Esc` hint cannot conflict with question
-  dismissal. Both the generation row and sticky todos align with the transcript content inset. The
-  question viewport keeps its selected row visible on short terminals. Completed
+  strikethrough. A Kimi-style `done/total Tasks` header identifies the sticky list. Long
+  question-tab headers are truncated rather than rejected. The generation busy row is hidden while
+  a question is pending, so its `Esc` hint cannot conflict with question dismissal. Both the
+  generation row and sticky todos align with the transcript content inset. The question viewport
+  keeps its selected row visible on short terminals. A single question submits immediately;
+  requests with multiple questions advance to a separate `Submit` tab that reviews every answer
+  before confirmation. Completed
   `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
-  JSON, including after session replay.
+  JSON, including after session replay, and use compact `Used TodoList` and `Used AskUserQuestion`
+  headers.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting
   full-width row inside that transcript area; assistant segments have one leading marker, service
   messages remain dim, and failures have a red marker. Tool calls use friendly built-in names with

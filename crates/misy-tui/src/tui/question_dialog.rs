@@ -1,6 +1,6 @@
 //! Deterministic state for one core-owned structured question request.
 
-use super::{list::ListRowDisplay, state::ModalPresentation};
+use super::list::ListRowDisplay;
 use misy_core::{QuestionRequest, QuestionRequestId, QuestionResponse};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,6 +33,15 @@ pub(super) struct QuestionDialog {
     request: QuestionRequest,
     active: usize,
     pages: Vec<QuestionPage>,
+}
+
+/// Render data for the question surface that occupies the composer slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct InlineQuestionPresentation {
+    pub(super) title: String,
+    pub(super) rows: Vec<ListRowDisplay>,
+    pub(super) tabs: Vec<(String, bool)>,
+    pub(super) help_hint: String,
 }
 
 impl QuestionDialog {
@@ -173,7 +182,7 @@ impl QuestionDialog {
         self.finish_or_advance()
     }
 
-    pub(super) fn presentation(&self, visible_rows: usize) -> ModalPresentation {
+    pub(super) fn inline_presentation(&self, visible_rows: usize) -> InlineQuestionPresentation {
         let question = self.question();
         let page = self.page();
         let mut rows = question
@@ -212,11 +221,9 @@ impl QuestionDialog {
             .saturating_sub(visible_rows.saturating_sub(1))
             .min(rows.len().saturating_sub(visible_rows));
         let rows = rows.into_iter().skip(start).take(visible_rows).collect();
-        ModalPresentation {
+        InlineQuestionPresentation {
             title: question.question.clone(),
             rows,
-            operation: None,
-            back_hint: false,
             tabs: self
                 .request
                 .questions
@@ -236,14 +243,13 @@ impl QuestionDialog {
                     (label, index == self.active)
                 })
                 .collect(),
-            loading: false,
-            help_hint: Some(if page.editing_other {
+            help_hint: if page.editing_other {
                 "enter save  esc options".to_owned()
             } else if question.multi_select {
                 "space toggle  enter continue  esc dismiss".to_owned()
             } else {
                 "enter choose  esc dismiss".to_owned()
-            }),
+            },
         }
     }
 
@@ -407,7 +413,7 @@ mod tests {
         let mut dialog = QuestionDialog::new(request);
         dialog.move_up();
 
-        let rows = dialog.presentation(2).rows;
+        let rows = dialog.inline_presentation(2).rows;
         assert_eq!(rows.len(), 2);
         assert!(
             rows.iter()

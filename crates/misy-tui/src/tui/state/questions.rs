@@ -1,7 +1,7 @@
 //! Snapshot reconciliation and client actions for core-owned questions.
 
 use super::{ActiveView, UiState};
-use crate::tui::question_dialog::QuestionDialog;
+use crate::tui::question_dialog::{InlineQuestionPresentation, QuestionDialog};
 use misy_core::{CoreSnapshot, QuestionRequestId, QuestionResponse};
 use std::time::Instant;
 
@@ -50,6 +50,16 @@ impl UiState {
 
     pub(in crate::tui) fn question_editing(&self) -> bool {
         matches!(&self.view, Some(ActiveView::Question(view)) if view.editing_other())
+    }
+
+    pub(in crate::tui) fn question_presentation(
+        &self,
+        visible_rows: usize,
+    ) -> Option<InlineQuestionPresentation> {
+        match &self.view {
+            Some(ActiveView::Question(view)) => Some(view.inline_presentation(visible_rows)),
+            _ => None,
+        }
     }
 
     pub(in crate::tui) fn confirm_question(&mut self) -> Option<QuestionResponse> {

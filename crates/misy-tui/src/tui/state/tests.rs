@@ -49,24 +49,33 @@ fn question_request(id: u64, text: &str) -> misy_core::QuestionRequest {
 }
 
 #[test]
-fn question_snapshot_recovers_requests_in_fifo_order() {
+fn question_snapshot_recovers_requests_in_fifo_order_without_a_modal() {
     let mut state = UiState::default();
+    state.composer.insert_str("saved draft");
     let first = question_request(1, "First question");
     let second = question_request(2, "Second question");
     let mut snapshot = state.snapshot.clone();
     snapshot.pending_questions = vec![first, second.clone()];
     state.apply_snapshot(snapshot);
     assert_eq!(state.mode(), crate::tui::UiMode::Question);
+    assert!(state.modal_presentation(8).is_none());
     assert_eq!(
-        state.modal_presentation(8).expect("dialog").title,
+        state
+            .question_presentation(8)
+            .expect("question surface")
+            .title,
         "First question"
     );
+    assert_eq!(state.composer_input(), "saved draft");
 
     let mut snapshot = state.snapshot.clone();
     snapshot.pending_questions = vec![second];
     state.apply_snapshot(snapshot);
     assert_eq!(
-        state.modal_presentation(8).expect("dialog").title,
+        state
+            .question_presentation(8)
+            .expect("question surface")
+            .title,
         "Second question"
     );
 }

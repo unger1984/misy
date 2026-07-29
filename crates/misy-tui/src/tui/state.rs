@@ -266,7 +266,7 @@ impl UiState {
                 .map(activities::output_labels)
                 .unwrap_or_else(|| vec!["Loading output…".to_owned()]),
             Some(ActiveView::Question(view)) => view
-                .presentation(usize::MAX)
+                .inline_presentation(usize::MAX)
                 .rows
                 .into_iter()
                 .map(|row| row.label)
@@ -393,7 +393,7 @@ impl UiState {
                 help_hint: Some("enter choose  esc keep agent state".to_owned()),
             }),
             Some(ActiveView::ActivityLog(_)) => None,
-            Some(ActiveView::Question(view)) => Some(view.presentation(visible_rows)),
+            Some(ActiveView::Question(_)) => None,
             Some(ActiveView::Context(_)) => None,
             Some(ActiveView::ProviderSettings {
                 display_name,

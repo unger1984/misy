@@ -129,12 +129,16 @@ model, authentication, session, and tool orchestration remain in the core.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.
-- A pending `AskUserQuestion` request opens a dedicated centered dialog without changing the
-  composer draft or attachments. Requests recover from `CoreSnapshot` and appear FIFO. Tabs retain
-  selection and custom text; arrows and digits select rows, `Left`/`Right`/`Tab` switch questions,
-  `Space` toggles multi-select choices, and `Enter` advances or submits once every question has an
-  answer. The synthetic `Other` row owns an inline editor. `Esc` leaves that editor first and
-  otherwise dismisses only the current request through the typed core operation. Completed
+- A pending `AskUserQuestion` request replaces the composer in the bottom slot without changing its
+  hidden draft or attachments; it is not a centered popup. Requests recover from `CoreSnapshot` and
+  appear FIFO. Tabs retain selection and custom text; arrows and digits select rows,
+  `Left`/`Right`/`Tab` switch questions, `Space` toggles multi-select choices, and `Enter` advances
+  or submits once every question has an answer. The synthetic `Other` row owns an inline editor.
+  `Esc` leaves that editor first and otherwise dismisses only the current request through the typed
+  core operation. The current root `SetTodoList` snapshot remains pinned immediately above the
+  composer or question surface until cleared: pending items use a muted empty circle, in-progress
+  items use an accented dotted circle and emphasis, and done items use a green check and
+  strikethrough. The question viewport keeps its selected row visible on short terminals. Completed
   `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
   JSON, including after session replay.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting

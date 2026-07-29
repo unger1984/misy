@@ -137,7 +137,8 @@ fn route_mouse(
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             selection.begin(position);
-            *composer_click_started = composer_area.contains(position);
+            *composer_click_started = client.state().mode() == super::action::UiMode::Input
+                && composer_area.contains(position);
             None
         }
         MouseEventKind::Drag(MouseButton::Left) => {

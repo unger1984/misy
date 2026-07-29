@@ -4,6 +4,7 @@ mod action;
 mod activity_picker;
 mod auth_flow;
 mod auth_prompt;
+mod bottom_surface;
 mod browser;
 mod client;
 mod clipboard;

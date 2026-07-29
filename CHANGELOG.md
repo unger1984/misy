@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- Rendered pending Kimi-style questions inline in the composer slot, preserving hidden drafts and
+  attachments while keeping the current todo snapshot visible with status-specific markers.
 - Kept active conversations usable after session-storage failures, tolerated malformed trailing
   JSONL records, and rejected missing, ambiguous, incompatible, or active-work resume attempts.
 - Prevented foreground commands from being terminated when they transition to background while

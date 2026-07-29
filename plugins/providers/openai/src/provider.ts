@@ -1,12 +1,14 @@
 /** Public OpenAI provider facade that joins OAuth, catalog, and Responses translation. */
 
-import { authHeaders, fetchWithTimeout, OAuthClient, refreshIfNeeded } from "./auth";
+import { fetchWithTimeout } from "@misy/provider-sdk";
+import { authHeaders, OAuthClient, refreshIfNeeded } from "./auth";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { listModels, type Model } from "./model-catalog";
 import { createResponsesRequest, notifyResponseEvents } from "./responses-wire";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
+import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
 
-/** Implements Misy protocol v1 against the ChatGPT OAuth Responses backend. */
+/** Implements Misy protocol v2 against the ChatGPT OAuth Responses backend. */
 export class OpenAiProvider {
 	private readonly oauth: OAuthClient;
 	private readonly config: ProviderConfig;
@@ -49,9 +51,28 @@ export class OpenAiProvider {
 		return {};
 	}
 
-	/** Returns the bundled catalog without making an HTTP request. */
-	listModels(): Model[] {
-		return listModels();
+	/** Lists account-scoped ChatGPT Codex models, falling back to the bundled catalog on failure. */
+	async listModels(credentials: Credentials): Promise<Model[]> {
+		return await listModels(this.config, credentials);
+	}
+
+	/** Returns normalized ChatGPT subscription limits plus credentials rotated by a silent refresh. */
+	async usage(
+		credentials: Credentials,
+		signal?: AbortSignal,
+	): Promise<UsageReport & { credentials?: Credentials }> {
+		let current = await refreshIfNeeded(this.oauth, credentials);
+		let report: UsageReport;
+		try {
+			report = await fetchUsage(this.config, current, signal);
+		} catch (cause) {
+			if (!(cause instanceof UsageRequestError) || cause.status !== 401) throw cause;
+			current = await this.oauth.refresh(current);
+			report = await fetchUsage(this.config, current, signal);
+		}
+		// Token rotation invalidates the stored refresh token, so refreshed credentials
+		// must travel back to the core instead of being dropped with the request.
+		return current === credentials ? report : { ...report, credentials: current };
 	}
 
 	/** Streams a Responses request, refreshing once before expiry or after one 401 retry. */
@@ -60,7 +81,7 @@ export class OpenAiProvider {
 		requestId: number,
 		notify: Notify,
 		signal?: AbortSignal,
-	): Promise<{ metadata: Json }> {
+	): Promise<{ metadata: Json; credentials?: Credentials }> {
 		try {
 			let credentials = await refreshIfNeeded(this.oauth, request.credentials);
 			let response = await this.responsesRequest(request, credentials, signal);
@@ -72,7 +93,9 @@ export class OpenAiProvider {
 			if (!response.body) {
 				throw new Error("OpenAI Responses stream did not include a body");
 			}
-			return { metadata: await notifyResponseEvents(response.body, requestId, notify) };
+			const metadata = await notifyResponseEvents(response.body, requestId, notify);
+			// Same rotation contract as usage(): the core persists replacement credentials.
+			return credentials === request.credentials ? { metadata } : { metadata, credentials };
 		} catch (cause) {
 			if (signal?.aborted) {
 				return { metadata: { completed: false, cancelled: true } };

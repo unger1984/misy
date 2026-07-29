@@ -3,6 +3,7 @@ import { OpenAiProvider } from "../src/provider";
 import type { Credentials } from "../src/types";
 
 type CapturedRequest = {
+	url: string;
 	pathname: string;
 	headers: Headers;
 	body: unknown;
@@ -27,6 +28,7 @@ function fakeServer(handler: (request: CapturedRequest) => Response | Promise<Re
 						? Object.fromEntries(await request.formData())
 						: undefined;
 			return await handler({
+				url: request.url,
 				pathname: new URL(request.url).pathname,
 				headers: request.headers,
 				body,
@@ -83,9 +85,106 @@ test("exchanges OAuth id_token identity and persists its authentication method",
 	});
 });
 
-test("uses the local catalog without a network request", () => {
-	const provider = new OpenAiProvider();
-	expect(provider.listModels().map((model) => model.id)).toEqual([
+test("drops unexpected token response fields from persisted credentials", async () => {
+	const idToken = jwt("workspace");
+	const issuer = fakeServer(({ pathname }) =>
+		pathname === "/oauth/token"
+			? Response.json({
+					access_token: "access",
+					refresh_token: "refresh",
+					id_token: idToken,
+					expires_in: 3600,
+					scope: "openid profile",
+					unexpected: { nested: true },
+				})
+			: new Response("not found", { status: 404 }),
+	);
+	const provider = new OpenAiProvider({ issuer, clientId: "test-client", codexBaseUrl: issuer });
+
+	const started = await provider.startAuth();
+	const completed = await provider.completeAuth(started.session, { code: "manual" });
+
+	expect(completed.credentials).toEqual({
+		access_token: "access",
+		refresh_token: "refresh",
+		id_token: idToken,
+		chatgpt_account_id: "workspace",
+		type: "oauth",
+		expires_at: expect.any(Number),
+	});
+});
+
+test("discovers models with headers, ordering, reasoning, and contexts", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return Response.json({
+			models: [
+				{ slug: "zeta", display_name: "Zeta", priority: 2, context_window: 16_000 },
+				{ slug: "gpt-5.6-codex", priority: 1, default_reasoning_level: "medium" },
+				{ id: "alpha", priority: 1, supported_reasoning_levels: ["low"] },
+				{ slug: "hidden", visibility: "hidden", priority: 0 },
+				{ slug: "hide", visibility: "hide", priority: 0 },
+			],
+		});
+	});
+	const provider = new OpenAiProvider({
+		issuer: base,
+		codexBaseUrl: base,
+		clientVersion: "0.144.1",
+		originator: "test-originator",
+	});
+
+	const models = await provider.listModels(credentials());
+
+	expect(received?.pathname).toBe("/codex/models");
+	expect(new URL(received?.url ?? base).searchParams.get("client_version")).toBe("0.144.1");
+	expect(received?.headers.get("authorization")).toBe("Bearer access");
+	expect(received?.headers.get("chatgpt-account-id")).toBe("account-123");
+	expect(received?.headers.get("openai-beta")).toBe("responses=experimental");
+	expect(received?.headers.get("originator")).toBe("test-originator");
+	expect(received?.headers.get("version")).toBe("0.144.1");
+	expect(received?.headers.get("accept")).toBe("application/json");
+	expect(models).toEqual([
+		{ id: "alpha", display_name: "alpha", context_window: 272_000, reasoning: true },
+		{
+			id: "gpt-5.6-codex",
+			display_name: "gpt-5.6-codex",
+			context_window: 372_000,
+			reasoning: true,
+		},
+		{ id: "zeta", display_name: "Zeta", context_window: 16_000, reasoning: false },
+	]);
+});
+
+test("retries model discovery through the compatibility path", async () => {
+	const paths: string[] = [];
+	const base = fakeServer((request) => {
+		paths.push(request.pathname);
+		if (request.pathname === "/codex/models") return new Response("not found", { status: 404 });
+		return Response.json({ data: [{ id: "fallback-route", context_window: 48_000 }] });
+	});
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+
+	const models = await provider.listModels(credentials());
+
+	expect(paths).toEqual(["/codex/models", "/models"]);
+	expect(models).toEqual([
+		{
+			id: "fallback-route",
+			display_name: "fallback-route",
+			context_window: 48_000,
+			reasoning: false,
+		},
+	]);
+});
+
+test("returns bundled models when model discovery is unavailable", async () => {
+	const provider = new OpenAiProvider({ codexBaseUrl: "http://127.0.0.1:1" });
+
+	const models = await provider.listModels(credentials());
+
+	expect(models.map((model) => model.id)).toEqual([
 		"gpt-5.6-terra",
 		"gpt-5.6-sol",
 		"gpt-5.6-luna",
@@ -94,9 +193,52 @@ test("uses the local catalog without a network request", () => {
 		"gpt-5.4-mini",
 		"gpt-5.3-codex-spark",
 	]);
-	expect(provider.listModels().map((model) => model.context_window)).toEqual([
-		372_000, 372_000, 372_000, 272_000, 272_000, 272_000, 128_000,
-	]);
+});
+
+test("normalizes ChatGPT subscription usage", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return Response.json({
+			rate_limit: {
+				primary_window: {
+					used_percent: 42,
+					limit_window_seconds: 18_000,
+					reset_at: 1_795_018_000,
+				},
+			},
+		});
+	});
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials(),
+	);
+
+	expect(received?.pathname).toBe("/wham/usage");
+	expect(received?.headers.get("chatgpt-account-id")).toBe("account-123");
+	expect(report.limits[0]).toMatchObject({
+		id: "primary",
+		amount: { used: 42, limit: 100, remaining: 58, unit: "percent" },
+		window: { duration_ms: 18_000_000, resets_at: 1_795_018_000_000 },
+	});
+});
+
+test("refreshes once after a usage 401", async () => {
+	let usageCalls = 0;
+	let authorization = "";
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		usageCalls += 1;
+		authorization = request.headers.get("authorization") ?? "";
+		return usageCalls === 1
+			? new Response("unauthorized", { status: 401 })
+			: Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+	});
+	await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(credentials());
+
+	expect(usageCalls).toBe(2);
+	expect(authorization).toBe("Bearer fresh");
 });
 
 test("sends account identity and complete subscription request fields", async () => {
@@ -330,4 +472,96 @@ test("expires abandoned OAuth and frees its callback port", async () => {
 
 	const retried = await provider.startAuth();
 	await provider.completeAuth(retried.session, { code: "manual" });
+});
+
+test("returns rotated credentials when usage silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		return Response.json({ rate_limit: { primary_window: { used_percent: 10 } } });
+	});
+
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials({ expires_at: 0 }),
+	);
+
+	expect(report.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when usage does not refresh", async () => {
+	const base = fakeServer(() =>
+		Response.json({ rate_limit: { primary_window: { used_percent: 10 } } }),
+	);
+
+	const report = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).usage(
+		credentials(),
+	);
+
+	expect(report).not.toHaveProperty("credentials");
+});
+
+test("returns rotated credentials when a stream silently refreshes", async () => {
+	const base = fakeServer((request) => {
+		if (request.pathname === "/oauth/token") {
+			return Response.json({ access_token: "fresh", refresh_token: "rotated" });
+		}
+		return new Response("event: response.completed\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+
+	const result = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{
+			model_id: "gpt-5",
+			messages: [],
+			tools: [],
+			credentials: credentials({ expires_at: 0 }),
+		},
+		17,
+		() => {},
+	);
+
+	expect(result.credentials).toMatchObject({ access_token: "fresh", refresh_token: "rotated" });
+});
+
+test("omits credentials when a stream does not refresh", async () => {
+	const base = fakeServer(
+		() =>
+			new Response("event: response.completed\ndata: {}\n\n", {
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+
+	const result = await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{ model_id: "gpt-5", messages: [], tools: [], credentials: credentials() },
+		18,
+		() => {},
+	);
+
+	expect(result).not.toHaveProperty("credentials");
+});
+
+test("fails a stream cut off mid-event without leaking a partial delta", async () => {
+	const base = fakeServer(
+		() =>
+			new Response(
+				'event: response.output_text.delta\ndata: {"delta":"hello"}\n\n' +
+					'event: response.output_text.delta\ndata: {"delta":"hel',
+				{ headers: { "content-type": "text/event-stream" } },
+			),
+	);
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+	const notifications: Array<Record<string, unknown>> = [];
+	await expect(
+		provider.streamChat(
+			{ model_id: "gpt-5.5", messages: [], tools: [], credentials: credentials() },
+			19,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow("OpenAI Responses stream ended mid-event");
+	expect(notifications).toEqual([
+		{ method: "text_delta", request_id: 19, delta: "hello" },
+		{ method: "failed", request_id: 19, message: "OpenAI Responses stream ended mid-event" },
+	]);
 });

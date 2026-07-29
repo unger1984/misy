@@ -1,0 +1,28 @@
+[package]
+name = "misy-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+atomicwrites.workspace = true
+base64.workspace = true
+command-group.workspace = true
+jsonschema.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+
+[features]
+# Exposes crate internals to integration tests; never enabled for production clients.
+test-support = []
+
+[dev-dependencies]
+# Integration tests link the crate with its internals visible, like Cargo's documented
+# self-dependency pattern for feature-gated test utilities.
+misy-core = { path = ".", features = ["test-support"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

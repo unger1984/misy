@@ -3,3 +3,4 @@
 .references/
 .vscode/
 target/
+node_modules/

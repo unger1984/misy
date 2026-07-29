@@ -27,7 +27,8 @@ Rules are binding. Where a rule is a judgment call rather than an absolute, it s
 
 ## Language-Specific Rules
 
-- [Rust Code Style](code-style-rust.md) — the core, the CLI, and everything under `src/`.
+- [Rust Code Style](code-style-rust.md) — the core and terminal-client workspace crates under
+  `crates/`.
 - [TypeScript Code Style](code-style-typescript.md) — provider plugin packages under `plugins/`.
 
 When a language document and this one disagree, the language document wins for that language: it is

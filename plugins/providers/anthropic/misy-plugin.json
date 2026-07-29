@@ -1,0 +1,16 @@
+{
+	"id": "anthropic",
+	"display_name": "Anthropic",
+	"version": "0.1.0",
+	"kind": "provider",
+	"protocol_version": 2,
+	"description": "Anthropic models via Claude subscription (browser OAuth)",
+	"capabilities": { "usage": { "version": 1 } },
+	"auth_methods": [{ "id": "oauth", "display_name": "Claude subscription" }],
+	"author": "Misy",
+	"homepage": "https://github.com/cobalt/misy",
+	"repository": "https://github.com/cobalt/misy",
+	"license": "MIT",
+	"command": "bun",
+	"args": ["src/index.ts"]
+}

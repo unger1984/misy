@@ -14,6 +14,11 @@ pub(super) fn accent() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Returns the full-row background used for submitted prompts.
+pub(super) fn user_message() -> Style {
+    Style::default().bg(Color::DarkGray)
+}
+
 /// Returns the full-row highlight for the active popup or list item.
 pub(super) fn selected() -> Style {
     Style::default()

@@ -23,6 +23,7 @@ mod startup_header;
 mod state;
 mod style;
 mod terminal;
+mod tool_render;
 mod transcript_render;
 mod usage;
 

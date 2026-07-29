@@ -231,6 +231,12 @@ pub(super) fn output_labels(output: &ActivityOutput) -> Vec<String> {
             .map(|code| format!(" · exit {code}"))
             .unwrap_or_default()
     )];
+    labels.extend(output_content_labels(output));
+    labels
+}
+
+pub(in crate::tui) fn output_content_labels(output: &ActivityOutput) -> Vec<String> {
+    let mut labels = Vec::new();
     if output.fragments.is_empty() {
         labels.extend(output.stdout.lines().map(ToOwned::to_owned));
         labels.extend(output.stderr.lines().map(|line| format!("stderr: {line}")));

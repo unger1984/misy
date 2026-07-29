@@ -136,6 +136,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         );
         let mut state = UiState::default();
         state.activity_stop_hint = keymap.stop_hint().to_owned();
+        state.transcript_expand_hint = keymap.expand_hint().to_owned();
         for warning in keymap_warnings {
             state.add_error(warning);
         }
@@ -263,6 +264,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         if key == UiKey::StopActivity {
             self.stop_selected_activity();
+            return Ok(());
+        }
+        if key == UiKey::ToggleToolOutput {
+            self.state.toggle_tool_output();
             return Ok(());
         }
         if self.state.activity_bar_focused {
@@ -403,7 +408,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             | UiKey::Tab
             | UiKey::SelectIndex(_)
             | UiKey::OpenActivities
-            | UiKey::StopActivity => {}
+            | UiKey::StopActivity
+            | UiKey::ToggleToolOutput => {}
         }
         Ok(())
     }

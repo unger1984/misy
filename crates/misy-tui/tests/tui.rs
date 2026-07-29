@@ -61,6 +61,25 @@ async fn composer_edits_at_a_unicode_cursor_and_supports_multiline_input() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn tool_output_toggle_is_global_and_preserves_the_draft() {
+    let (_temporary, mut client, _) = test_client().await;
+    client.insert_text("unfinished draft");
+
+    client
+        .handle_key(UiKey::ToggleToolOutput)
+        .expect("expand transcript output");
+    assert!(client.state().tool_output_expanded());
+    assert_eq!(client.state().composer_input(), "unfinished draft");
+
+    client.handle_input("/provider").expect("open modal");
+    client
+        .handle_key(UiKey::ToggleToolOutput)
+        .expect("collapse output behind modal");
+    assert!(!client.state().tool_output_expanded());
+    assert_eq!(client.state().mode(), UiMode::ProviderList);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn bracketed_paste_is_atomic_multiline_input_at_the_cursor() {
     let (_temporary, mut client, _) = test_client().await;
     client.insert_text("beforeafter");
@@ -721,6 +740,15 @@ async fn tool_rows_carry_arguments_and_result_content_from_core_events() {
         }),
         "read_file result must retain its content"
     );
+    assert!(
+        rows.iter()
+            .any(|row| matches!(row, TranscriptRow::WorkSeparator { .. })),
+        "successful tool work must end with a semantic separator"
+    );
+    let rendered = buffer_lines(&render_buffer(client.state(), 72, 30), 72);
+    assert!(rendered.iter().any(|line| line.starts_with("  ● Write ")));
+    assert!(rendered.iter().any(|line| line.starts_with("  ● Read ")));
+    assert!(rendered.iter().any(|line| line.contains("written by tool")));
 }
 
 #[tokio::test(flavor = "current_thread")]

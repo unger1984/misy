@@ -20,6 +20,7 @@ use std::time::Instant;
 const MAX_VIEW_ROWS: usize = 8;
 const MAX_QUEUED_PROMPT_ROWS: usize = 3;
 const POPUP_TOP_SPACE: u16 = 1;
+const TRANSCRIPT_INSET: u16 = 2;
 
 /// Renders the complete fullscreen client.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
@@ -128,11 +129,27 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
         return;
     }
     let mut lines = state.startup_header.lines(area.width);
-    lines.extend(transcript_lines(state.transcript()));
+    let transcript_width = area.width.saturating_sub(TRANSCRIPT_INSET);
+    lines.extend(
+        transcript_lines(
+            state.transcript(),
+            transcript_width,
+            state.tool_output_expanded(),
+            &state.transcript_expand_hint,
+        )
+        .into_iter()
+        .map(inset_transcript_line),
+    );
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     let total_height = u16::try_from(paragraph.line_count(area.width)).unwrap_or(u16::MAX);
     let scroll = total_height.saturating_sub(area.height);
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
+}
+
+fn inset_transcript_line(mut line: Line<'static>) -> Line<'static> {
+    line.spans
+        .insert(0, Span::raw(" ".repeat(usize::from(TRANSCRIPT_INSET))));
+    line
 }
 
 fn render_composer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
@@ -392,5 +409,17 @@ mod tests {
 
         assert!(line.width() <= 32);
         assert!(rendered.contains("…  authentica…"), "{rendered:?}");
+    }
+
+    #[test]
+    fn transcript_content_has_a_two_column_inset() {
+        let line = inset_transcript_line(Line::raw("● Read file"));
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "  ● Read file");
     }
 }

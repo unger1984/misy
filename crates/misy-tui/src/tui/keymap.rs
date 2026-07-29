@@ -5,14 +5,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
 
 const STOP_ACTIVITY: &str = "activities.stop";
+const EXPAND_TRANSCRIPT: &str = "transcript.expand";
 
 #[derive(Clone, Debug)]
 pub(super) struct Keymap {
     bindings: Vec<(Binding, UiKey)>,
     stop_hint: String,
+    expand_hint: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Binding {
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -23,23 +25,38 @@ impl Keymap {
     pub(super) fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         for action in overrides.keys() {
-            if action != STOP_ACTIVITY {
+            if action != STOP_ACTIVITY && action != EXPAND_TRANSCRIPT {
                 warnings.push(format!("unknown keybinding action `{action}`"));
             }
         }
         let stop = bindings_for(overrides, STOP_ACTIVITY, "Ctrl+X", &mut warnings);
-        let bindings = stop
-            .iter()
-            .cloned()
-            .map(|binding| (binding, UiKey::StopActivity))
-            .collect();
+        let expand = bindings_for(overrides, EXPAND_TRANSCRIPT, "Ctrl+O", &mut warnings);
+        let mut bindings = Vec::new();
+        add_action_bindings(
+            &mut bindings,
+            stop.iter().cloned(),
+            STOP_ACTIVITY,
+            UiKey::StopActivity,
+            &mut warnings,
+        );
+        let effective_expand = add_action_bindings(
+            &mut bindings,
+            expand.iter().cloned(),
+            EXPAND_TRANSCRIPT,
+            UiKey::ToggleToolOutput,
+            &mut warnings,
+        );
         let stop_hint = stop
+            .first()
+            .map_or_else(|| "unbound".to_owned(), |item| item.display.clone());
+        let expand_hint = effective_expand
             .first()
             .map_or_else(|| "unbound".to_owned(), |item| item.display.clone());
         (
             Self {
                 bindings,
                 stop_hint,
+                expand_hint,
             },
             warnings,
         )
@@ -56,6 +73,51 @@ impl Keymap {
 
     pub(super) fn stop_hint(&self) -> &str {
         &self.stop_hint
+    }
+
+    pub(super) fn expand_hint(&self) -> &str {
+        &self.expand_hint
+    }
+}
+
+fn add_action_bindings(
+    bindings: &mut Vec<(Binding, UiKey)>,
+    candidates: impl Iterator<Item = Binding>,
+    action: &str,
+    key: UiKey,
+    warnings: &mut Vec<String>,
+) -> Vec<Binding> {
+    let mut accepted = Vec::new();
+    for candidate in candidates {
+        if let Some((_, winner)) = bindings
+            .iter()
+            .find(|(binding, _)| binding.same_key(&candidate))
+        {
+            warnings.push(format!(
+                "keybinding `{}` for `{action}` conflicts with `{}`; `{}` wins",
+                candidate.display,
+                action_name(*winner),
+                action_name(*winner)
+            ));
+            continue;
+        }
+        bindings.push((candidate.clone(), key));
+        accepted.push(candidate);
+    }
+    accepted
+}
+
+impl Binding {
+    fn same_key(&self, other: &Self) -> bool {
+        key_code_matches(self.code, other.code) && self.modifiers == other.modifiers
+    }
+}
+
+fn action_name(key: UiKey) -> &'static str {
+    match key {
+        UiKey::StopActivity => STOP_ACTIVITY,
+        UiKey::ToggleToolOutput => EXPAND_TRANSCRIPT,
+        _ => "unknown",
     }
 }
 
@@ -149,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_only_ctrl_x_to_stop() {
+    fn defaults_named_actions() {
         let (keymap, warnings) = Keymap::from_overrides(&BTreeMap::new());
         assert!(warnings.is_empty());
         assert_eq!(
@@ -160,5 +222,45 @@ mod tests {
             keymap.resolve(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
             None
         );
+        assert_eq!(
+            keymap.resolve(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(UiKey::ToggleToolOutput)
+        );
+        assert_eq!(keymap.expand_hint(), "Ctrl+O");
+    }
+
+    #[test]
+    fn earlier_action_wins_binding_collisions() {
+        let overrides = BTreeMap::from([
+            ("activities.stop".to_owned(), vec!["Ctrl+K".to_owned()]),
+            ("transcript.expand".to_owned(), vec!["Ctrl+K".to_owned()]),
+        ]);
+        let (keymap, warnings) = Keymap::from_overrides(&overrides);
+
+        assert_eq!(
+            keymap.resolve(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            Some(UiKey::StopActivity)
+        );
+        assert_eq!(keymap.expand_hint(), "unbound");
+        assert!(warnings[0].contains("`activities.stop` wins"));
+    }
+
+    #[test]
+    fn override_and_invalid_fallback_set_the_effective_expand_hint() {
+        let override_map =
+            BTreeMap::from([("transcript.expand".to_owned(), vec!["Alt+E".to_owned()])]);
+        let (overridden, warnings) = Keymap::from_overrides(&override_map);
+        assert!(warnings.is_empty());
+        assert_eq!(overridden.expand_hint(), "Alt+E");
+        assert_eq!(
+            overridden.resolve(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT)),
+            Some(UiKey::ToggleToolOutput)
+        );
+
+        let invalid_map =
+            BTreeMap::from([("transcript.expand".to_owned(), vec!["Hyper+E".to_owned()])]);
+        let (fallback, warnings) = Keymap::from_overrides(&invalid_map);
+        assert_eq!(fallback.expand_hint(), "Ctrl+O");
+        assert_eq!(warnings.len(), 1);
     }
 }

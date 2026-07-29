@@ -89,6 +89,7 @@ model, authentication, session, and tool orchestration remain in the core.
 
   [keybindings]
   "activities.stop" = ["Ctrl+X"]
+  "transcript.expand" = ["Ctrl+O"]
   ```
 - `/provider` opens a centered provider popup. Selecting a provider replaces the popup contents
   with its available `Authorize` or `Log out` actions; authorization progress, device codes, and
@@ -109,9 +110,17 @@ model, authentication, session, and tool orchestration remain in the core.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.
-- Transcript rows use semantic styling: dim user prompts and service messages, normal assistant
-  text, structured tool calls with indented results, and red failures. An active submission adds an
-  animated one-line spinner with elapsed time and the `esc to interrupt` hint above the composer.
+- Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting
+  full-width row inside that transcript area; assistant segments have one leading marker, service
+  messages remain dim, and failures have a red marker. Tool calls use friendly built-in names with
+  an indented result attached by call ID;
+  pending, successful, and failed calls have distinct markers. Results keep their head and tail in
+  a width-aware four-row compact budget. The named `transcript.expand` shortcut (`Ctrl+O` by
+  default) globally toggles a twelve-row budget without changing the draft or active popup; an
+  effective-binding hint appears only when compact output is hidden. Successful turns that used a
+  tool end with a separator, including `Worked for Xm Ys` only after one minute. An active
+  submission adds an animated one-line spinner with elapsed time and the `esc to interrupt` hint
+  above the composer.
 - Entered prompts join a bounded queue preview above the composer once the core accepts them:
   the core emits a self-sufficient `SubmissionAccepted` event — carrying the submission ID and
   the message — under the queue lock before enqueueing, so acceptances arrive in FIFO order and
@@ -153,8 +162,9 @@ model, authentication, session, and tool orchestration remain in the core.
   for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the
   core capture tasks, with stderr labelled in place.
 - A background command's terminal core event adds one transcript item with its task ID, label,
-  final output, and exit status. The initial tool result is rendered as a compact background-start
-  notice instead of raw command-result JSON.
+  final output, and exit status. It uses the same compact/expanded transcript budgets as ordinary
+  tool results, while the activity log viewer retains the complete bounded output. The initial tool
+  result is rendered as a compact background-start notice instead of raw command-result JSON.
 - `Esc` interrupts the active turn identified by the current core snapshot. Repeated presses are
   idempotent for that turn and never clear the remaining FIFO queue; the next queued prompt starts
   after cancellation.

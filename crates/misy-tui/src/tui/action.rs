@@ -76,6 +76,8 @@ pub enum UiKey {
     OpenActivities,
     /// Stop the selected activity immediately.
     StopActivity,
+    /// Toggle the viewport budget for all transcript tool output.
+    ToggleToolOutput,
     /// Direct one-based selection from a numbered modal list.
     SelectIndex(usize),
 }

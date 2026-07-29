@@ -22,18 +22,37 @@ impl UiState {
                 self.response_started = true;
                 self.append_assistant_text(Some(submission), delta);
             }
-            CoreEvent::ToolCall { call, .. } => self.transcript.push(TranscriptRow::ToolCall {
-                id: call.id,
-                name: call.name,
-                // Serializing a `Value` cannot fail in practice; `None` renders the row
-                // without arguments.
-                arguments: serde_json::to_string(&call.arguments).ok(),
-            }),
+            CoreEvent::ToolCall {
+                submission, call, ..
+            } => {
+                if self.active_submission() == Some(submission) {
+                    self.turn_had_tool_activity = true;
+                }
+                self.transcript.push(TranscriptRow::ToolCall {
+                    id: call.id,
+                    name: call.name,
+                    // Serializing a `Value` cannot fail in practice; `None` renders the row
+                    // without arguments.
+                    arguments: serde_json::to_string(&call.arguments).ok(),
+                });
+            }
             CoreEvent::ToolResult { result, .. } => self.add_tool_result(result),
-            CoreEvent::Completed { .. } => {}
-            CoreEvent::Cancelled { submission } => self.note_cancellation(submission),
-            CoreEvent::Failed { message, .. } => self.add_error(message),
-            CoreEvent::Shutdown => self.should_exit = true,
+            CoreEvent::Completed { submission } => self.complete_turn(submission),
+            CoreEvent::Cancelled { submission } => {
+                self.discard_terminal_turn(submission);
+                self.note_cancellation(submission);
+            }
+            CoreEvent::Failed {
+                submission,
+                message,
+            } => {
+                self.discard_terminal_turn(submission);
+                self.add_error(message);
+            }
+            CoreEvent::Shutdown => {
+                self.terminal_turn = None;
+                self.should_exit = true;
+            }
         }
     }
 
@@ -77,6 +96,22 @@ impl UiState {
             return;
         }
         self.add_info("submission cancelled");
+    }
+
+    fn complete_turn(&mut self, submission: SubmissionId) {
+        let Some(turn) = self.terminal_turn.take() else {
+            return;
+        };
+        if turn.submission == submission && turn.had_tool_activity {
+            self.transcript.push(TranscriptRow::WorkSeparator {
+                elapsed: turn.elapsed,
+            });
+        }
+    }
+
+    fn discard_terminal_turn(&mut self, _submission: SubmissionId) {
+        // Cancelled, failed, and mismatched terminal events all invalidate the one captured turn.
+        self.terminal_turn = None;
     }
 
     pub(in crate::tui) fn append_assistant_text(

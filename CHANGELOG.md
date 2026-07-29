@@ -12,6 +12,9 @@
 
 ### Changed
 
+- Redesigned the session transcript with a consistent left inset, distinct user and assistant
+  blocks, paired friendly tool calls and results, compact head/tail output, global `Ctrl+O`
+  expansion, background-task completion cards, and successful tool-work separators.
 - Moved the complete `/provider` workflow into the centered popup used by `/model`, including the
   provider list, provider actions, authentication progress, device codes, and logout progress.
 - Unified model-facing command execution under `exec_command`, with inline completion, automatic

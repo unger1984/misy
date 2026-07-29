@@ -1,37 +1,58 @@
 //! Semantic rendering for committed transcript rows.
 
-use super::{state::TranscriptRow, style};
+use super::{state::TranscriptRow, style, tool_render};
 use ratatui::text::{Line, Span};
+use std::time::Duration;
+use unicode_width::UnicodeWidthChar;
 
 /// Converts transcript rows into styled terminal lines.
-pub(super) fn transcript_lines(rows: &[TranscriptRow]) -> Vec<Line<'static>> {
-    rows.iter().flat_map(row_lines).collect()
+pub(super) fn transcript_lines(
+    rows: &[TranscriptRow],
+    width: u16,
+    expanded: bool,
+    expand_hint: &str,
+) -> Vec<Line<'static>> {
+    let tools = tool_render::tool_blocks(rows, width, expanded, expand_hint);
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let block = tools
+            .get(&index)
+            .cloned()
+            .or_else(|| semantic_block(row, width));
+        let Some(block) = block else {
+            continue;
+        };
+        if !lines.is_empty() && !matches!(row, TranscriptRow::WorkSeparator { .. }) {
+            lines.push(Line::raw(String::new()));
+        }
+        lines.extend(block);
+    }
+    lines
 }
 
-fn row_lines(row: &TranscriptRow) -> Vec<Line<'static>> {
+fn semantic_block(row: &TranscriptRow, width: u16) -> Option<Vec<Line<'static>>> {
     match row {
         TranscriptRow::Provider { id, authenticated } => {
-            vec![provider_status_line(id, *authenticated)]
+            Some(vec![provider_status_line(id, *authenticated)])
         }
         TranscriptRow::Model {
             provider,
             id,
             selected,
-        } => vec![model_status_line(provider, id, *selected)],
-        TranscriptRow::UserPrompt(prompt) => user_prompt_lines(prompt),
-        TranscriptRow::AssistantText(text) => text
-            .split('\n')
-            .map(|line| Line::raw(line.to_owned()))
-            .collect(),
-        TranscriptRow::ToolCall {
-            name, arguments, ..
-        } => vec![tool_call_line(name, arguments.as_deref())],
-        TranscriptRow::ToolResult {
-            is_error, content, ..
-        } => tool_result_lines(*is_error, content.as_deref()),
-        TranscriptRow::ActivityFinished(output) => activity_finished_lines(output),
-        TranscriptRow::Info(message) => vec![Line::styled(format!("  {message}"), style::muted())],
-        TranscriptRow::Error(message) => vec![Line::styled(format!("  {message}"), style::error())],
+        } => Some(vec![model_status_line(provider, id, *selected)]),
+        TranscriptRow::UserPrompt(prompt) => Some(user_prompt_lines(prompt, width)),
+        TranscriptRow::AssistantText(text) => Some(assistant_lines(text, width)),
+        TranscriptRow::Info(message) => {
+            Some(vec![Line::styled(format!("  {message}"), style::muted())])
+        }
+        TranscriptRow::Error(message) => Some(vec![Line::from(vec![
+            Span::styled("× ", style::error()),
+            Span::styled(message.clone(), style::error()),
+        ])]),
+        TranscriptRow::WorkSeparator { elapsed } => Some(vec![work_separator(*elapsed, width)]),
+        TranscriptRow::ToolCall { .. }
+        | TranscriptRow::ToolResult { .. }
+        | TranscriptRow::ActivityFinished(_) => None,
     }
 }
 
@@ -49,127 +70,104 @@ fn model_status_line(provider: &str, id: &str, selected: bool) -> Line<'static> 
     Line::styled(format!("  model: {provider}/{id}{marker}"), style::muted())
 }
 
-fn user_prompt_lines(prompt: &str) -> Vec<Line<'static>> {
+fn user_prompt_lines(prompt: &str, width: u16) -> Vec<Line<'static>> {
+    let content_width = usize::from(width).saturating_sub(2).max(1);
     prompt
         .split('\n')
+        .flat_map(|line| wrap_text(line, content_width))
+        .enumerate()
+        .map(|(index, line)| {
+            let marker = if index == 0 { "› " } else { "  " };
+            padded_line(
+                vec![
+                    Span::styled(marker, style::user_message()),
+                    Span::styled(line, style::user_message()),
+                ],
+                width,
+                style::user_message(),
+            )
+        })
+        .collect()
+}
+
+fn assistant_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let content_width = usize::from(width).saturating_sub(2).max(1);
+    text.split('\n')
+        .flat_map(|line| wrap_text(line, content_width))
         .enumerate()
         .map(|(index, line)| {
             let marker = if index == 0 { "• " } else { "  " };
-            Line::from(vec![
-                Span::styled(marker, style::muted()),
-                Span::styled(line.to_owned(), style::muted()),
-            ])
+            Line::from(vec![Span::styled(marker, style::accent()), Span::raw(line)])
         })
         .collect()
 }
 
-fn tool_call_line(name: &str, arguments: Option<&str>) -> Line<'static> {
-    let summary = command_call_summary(name, arguments);
-    Line::from(vec![
-        Span::styled("⏺ ", style::accent()),
-        Span::raw(summary.unwrap_or_else(|| format!("{name}({})", arguments.unwrap_or_default()))),
-    ])
-}
-
-fn command_call_summary(name: &str, arguments: Option<&str>) -> Option<String> {
-    if name != "exec_command" {
-        return None;
+fn work_separator(elapsed: Duration, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    if elapsed <= Duration::from_secs(60) {
+        return Line::styled("─".repeat(width), style::muted());
     }
-    let arguments: serde_json::Value = serde_json::from_str(arguments?).ok()?;
-    let description = arguments
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    let command =
-        description.or_else(|| arguments.get("cmd").and_then(serde_json::Value::as_str))?;
-    Some(format!("{name} · {command}"))
-}
-
-fn tool_result_lines(is_error: bool, content: Option<&str>) -> Vec<Line<'static>> {
-    if let Some(lines) = command_result_lines(content) {
-        return lines;
-    }
-    let row_style = if is_error {
-        style::error()
-    } else {
-        style::muted()
-    };
-    let fallback = if is_error { "tool failed" } else { "completed" };
-    content
-        .unwrap_or(fallback)
-        .split('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            let prefix = if index == 0 { "  ⎿ " } else { "    " };
-            Line::styled(format!("{prefix}{line}"), row_style)
-        })
-        .collect()
-}
-
-fn command_result_lines(content: Option<&str>) -> Option<Vec<Line<'static>>> {
-    let value: serde_json::Value = serde_json::from_str(content?).ok()?;
-    let kind = value.get("kind")?.as_str()?;
-    if kind == "background" {
-        let id = value.get("task_id")?.as_str()?;
-        return Some(vec![Line::styled(
-            format!("  ⎿ Running in background · {id}"),
+    let seconds = elapsed.as_secs();
+    let label = format!(" Worked for {}m {}s ", seconds / 60, seconds % 60);
+    if label.chars().count() >= width {
+        return Line::styled(
+            super::display_width::truncate_to_width(&label, width),
             style::muted(),
-        )]);
+        );
     }
-    None
+    let left = width.saturating_sub(label.chars().count()) / 2;
+    let right = width.saturating_sub(label.chars().count() + left);
+    Line::styled(
+        format!("{}{}{}", "─".repeat(left), label, "─".repeat(right)),
+        style::muted(),
+    )
 }
 
-fn activity_finished_lines(output: &misy_core::ActivityOutput) -> Vec<Line<'static>> {
-    let (marker, state, header_style) = match output.activity.status {
-        misy_core::ActivityStatus::Completed => ("●", "completed", style::success()),
-        misy_core::ActivityStatus::Failed => ("×", "failed", style::error()),
-        misy_core::ActivityStatus::Stopped => ("■", "stopped", style::muted()),
-        misy_core::ActivityStatus::Queued
-        | misy_core::ActivityStatus::Running
-        | misy_core::ActivityStatus::Waiting => ("○", "finished", style::muted()),
-    };
-    let mut lines = vec![Line::styled(
-        format!(
-            "{marker} Background task {state} · {} · {}",
-            output.activity.id, output.activity.title
-        ),
-        header_style,
-    )];
-    append_activity_stream(&mut lines, &output.stdout, "");
-    append_activity_stream(&mut lines, &output.stderr, "stderr: ");
-    if output.stdout.is_empty() && output.stderr.is_empty() {
-        lines.push(Line::styled("  ⎿ (no output)", style::muted()));
+fn padded_line(
+    mut spans: Vec<Span<'static>>,
+    width: u16,
+    row_style: ratatui::style::Style,
+) -> Line<'static> {
+    let used = Line::from(spans.clone()).width();
+    let padding = usize::from(width).saturating_sub(used);
+    if padding != 0 {
+        spans.push(Span::styled(" ".repeat(padding), row_style));
     }
-    if let Some(message) = &output.message {
-        lines.push(Line::styled(format!("  ⎿ {message}"), header_style));
-    }
-    if let Some(code) = output.activity.exit_code {
-        lines.push(Line::styled(
-            format!("  ⎿ Process exited with code {code}"),
-            if code == 0 {
-                style::muted()
-            } else {
-                style::error()
-            },
-        ));
-    }
-    lines
+    Line::from(spans)
 }
 
-fn append_activity_stream(lines: &mut Vec<Line<'static>>, content: &str, label: &str) {
-    for (index, line) in content.lines().enumerate() {
-        let prefix = if index == 0 { "  ⎿ " } else { "    " };
-        lines.push(Line::styled(
-            format!("{prefix}{label}{line}"),
-            style::muted(),
-        ));
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if character_width > width {
+            if used != 0 {
+                rows.push(String::new());
+            }
+            if let Some(row) = rows.last_mut() {
+                row.push('…');
+            }
+            used = 1;
+            continue;
+        }
+        if used != 0 && used + character_width > width {
+            rows.push(String::new());
+            used = 0;
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push(character);
+        }
+        used += character_width;
     }
+    rows
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_finished_lines, command_call_summary, command_result_lines};
-    use misy_core::ActivityOutput;
+    use super::{transcript_lines, work_separator};
+    use crate::tui::state::TranscriptRow;
+    use std::time::Duration;
 
     fn text(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
         lines
@@ -184,58 +182,39 @@ mod tests {
     }
 
     #[test]
-    fn background_start_result_hides_internal_json() {
-        let content = serde_json::json!({
-            "kind": "background",
-            "task_id": "task-4",
-            "status": "running",
-            "stdout": ""
-        })
-        .to_string();
-        let lines = command_result_lines(Some(&content)).expect("command result");
-        assert_eq!(text(&lines), ["  ⎿ Running in background · task-4"]);
+    fn semantic_blocks_have_one_separator_row() {
+        let rows = vec![
+            TranscriptRow::UserPrompt("hello".to_owned()),
+            TranscriptRow::AssistantText("hi".to_owned()),
+            TranscriptRow::Info("done".to_owned()),
+        ];
+        let lines = text(&transcript_lines(&rows, 20, false, "Ctrl+O"));
+        assert_eq!(lines.iter().filter(|line| line.is_empty()).count(), 2);
     }
 
     #[test]
-    fn exec_call_uses_description_instead_of_argument_json() {
-        let arguments = serde_json::json!({
-            "cmd": "for i in $(seq 1 60); do echo $i; done",
-            "description": "Print one number per second"
-        })
-        .to_string();
-        assert_eq!(
-            command_call_summary("exec_command", Some(&arguments)).as_deref(),
-            Some("exec_command · Print one number per second")
+    fn work_duration_only_appears_after_one_minute() {
+        assert!(!text(&[work_separator(Duration::from_secs(60), 40)])[0].contains("Worked"));
+        assert!(
+            text(&[work_separator(Duration::from_secs(61), 40)])[0].contains("Worked for 1m 1s")
         );
     }
 
     #[test]
-    fn completion_renders_header_output_and_exit_status() {
-        let output: ActivityOutput = serde_json::from_value(serde_json::json!({
-            "activity": {
-                "id": 4,
-                "kind": "task",
-                "status": "completed",
-                "title": "Print numbers",
-                "cwd": null,
-                "started_at_ms": 1,
-                "exit_code": 0
-            },
-            "stdout": "one\ntwo\n",
-            "stderr": "",
-            "stdout_truncated": false,
-            "stderr_truncated": false,
-            "message": null
-        }))
-        .expect("deserialize activity output fixture");
-        assert_eq!(
-            text(&activity_finished_lines(&output)),
-            [
-                "● Background task completed · task-4 · Print numbers",
-                "  ⎿ one",
-                "    two",
-                "  ⎿ Process exited with code 0"
-            ]
-        );
+    fn user_rows_fill_the_width_with_a_contrasting_background() {
+        let rows = vec![TranscriptRow::UserPrompt(
+            "wide prompt that wraps".to_owned(),
+        )];
+        let lines = transcript_lines(&rows, 12, false, "Ctrl+O");
+
+        assert!(lines.len() > 1);
+        for line in lines {
+            assert_eq!(line.width(), 12);
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|span| span.style.bg == Some(ratatui::style::Color::DarkGray))
+            );
+        }
     }
 }

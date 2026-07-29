@@ -7,6 +7,7 @@ mod tests;
 mod transcript;
 mod turns;
 
+pub(super) use activities::output_content_labels;
 pub use transcript::TranscriptRow;
 
 use super::{
@@ -104,6 +105,8 @@ pub struct UiState {
     response_submission: Option<SubmissionId>,
     cancelled_submissions: BTreeSet<u64>,
     submission_started_at: Option<Instant>,
+    turn_had_tool_activity: bool,
+    terminal_turn: Option<turns::TerminalTurn>,
     response_started: bool,
     quit_shortcut_expires_at: Option<Instant>,
     should_exit: bool,
@@ -112,6 +115,8 @@ pub struct UiState {
     pub(super) provider_device_code: Option<String>,
     pub(super) activity_bar_focused: bool,
     pub(super) activity_stop_hint: String,
+    pub(super) transcript_expand_hint: String,
+    tool_output_expanded: bool,
     pub(super) activity_preview: Option<ActivityOutput>,
 }
 
@@ -134,6 +139,8 @@ impl Default for UiState {
             response_submission: None,
             cancelled_submissions: BTreeSet::new(),
             submission_started_at: None,
+            turn_had_tool_activity: false,
+            terminal_turn: None,
             response_started: false,
             quit_shortcut_expires_at: None,
             should_exit: false,
@@ -142,6 +149,8 @@ impl Default for UiState {
             provider_device_code: None,
             activity_bar_focused: false,
             activity_stop_hint: "Ctrl+X".to_owned(),
+            transcript_expand_hint: "Ctrl+O".to_owned(),
+            tool_output_expanded: false,
             activity_preview: None,
         }
     }
@@ -286,9 +295,12 @@ impl UiState {
     }
 
     pub(super) fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
+        self.apply_snapshot_at(snapshot, Instant::now());
+    }
+
+    fn apply_snapshot_at(&mut self, snapshot: CoreSnapshot, now: Instant) {
         if self.snapshot.active_submission != snapshot.active_submission {
-            self.submission_started_at = snapshot.active_submission.map(|_| Instant::now());
-            self.response_started = false;
+            self.capture_turn_transition(snapshot.active_submission, now);
         }
         let activities = snapshot.activities.clone();
         self.snapshot = snapshot;

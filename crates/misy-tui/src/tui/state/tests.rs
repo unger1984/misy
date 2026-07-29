@@ -30,6 +30,47 @@ fn provider_choice(id: &str, display_name: &str, authenticated: bool) -> Provide
     }
 }
 
+fn question_request(id: u64, text: &str) -> misy_core::QuestionRequest {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "tool_call_id": format!("call-{id}"),
+        "source": {"Submission": id},
+        "questions": [{
+            "question": text,
+            "header": "",
+            "options": [
+                {"label": "A", "description": ""},
+                {"label": "B", "description": ""}
+            ],
+            "multi_select": false
+        }]
+    }))
+    .expect("question fixture")
+}
+
+#[test]
+fn question_snapshot_recovers_requests_in_fifo_order() {
+    let mut state = UiState::default();
+    let first = question_request(1, "First question");
+    let second = question_request(2, "Second question");
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![first, second.clone()];
+    state.apply_snapshot(snapshot);
+    assert_eq!(state.mode(), crate::tui::UiMode::Question);
+    assert_eq!(
+        state.modal_presentation(8).expect("dialog").title,
+        "First question"
+    );
+
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![second];
+    state.apply_snapshot(snapshot);
+    assert_eq!(
+        state.modal_presentation(8).expect("dialog").title,
+        "Second question"
+    );
+}
+
 fn refreshed_choices() -> Vec<ProviderChoice> {
     vec![
         provider_choice("fixture", "Fixture AI", true),

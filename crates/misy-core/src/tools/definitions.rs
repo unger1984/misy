@@ -4,8 +4,10 @@ use super::image_view;
 use crate::ToolDefinition;
 use serde_json::Value;
 
-pub(super) fn builtin_definitions() -> [ToolDefinition; 8] {
-    [
+pub(super) fn builtin_definitions() -> Vec<ToolDefinition> {
+    let mut definitions = vec![
+        crate::core::questions::definition(),
+        crate::core::todos::definition(),
         ToolDefinition::new(
             "list_directory",
             "List entries in a directory.",
@@ -80,7 +82,9 @@ pub(super) fn builtin_definitions() -> [ToolDefinition; 8] {
                 "additionalProperties": false,
             }),
         ),
-    ]
+    ];
+    definitions.sort_by(|left, right| left.name.cmp(&right.name));
+    definitions
 }
 
 fn exec_command_definition() -> ToolDefinition {

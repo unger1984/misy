@@ -123,6 +123,14 @@ model, authentication, session, and tool orchestration remain in the core.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.
+- A pending `AskUserQuestion` request opens a dedicated centered dialog without changing the
+  composer draft or attachments. Requests recover from `CoreSnapshot` and appear FIFO. Tabs retain
+  selection and custom text; arrows and digits select rows, `Left`/`Right`/`Tab` switch questions,
+  `Space` toggles multi-select choices, and `Enter` advances or submits once every question has an
+  answer. The synthetic `Other` row owns an inline editor. `Esc` leaves that editor first and
+  otherwise dismisses only the current request through the typed core operation. Completed
+  `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
+  JSON, including after session replay.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting
   full-width row inside that transcript area; assistant segments have one leading marker, service
   messages remain dim, and failures have a red marker. Tool calls use friendly built-in names with

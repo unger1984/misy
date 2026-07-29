@@ -19,6 +19,9 @@ pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
         | CoreEvent::Completed { .. }
         | CoreEvent::Cancelled { .. }
         | CoreEvent::Failed { .. } => true,
+        CoreEvent::TodoListUpdated { .. }
+        | CoreEvent::QuestionRequested { .. }
+        | CoreEvent::QuestionResolved { .. } => true,
         CoreEvent::SessionPersistenceFailed { .. } => false,
         CoreEvent::ProviderDiscovered { .. }
         | CoreEvent::ModelsListed { .. }
@@ -54,6 +57,9 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
         | CoreEvent::Cancelled { .. }
         | CoreEvent::Failed { .. }
         | CoreEvent::SessionPersistenceFailed { .. }
+        | CoreEvent::TodoListUpdated { .. }
+        | CoreEvent::QuestionRequested { .. }
+        | CoreEvent::QuestionResolved { .. }
         | CoreEvent::Shutdown => false,
     }
 }

@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::{error::Error, fmt};
 
 /// A stable handle for one asynchronous agent submission.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct SubmissionId(pub(super) u64);
 
 impl SubmissionId {
@@ -155,6 +155,21 @@ pub enum CoreEvent {
         /// Tool execution outcome.
         result: ToolResult,
     },
+    /// The attached conversation's root checklist was replaced.
+    TodoListUpdated {
+        /// New ordered checklist snapshot.
+        todos: Vec<crate::TodoItem>,
+    },
+    /// A core-owned tool is waiting for structured client input.
+    QuestionRequested {
+        /// Complete request used by clients to render and answer the prompt.
+        request: crate::QuestionRequest,
+    },
+    /// A pending request was answered, dismissed, or cancelled by its owner.
+    QuestionResolved {
+        /// Request removed from the current snapshot before this event was published.
+        request_id: crate::QuestionRequestId,
+    },
     /// A submission completed successfully.
     Completed {
         /// Completed submission.
@@ -245,6 +260,10 @@ pub enum CoreError {
     NoModelSelected,
     /// No active submission has this identifier.
     UnknownSubmission(SubmissionId),
+    /// No unresolved question has this process-local identifier.
+    UnknownQuestion(crate::QuestionRequestId),
+    /// A client response did not satisfy the pending question contract.
+    InvalidQuestionResponse(String),
     /// The process-wide live child-agent limit has been reached.
     AgentLimitReached,
     /// Every lossless background-completion mailbox slot is reserved.
@@ -321,6 +340,10 @@ impl fmt::Display for CoreError {
             }
             Self::NoModelSelected => formatter.write_str("no model is selected"),
             Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
+            Self::UnknownQuestion(id) => write!(formatter, "unknown or resolved question `{id}`"),
+            Self::InvalidQuestionResponse(message) => {
+                write!(formatter, "invalid question response: {message}")
+            }
             Self::AgentLimitReached => formatter.write_str("four child agents are already active"),
             Self::AgentMailboxFull => {
                 formatter.write_str("the background agent result mailbox is full")

@@ -3,6 +3,7 @@
 mod authentication;
 mod interrupts;
 mod operation_result;
+mod questions;
 mod sessions;
 mod snapshot;
 mod submission;
@@ -206,7 +207,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     pub fn insert_text(&mut self, text: &str) {
         self.state.clear_quit_shortcut();
         self.state.activity_bar_focused = false;
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Question {
+            self.state.insert_filter(text);
+        } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(text);
             }
@@ -220,7 +223,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.state.clear_quit_shortcut();
         self.state.activity_bar_focused = false;
         let normalized = normalize_paste(text);
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Question {
+            self.state.insert_filter(&normalized);
+        } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(&normalized);
             }
@@ -352,6 +357,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     fn handle_view_key(&mut self, key: UiKey) -> Result<(), TuiError> {
+        if self.state.mode() == UiMode::Question {
+            return self.handle_question_key(key);
+        }
         if self.state.mode() == UiMode::ActivityDetail {
             match key {
                 UiKey::Up => self.state.scroll_activity_log_up(false),
@@ -577,6 +585,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 }
             }
             UiMode::ActivityDetail => {}
+            UiMode::Question => {}
             UiMode::Input => {}
         }
         Ok(())

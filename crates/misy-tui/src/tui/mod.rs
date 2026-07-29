@@ -17,6 +17,7 @@ mod model_popup;
 mod model_refresh;
 mod model_view;
 mod presentation;
+mod question_dialog;
 mod render;
 mod screen_selection;
 mod session_picker;

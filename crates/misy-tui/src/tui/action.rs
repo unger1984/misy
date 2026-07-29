@@ -108,6 +108,8 @@ pub enum UiMode {
     Confirmation,
     /// Output for one command activity.
     ActivityDetail,
+    /// Structured question dialog owned by the core lifecycle.
+    Question,
 }
 
 /// Maps navigation keys to their old action vocabulary for API compatibility.
@@ -122,10 +124,20 @@ pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     match key {
         UiKey::Up => UiAction::PickerUp,
         UiKey::Down => UiAction::PickerDown,
-        UiKey::Left if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+        UiKey::Left
+            if matches!(
+                mode,
+                UiMode::ModelList | UiMode::ActivityList | UiMode::Question
+            ) =>
+        {
             UiAction::PickerTabLeft
         }
-        UiKey::Right if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+        UiKey::Right
+            if matches!(
+                mode,
+                UiMode::ModelList | UiMode::ActivityList | UiMode::Question
+            ) =>
+        {
             UiAction::PickerTabRight
         }
         UiKey::Enter => UiAction::PickerConfirm,

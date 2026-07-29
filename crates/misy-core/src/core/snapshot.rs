@@ -1,7 +1,7 @@
 //! Cheap, in-memory state snapshots for headless-core clients.
 
 use super::{MisyCore, SubmissionId};
-use crate::{ActivitySummary, AgentSummary, ModelRef, ProviderId};
+use crate::{ActivitySummary, AgentSummary, ModelRef, ProviderId, QuestionRequest, TodoItem};
 
 const MAX_TERMINAL_ACTIVITIES: usize = 20;
 
@@ -34,6 +34,10 @@ pub struct CoreSnapshot {
     pub queued_submissions: Vec<SubmissionId>,
     /// Cached authentication state for every discovered provider, ordered by provider ID.
     pub providers: Vec<ProviderAuthState>,
+    /// Root checklist belonging to the attached conversation.
+    pub todos: Vec<TodoItem>,
+    /// Unresolved user-input requests in creation order.
+    pub pending_questions: Vec<QuestionRequest>,
 }
 
 impl MisyCore {
@@ -61,6 +65,12 @@ impl MisyCore {
             .credential_states
             .lock()
             .expect("credential state mutex must not be poisoned");
+        let todos = state
+            .todos
+            .lock()
+            .expect("todo mutex must not be poisoned")
+            .clone();
+        let pending_questions = state.questions.snapshot();
         let (active_submission, queued_submissions) = submission_queue.snapshot();
         let agents = state.agents.list();
         let pinned = state.agents.pinned_activity_ids();
@@ -91,6 +101,8 @@ impl MisyCore {
                 .values()
                 .map(|state| state.auth.clone())
                 .collect(),
+            todos,
+            pending_questions,
         }
     }
 }

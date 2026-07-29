@@ -2,6 +2,7 @@
 
 mod activities;
 mod events;
+mod questions;
 mod sessions;
 mod spinner;
 #[cfg(test)]
@@ -23,6 +24,7 @@ use super::{
         list_presentation, model_picker_presentation, operation_label, provider_action_rows,
         provider_settings,
     },
+    question_dialog::QuestionDialog,
     session_picker::SessionPicker,
     startup_header::StartupHeader,
 };
@@ -64,6 +66,7 @@ pub(super) enum ActiveView {
     Sessions(SessionPicker),
     AgentDiscard(ListView<bool>),
     ActivityLog(Box<activities::ActivityLogView>),
+    Question(QuestionDialog),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -143,6 +146,8 @@ impl Default for UiState {
                 active_submission: None,
                 queued_submissions: Vec::new(),
                 providers: Vec::new(),
+                todos: Vec::new(),
+                pending_questions: Vec::new(),
             },
             prompt_text: BTreeMap::new(),
             response_submission: None,
@@ -197,6 +202,7 @@ impl UiState {
             Some(ActiveView::Sessions(_)) => UiMode::SessionList,
             Some(ActiveView::AgentDiscard(_)) => UiMode::Confirmation,
             Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
+            Some(ActiveView::Question(_)) => UiMode::Question,
         }
     }
 
@@ -241,6 +247,12 @@ impl UiState {
                 .as_ref()
                 .map(activities::output_labels)
                 .unwrap_or_else(|| vec!["Loading output…".to_owned()]),
+            Some(ActiveView::Question(view)) => view
+                .presentation(usize::MAX)
+                .rows
+                .into_iter()
+                .map(|row| row.label)
+                .collect(),
         }
     }
 
@@ -309,27 +321,6 @@ impl UiState {
             | UiAction::ShowUsage
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
-        }
-    }
-
-    pub(super) fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
-        self.apply_snapshot_at(snapshot, Instant::now());
-    }
-
-    fn apply_snapshot_at(&mut self, snapshot: CoreSnapshot, now: Instant) {
-        if self.snapshot.active_submission != snapshot.active_submission {
-            self.capture_turn_transition(snapshot.active_submission, now);
-        }
-        let activities = snapshot.activities.clone();
-        let agents = snapshot.agents.clone();
-        self.snapshot = snapshot;
-        if !self.activity_bar_visible() {
-            self.activity_bar_focused = false;
-        }
-        match &mut self.view {
-            Some(ActiveView::Activities(picker)) => picker.refresh(activities, agents),
-            Some(ActiveView::ActivityLog(view)) => view.picker.refresh(activities, agents),
-            _ => {}
         }
     }
 
@@ -478,6 +469,7 @@ impl UiState {
                 help_hint: Some("enter choose  esc keep agent state".to_owned()),
             }),
             Some(ActiveView::ActivityLog(_)) => None,
+            Some(ActiveView::Question(view)) => Some(view.presentation(visible_rows)),
             Some(ActiveView::ProviderSettings {
                 display_name,
                 credential_method,
@@ -568,6 +560,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => view.insert_filter(text),
             Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
+            Some(ActiveView::Question(view)) => view.insert_text(text),
             None => {}
         }
     }
@@ -581,6 +574,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => view.backspace_filter(),
             Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
+            Some(ActiveView::Question(view)) => view.backspace(),
             None => {}
         }
     }
@@ -620,6 +614,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => view.select_number(one_based),
             Some(ActiveView::AgentDiscard(view)) => view.select_number(one_based),
             Some(ActiveView::ActivityLog(_)) => false,
+            Some(ActiveView::Question(view)) => view.select_number(one_based),
             None => false,
         }
     }
@@ -633,6 +628,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => view.move_up(),
             Some(ActiveView::AgentDiscard(view)) => view.move_up(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
+            Some(ActiveView::Question(view)) => view.move_up(),
             None => {}
         }
     }
@@ -646,6 +642,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => view.move_down(),
             Some(ActiveView::AgentDiscard(view)) => view.move_down(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
+            Some(ActiveView::Question(view)) => view.move_down(),
             None => {}
         }
     }
@@ -654,6 +651,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Models(picker)) => picker.tab_left(),
             Some(ActiveView::Activities(picker)) => picker.tab_left(),
+            Some(ActiveView::Question(view)) => view.tab_left(),
             _ => {}
         }
     }
@@ -662,6 +660,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Models(picker)) => picker.tab_right(),
             Some(ActiveView::Activities(picker)) => picker.tab_right(),
+            Some(ActiveView::Question(view)) => view.tab_right(),
             _ => {}
         }
     }
@@ -691,6 +690,7 @@ impl UiState {
                 self.agent_preview = None;
                 self.view = Some(ActiveView::Activities(view.picker));
             }
+            Some(ActiveView::Question(_)) => {}
             None => {}
         }
     }

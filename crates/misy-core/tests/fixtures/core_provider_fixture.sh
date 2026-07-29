@@ -321,6 +321,72 @@ chat_start() {
       complete
       reply '{}'
       ;;
+    *'"tool_call_id":"question-1"'*)
+      text question-answered
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"child-question"'*)
+      text child-question-answer
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"spawn-child-question"'*)
+      text parent-question-observed
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"child-todo-query"'*)
+      text child-todo-answer
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"child-todo-update"'*)
+      call_tool child-todo-query SetTodoList '{}'
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"spawn-child-todo"'*)
+      text parent-todo-observed
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"root-todo"'*)
+      case "$line" in
+        *'"content":"child-todo-task"'*)
+          call_tool child-todo-update SetTodoList \
+            '{"todos":[{"title":"Child item","status":"done"}]}'
+          ;;
+        *)
+          call_tool spawn-child-todo spawn_agent \
+            '{"task":"child-todo-task","description":"Todo child","run_in_background":false}'
+          ;;
+      esac
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"dismiss-'*)
+      dismiss_round=$((dismiss_round + 1))
+      if [ "$dismiss_round" -le 4 ]; then
+        call_tool "dismiss-$dismiss_round" AskUserQuestion \
+          '{"questions":[{"question":"Continue?","options":[{"label":"Yes"},{"label":"No"}]}]}'
+        complete
+      else
+        text dismiss-limit-complete
+        complete
+      fi
+      reply '{}'
+      ;;
+    *'"tool_call_id":"todo-query"'*)
+      text todo-complete
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"todo-update"'*)
+      call_tool todo-query SetTodoList '{}'
+      complete
+      reply '{}'
+      ;;
     *'"tool_call_id":"loop-1"'*)
       call_read loop-1 missing
       complete
@@ -397,6 +463,56 @@ chat_start() {
       complete
       reply '{}'
       ;;
+    *'"content":"question-round-trip"'*)
+      call_tool question-1 AskUserQuestion \
+        '{"questions":[{"question":"Choose a mode","header":"Mode","options":[{"label":"Safe","description":"Use guarded behavior."},{"label":"Fast","description":"Use optimistic behavior."}],"multi_select":false}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"child-question-task"'*)
+      call_tool child-question AskUserQuestion \
+        '{"questions":[{"question":"Child choice","options":[{"label":"A"},{"label":"B"}]}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"child-todo-task"'*)
+      call_tool child-todo-update SetTodoList \
+        '{"todos":[{"title":"Child item","status":"done"}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-child-todo"'*)
+      call_tool root-todo SetTodoList \
+        '{"todos":[{"title":"Root item","status":"in_progress"}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-child-question"'*)
+      call_tool spawn-child-question spawn_agent \
+        '{"task":"child-question-task","description":"Question child","run_in_background":false}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"question-dismiss-limit"'*)
+      dismiss_round=1
+      call_tool dismiss-1 AskUserQuestion \
+        '{"questions":[{"question":"Continue?","options":[{"label":"Yes"},{"label":"No"}]}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"todo-round-trip"'*)
+      call_tool todo-update SetTodoList \
+        '{"todos":[{"title":"Implement lifecycle","status":"done"}]}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"question-capability-gate"'*)
+      case "$line" in
+        *'"name":"AskUserQuestion"'*) failed 'question tool leaked without capability' ;;
+        *) text capability-hidden; complete ;;
+      esac
+      reply '{}'
+      ;;
     *'"content":"provider-failure"'*)
       failed 'fixture failure'
       reply '{}'
@@ -460,6 +576,7 @@ chat_start() {
       reply '{}'
       ;;
     *'"tool_call_id":"message-1"'*)
+      touch "$target.message-accepted"
       call_tool wait-message agent_wait '{"agent_ids":["agent-1"],"timeout_ms":300000}'
       complete
       reply '{}'
@@ -475,10 +592,12 @@ chat_start() {
       reply '{}'
       ;;
     *'"content":"child-message-task"'*)
-      sleep 1
-      text first-answer
-      complete
-      reply '{}'
+      (
+        while [ ! -f "$target.message-accepted" ]; do sleep 0.01; done
+        text first-answer
+        complete
+        reply '{}'
+      ) &
       ;;
     *'"content":"spawn-message"'*)
       call_tool spawn-message spawn_agent \

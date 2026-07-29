@@ -198,14 +198,30 @@ impl ToolDispatcher {
             .collect()
     }
 
+    pub(crate) fn definitions_for_client(
+        &self,
+        supports_images: bool,
+        supports_questions: bool,
+    ) -> Vec<ToolDefinition> {
+        self.definitions_for(supports_images)
+            .into_iter()
+            .filter(|definition| supports_questions || definition.name != "AskUserQuestion")
+            .collect()
+    }
+
     /// Returns local tool definitions allowed inside child-agent sessions.
-    pub(crate) fn definitions_for_child(&self, supports_images: bool) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions_for_child(
+        &self,
+        supports_images: bool,
+        supports_questions: bool,
+    ) -> Vec<ToolDefinition> {
         self.registry
             .definitions()
             .into_iter()
             .filter(|definition| {
                 !crate::core::agents::is_agent_tool(&definition.name)
                     && (supports_images || definition.name != "view_image")
+                    && (supports_questions || definition.name != "AskUserQuestion")
             })
             .collect()
     }

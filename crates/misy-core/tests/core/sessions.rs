@@ -343,6 +343,67 @@ async fn session_survives_a_core_process_reopen() {
 }
 
 #[tokio::test]
+async fn todo_snapshot_survives_session_resume() {
+    let (temporary, core, _) = test_core("todo-round-trip");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "todo-round-trip").await;
+    let id = core.current_session_id().expect("current session id");
+    assert_eq!(core.snapshot().todos.len(), 1);
+
+    core.new_session().expect("new session");
+    assert!(core.snapshot().todos.is_empty());
+    let outcome = core.resume_session(&id).expect("resume todo session");
+    assert_eq!(outcome.todos.len(), 1);
+    assert_eq!(core.snapshot().todos, outcome.todos);
+    assert!(only_session_file(&temporary).exists());
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn unknown_record_advances_the_next_append_ordinal() {
+    use std::io::Write;
+
+    let (temporary, core, _) = test_core("unknown-session-record");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "session-one").await;
+    let id = core.current_session_id().expect("current session id");
+    let file = only_session_file(&temporary);
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .expect("open session"),
+        "{}",
+        json!({
+            "ordinal": 999,
+            "timestamp": 1,
+            "record": {"type": "future_record", "payload": true}
+        })
+    )
+    .expect("append unknown record");
+    core.new_session().expect("detach session");
+    core.resume_session(&id).expect("resume session");
+    complete_submission(&core, "session-two").await;
+
+    let last = fs::read_to_string(file)
+        .expect("session file")
+        .lines()
+        .last()
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .expect("last record");
+    assert!(
+        last["ordinal"]
+            .as_u64()
+            .is_some_and(|ordinal| ordinal >= 1_000)
+    );
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn initial_storage_failure_emits_once_and_does_not_fail_the_turn() {
     let (temporary, core, _) = test_core("session-create-failure");
     core.select_model(fixture_model())

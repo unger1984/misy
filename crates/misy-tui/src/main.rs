@@ -3,7 +3,7 @@
 mod cli;
 
 use cli::Arguments;
-use misy_core::MisyCore;
+use misy_core::{ClientCapabilities, CoreOptions, MisyCore};
 use misy_tui::run;
 use std::{error::Error, path::Path};
 
@@ -12,7 +12,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bundled_providers = bundled_providers();
     let arguments = Arguments::from_env()?;
     let paths = arguments.paths()?;
-    let core = MisyCore::discover(paths.clone(), bundled_providers)?;
+    let core = MisyCore::discover_with_options(
+        paths.clone(),
+        bundled_providers,
+        CoreOptions {
+            client_capabilities: ClientCapabilities {
+                question_request: Some(1),
+            },
+        },
+    )?;
     run(core, &paths, arguments.session_start()).await?;
     Ok(())
 }

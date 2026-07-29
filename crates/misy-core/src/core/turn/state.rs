@@ -1,7 +1,7 @@
 //! State owned by one independent model-turn session.
 
 use super::super::ActiveSubmission;
-use crate::{AgentId, HistoryEntry, ModelRef, SubmissionId};
+use crate::{AgentId, HistoryEntry, ModelRef, SubmissionId, TodoItem};
 use std::sync::{Arc, Mutex};
 
 /// Identifies the session that owns a model turn.
@@ -41,6 +41,7 @@ pub(crate) struct AgentTurnState {
     identity: AgentTurnIdentity,
     model: ModelRef,
     history: Arc<Mutex<Vec<HistoryEntry>>>,
+    todos: Arc<Mutex<Vec<TodoItem>>>,
     active: Arc<ActiveSubmission>,
     persistence: PersistencePolicy,
     events: TurnEventSink,
@@ -51,6 +52,7 @@ impl AgentTurnState {
     pub(crate) fn main(
         model: ModelRef,
         history: Arc<Mutex<Vec<HistoryEntry>>>,
+        todos: Arc<Mutex<Vec<TodoItem>>>,
         active: Arc<ActiveSubmission>,
         submission: SubmissionId,
     ) -> Self {
@@ -58,6 +60,7 @@ impl AgentTurnState {
             identity: AgentTurnIdentity::Main,
             model,
             history,
+            todos,
             active,
             persistence: PersistencePolicy::Conversation,
             events: TurnEventSink::Submission(submission),
@@ -70,6 +73,7 @@ impl AgentTurnState {
             identity: AgentTurnIdentity::Child(id),
             model,
             history: Arc::new(Mutex::new(history)),
+            todos: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(ActiveSubmission::new()),
             persistence: PersistencePolicy::Ephemeral,
             events: TurnEventSink::Child,
@@ -86,6 +90,10 @@ impl AgentTurnState {
 
     pub(crate) fn history(&self) -> &Arc<Mutex<Vec<HistoryEntry>>> {
         &self.history
+    }
+
+    pub(crate) fn todos(&self) -> &Arc<Mutex<Vec<TodoItem>>> {
+        &self.todos
     }
 
     pub(crate) fn active(&self) -> &Arc<ActiveSubmission> {

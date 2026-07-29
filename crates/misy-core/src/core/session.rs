@@ -1,7 +1,7 @@
 //! Append-only persistence for core-owned conversation sessions.
 
 use super::HistoryEntry;
-use crate::{MessageRole, ModelRef};
+use crate::{MessageRole, ModelRef, TodoItem};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -42,6 +42,8 @@ pub struct ResumeOutcome {
     pub history_len: usize,
     /// Canonical entries used by clients to rebuild their transcript projection.
     pub history: Vec<HistoryEntry>,
+    /// Root checklist restored from the same append-only session.
+    pub todos: Vec<TodoItem>,
     /// Non-fatal warning when the saved model cannot be selected.
     pub model_warning: Option<String>,
 }
@@ -118,11 +120,20 @@ struct SessionRecordLine {
     record: SessionRecord,
 }
 
+#[derive(Deserialize)]
+struct SessionRecordEnvelope {
+    ordinal: u64,
+    #[serde(rename = "timestamp")]
+    _timestamp: u64,
+    record: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRecord {
     HistoryEntry { entry: HistoryEntry },
     ModelChange { model: ModelRef },
+    TodoListUpdate { todos: Vec<TodoItem> },
 }
 
 struct CurrentSession {
@@ -141,6 +152,7 @@ pub(crate) struct SessionState {
 pub(super) struct LoadedSession {
     pub(super) summary: SessionSummary,
     pub(super) history: Vec<HistoryEntry>,
+    pub(super) todos: Vec<TodoItem>,
     pub(super) next_ordinal: u64,
     pub(super) path: PathBuf,
 }
@@ -183,6 +195,14 @@ impl SessionState {
             },
             Some(model),
         )
+    }
+
+    pub(super) fn append_todos(
+        &mut self,
+        todos: Vec<TodoItem>,
+        model: Option<ModelRef>,
+    ) -> Result<(), SessionError> {
+        self.append(SessionRecord::TodoListUpdate { todos }, model)
     }
 
     fn append(
@@ -308,16 +328,21 @@ fn load_path(path: &Path) -> Result<LoadedSession, SessionError> {
     let mut lines = BufReader::new(file).lines();
     let header = parse_header(&mut lines)?;
     let mut history = Vec::new();
+    let mut todos = Vec::new();
     let mut model = header.model.clone();
     let mut next_ordinal = 1;
     for line in lines.map_while(Result::ok) {
-        let Ok(record) = serde_json::from_str::<SessionRecordLine>(&line) else {
+        let Ok(envelope) = serde_json::from_str::<SessionRecordEnvelope>(&line) else {
             continue;
         };
-        next_ordinal = next_ordinal.max(record.ordinal.saturating_add(1));
-        match record.record {
+        next_ordinal = next_ordinal.max(envelope.ordinal.saturating_add(1));
+        let Ok(record) = serde_json::from_value::<SessionRecord>(envelope.record) else {
+            continue;
+        };
+        match record {
             SessionRecord::HistoryEntry { entry } => history.push(entry),
             SessionRecord::ModelChange { model: changed } => model = Some(changed),
+            SessionRecord::TodoListUpdate { todos: updated } => todos = updated,
         }
     }
     let preview = history
@@ -337,6 +362,7 @@ fn load_path(path: &Path) -> Result<LoadedSession, SessionError> {
     Ok(LoadedSession {
         summary,
         history,
+        todos,
         next_ordinal,
         path: path.to_owned(),
     })

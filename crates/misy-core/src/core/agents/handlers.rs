@@ -31,9 +31,6 @@ pub(crate) fn dispatch_agent_tool<'a>(
     call: &'a ToolCall,
 ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
     Box::pin(async move {
-        if let Err(error) = core.dispatcher.validate_arguments(call) {
-            return ToolResult::error(&call.id, error.to_string());
-        }
         let result = match call.name.as_str() {
             "spawn_agent" => spawn(core, parent, call).await,
             "agent_list" => encode(core.agents.list()),

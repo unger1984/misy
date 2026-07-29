@@ -38,6 +38,12 @@ impl MisyCore {
             .clear();
         self.inner
             .state
+            .todos
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?
+            .clear();
+        self.inner
+            .state
             .session
             .lock()
             .map_err(|_| SessionError::StatePoisoned)?
@@ -65,12 +71,19 @@ impl MisyCore {
             .history
             .lock()
             .map_err(|_| SessionError::StatePoisoned)? = loaded.history.clone();
+        *self
+            .inner
+            .state
+            .todos
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)? = loaded.todos.clone();
         session.attach(&loaded);
         let warning = self.restore_saved_model(loaded.summary.model.as_ref());
         Ok(ResumeOutcome {
             session: loaded.summary,
             history_len: loaded.history.len(),
             history: loaded.history,
+            todos: loaded.todos,
             model_warning: warning,
         })
     }
@@ -130,6 +143,23 @@ impl MisyCore {
 }
 
 impl CoreState {
+    pub(super) fn persist_todos(&self, todos: Vec<crate::TodoItem>) {
+        let model = self
+            .selected_model
+            .lock()
+            .ok()
+            .and_then(|model| model.clone());
+        let result = self
+            .session
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)
+            .and_then(|mut session| session.append_todos(todos, model));
+        if let Err(error) = result {
+            self.emit(&CoreEvent::SessionPersistenceFailed {
+                message: error.to_string(),
+            });
+        }
+    }
     pub(super) fn persist_history(&self, entry: HistoryEntry) {
         let model = self
             .selected_model

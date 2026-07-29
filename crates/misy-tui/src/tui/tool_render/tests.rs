@@ -257,3 +257,51 @@ fn terminal_activity_uses_ordered_fragments_and_the_same_budget() {
     assert!(rendered.iter().any(|line| line.contains("stderr: warning")));
     assert!(rendered.iter().any(|line| line.contains("Process exited")));
 }
+
+#[test]
+fn todo_update_renders_the_ordered_semantic_list() {
+    let rows = vec![
+        call(
+            "todo",
+            "SetTodoList",
+            &serde_json::json!({"todos": [
+                {"title": "Inspect", "status": "done"},
+                {"title": "Implement", "status": "in_progress"}
+            ]}),
+        ),
+        result("todo", "Todo list updated".to_owned()),
+    ];
+    let rendered = text(&tool_blocks(&rows, 80, false, "Ctrl+O")[&0]);
+    assert_eq!(
+        rendered,
+        [
+            "● Update todo list",
+            "  └ - [done] Inspect",
+            "    - [in_progress] Implement"
+        ]
+    );
+}
+
+#[test]
+fn answered_question_renders_in_original_question_order() {
+    let rows = vec![
+        call(
+            "question",
+            "AskUserQuestion",
+            &serde_json::json!({"questions": [
+                {"question": "Second lexically", "options": [{"label": "B"}, {"label": "C"}]},
+                {"question": "First lexically", "options": [{"label": "A"}, {"label": "B"}]}
+            ]}),
+        ),
+        result(
+            "question",
+            serde_json::json!({"answers": {
+                "First lexically": "A", "Second lexically": "B"
+            }})
+            .to_string(),
+        ),
+    ];
+    let rendered = text(&tool_blocks(&rows, 100, false, "Ctrl+O")[&0]);
+    assert_eq!(rendered[1], "  └ Second lexically: B");
+    assert_eq!(rendered[2], "    First lexically: A");
+}

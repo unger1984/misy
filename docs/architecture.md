@@ -111,6 +111,13 @@ flowchart LR
 16. Agent records belong to the current root-conversation generation. Session switching refuses
     live, mailbox, or retained agent state until a client explicitly confirms discard. Shutdown
     closes agent admission, stops and reaps children, then shuts down commands and providers.
+17. `SetTodoList` and `AskUserQuestion` are core-owned tools. Root checklists are projected in
+    snapshots and persisted as append-only session records; child checklists remain isolated and
+    ephemeral with child history. Structured questions are exposed only when the client declares
+    question capability version 1. The core owns pending request identity, answer validation,
+    cancellation, dismissal suppression, and snapshot recovery; clients only render requests and
+    call the typed answer or dismiss operations. A question has no elapsed timeout because it waits
+    for local user intent, but owner cancellation and shutdown always wake the waiter.
 
 ## Fixed Constraints
 

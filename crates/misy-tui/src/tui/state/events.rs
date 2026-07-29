@@ -49,6 +49,8 @@ impl UiState {
                 });
             }
             CoreEvent::ToolResult { result, .. } => self.add_tool_result(result),
+            CoreEvent::TodoListUpdated { .. } => {}
+            CoreEvent::QuestionRequested { .. } | CoreEvent::QuestionResolved { .. } => {}
             CoreEvent::Completed { submission } => self.complete_turn(submission),
             CoreEvent::Cancelled { submission } => {
                 self.discard_terminal_turn(submission);

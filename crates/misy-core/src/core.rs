@@ -27,11 +27,15 @@ mod contracts;
 mod events;
 mod images;
 mod models;
+mod options;
+pub(crate) mod questions;
 mod queue;
 mod runtime;
 mod session;
 mod session_api;
 mod snapshot;
+pub(crate) mod todos;
+mod tool_router;
 pub(crate) mod turn;
 mod usage;
 use agents::AgentRegistry;
@@ -50,7 +54,12 @@ pub use agents::{
 pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
 };
+pub use questions::{
+    ClientCapabilities, CoreOptions, QuestionItem, QuestionOption, QuestionRequest,
+    QuestionRequestId, QuestionResponse, QuestionSource,
+};
 pub use session::{ResumeOutcome, SessionError, SessionSummary};
+pub use todos::{TodoItem, TodoStatus};
 // These public snapshot names are part of the headless-client contract.
 #[allow(clippy::module_name_repetitions)]
 pub use snapshot::{CoreSnapshot, ProviderAuthState};
@@ -87,7 +96,12 @@ pub(super) struct CoreState {
     pub(super) model_cache: Arc<ModelCatalogStore>,
     pub(super) selected_model: Mutex<Option<ModelRef>>,
     pub(super) keybindings: BTreeMap<String, Vec<String>>,
+    pub(super) client_capabilities: ClientCapabilities,
     pub(super) history: Arc<Mutex<Vec<HistoryEntry>>>,
+    /// Root checklist uses an independent short-lived lock for snapshot projection.
+    pub(super) todos: Arc<Mutex<Vec<TodoItem>>>,
+    /// Pending questions are locked after todos and never across I/O or await points.
+    pub(super) questions: questions::QuestionRegistry,
     pub(super) session: Mutex<session::SessionState>,
     pub(super) agents: AgentRegistry,
     pub(super) dispatcher: ToolDispatcher,
@@ -144,7 +158,12 @@ impl MisyCore {
     ) -> Result<Self, CoreError> {
         let catalog =
             ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::build(paths, catalog, ProviderDeadlines::default())
+        Self::build(
+            paths,
+            catalog,
+            ProviderDeadlines::default(),
+            CoreOptions::default(),
+        )
     }
 
     /// Discovers providers like [`MisyCore::discover`] but with explicit provider wait deadlines.
@@ -161,7 +180,7 @@ impl MisyCore {
     ) -> Result<Self, CoreError> {
         let catalog =
             ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::build(paths, catalog, deadlines)
+        Self::build(paths, catalog, deadlines, CoreOptions::default())
     }
 
     /// Creates a core from an already-discovered provider catalog.
@@ -172,7 +191,12 @@ impl MisyCore {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
-        Self::build(paths, catalog, ProviderDeadlines::default())
+        Self::build(
+            paths,
+            catalog,
+            ProviderDeadlines::default(),
+            CoreOptions::default(),
+        )
     }
 
     /// Creates a core from a catalog with explicit provider wait deadlines.
@@ -190,13 +214,14 @@ impl MisyCore {
         catalog: ProviderCatalog,
         deadlines: ProviderDeadlines,
     ) -> Result<Self, CoreError> {
-        Self::build(paths, catalog, deadlines)
+        Self::build(paths, catalog, deadlines, CoreOptions::default())
     }
 
     fn build(
         paths: MisyPaths,
         catalog: ProviderCatalog,
         deadlines: ProviderDeadlines,
+        options: CoreOptions,
     ) -> Result<Self, CoreError> {
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
@@ -218,7 +243,10 @@ impl MisyCore {
             model_cache: Arc::new(ModelCatalogStore::new(paths)),
             selected_model: Mutex::new(config.default_model),
             keybindings: config.keybindings,
+            client_capabilities: options.client_capabilities,
             history: Arc::new(Mutex::new(Vec::new())),
+            todos: Arc::new(Mutex::new(Vec::new())),
+            questions: questions::QuestionRegistry::new(),
             session: Mutex::new(session::SessionState::new(sessions_dir)?),
             agents: AgentRegistry::new(),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
@@ -627,6 +655,12 @@ impl CoreState {
             .agents
             .stop_all(std::time::Duration::from_secs(5))
             .await;
+        // Owner cancellation normally resolves these first. Draining afterward covers an
+        // aborted owner task without waking it early enough to dispatch another local tool.
+        for (request_id, sender) in self.questions.take_all() {
+            self.emit(&CoreEvent::QuestionResolved { request_id });
+            let _ = sender.send(questions::QuestionResolution::Cancelled);
+        }
         self.dispatcher.shutdown().await;
         // Provider shutdown is best effort; clients must still observe the Shutdown event.
         let _ = self.host.shutdown().await;

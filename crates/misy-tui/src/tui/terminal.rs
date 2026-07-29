@@ -187,6 +187,7 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         && !key.modifiers.contains(KeyModifiers::SUPER)
     {
         if client.state().mode() != super::action::UiMode::Input
+            && !client.state().question_editing()
             && let Some(index) = character.to_digit(10)
             && index != 0
         {

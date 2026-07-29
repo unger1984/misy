@@ -47,6 +47,12 @@ Read this document before making a new architecture or user-interaction choice.
   `--continue` are scoped to an exact canonical cwd match. Resume is explicit, appends to the same
   file, tolerates malformed trailing records, and fails on a missing, ambiguous, or unsupported
   session instead of silently creating a new one. `/clear` and `/new` share one handler.
+- `SetTodoList` and `AskUserQuestion` follow Kimi's model-visible names and payload shapes.
+  Checklists replace a complete ordered snapshot with `pending`, `in_progress`, and `done`
+  statuses. Questions accept one to four tabs, two to four choices, single or multiple selection,
+  and a client-synthesized `Other` choice. Codex contributes only typed request identity and
+  snapshot recovery. The core owns both tools; question capability version 1 is immutable for the
+  core lifetime, and three dismissals suppress further dialogs for the same turn owner.
 - Kimi's push notification delivery and Oh My Pi's push-oriented task presentation were considered
   but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
   post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1

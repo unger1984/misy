@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added the core-owned `SetTodoList` tool with full-snapshot updates, root-session persistence,
+  resume support, child-agent isolation, and semantic TUI transcript rendering.
+- Added the capability-gated `AskUserQuestion` tool with single- and multi-select prompts, custom
+  answers, cancellation-safe response handling, dismissal suppression, and an interactive TUI
+  dialog.
 - Added independent synchronous and background child agents with inherited context, correlated
   provider streams, scoped command ownership, addressable messaging, bounded transcripts, and a
   pull-based completion mailbox.

@@ -39,6 +39,8 @@ fn dispatcher_declares_every_registered_tool() {
     assert_eq!(
         names,
         [
+            "AskUserQuestion",
+            "SetTodoList",
             "agent_list",
             "agent_message",
             "agent_output",

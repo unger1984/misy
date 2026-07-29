@@ -27,6 +27,7 @@ impl CoreState {
         let state = turn::AgentTurnState::main(
             model.clone(),
             Arc::clone(&self.history),
+            Arc::clone(&self.todos),
             Arc::clone(active),
             id,
         );

@@ -1,8 +1,8 @@
 //! Headless-core integration tests.
 
 use misy_core::{
-    CoreEvent, ImageAttachment, InputModality, Message, MisyCore, MisyPaths, ModelId, ModelRef,
-    ProviderDeadlines, ProviderId, SubmissionId,
+    ClientCapabilities, CoreEvent, CoreOptions, ImageAttachment, InputModality, Message, MisyCore,
+    MisyPaths, ModelId, ModelRef, ProviderDeadlines, ProviderId, SubmissionId,
 };
 use serde_json::json;
 use std::{
@@ -32,6 +32,8 @@ mod lifecycle;
 mod limits;
 #[path = "core/models.rs"]
 mod models;
+#[path = "core/questions.rs"]
+mod questions;
 #[path = "core/queue.rs"]
 mod queue;
 #[path = "core/sessions.rs"]
@@ -91,6 +93,26 @@ fn test_core_with_deadlines(
         MisyPaths::from_root(temporary.path().join("misy")),
         &bundled,
         deadlines,
+    )
+    .expect("core discovery");
+    (temporary, core, target)
+}
+
+fn test_core_with_questions(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf) {
+    let temporary = tempfile::tempdir().expect("temporary root");
+    let bundled = temporary.path().join("bundled");
+    let target = temporary.path().join(format!("{name}.txt"));
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_provider_fixture.sh");
+    write_fixture_manifest(&bundled, "fixture", &fixture, &target);
+    let core = MisyCore::discover_with_options(
+        MisyPaths::from_root(temporary.path().join("misy")),
+        &bundled,
+        CoreOptions {
+            client_capabilities: ClientCapabilities {
+                question_request: Some(1),
+            },
+        },
     )
     .expect("core discovery");
     (temporary, core, target)

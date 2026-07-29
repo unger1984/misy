@@ -88,8 +88,6 @@ async fn dispatch_tools(
     for call in calls {
         let result = if state.active().cancelled.load(Ordering::Acquire) {
             crate::ToolResult::error(&call.id, "tool dispatch cancelled")
-        } else if !state.permits_agent_tools() && is_agent_tool(&call.name) {
-            crate::ToolResult::error(&call.id, "agent tools are unavailable to child agents")
         } else if call.name == "view_image"
             && !core.model_supports(state.model(), InputModality::Image)
         {
@@ -97,8 +95,8 @@ async fn dispatch_tools(
                 &call.id,
                 "view_image is unavailable because the selected model lacks image input",
             )
-        } else if state.permits_agent_tools() && is_agent_tool(&call.name) {
-            super::super::agents::dispatch_agent_tool(core, state, call).await
+        } else if super::super::tool_router::is_core_tool(&call.name) {
+            super::super::tool_router::dispatch(core, state, call).await
         } else {
             match state.identity() {
                 super::AgentTurnIdentity::Main => {
@@ -480,14 +478,16 @@ fn tool_definitions(
     supports_images: bool,
 ) -> Vec<crate::ToolDefinition> {
     if state.permits_agent_tools() {
-        core.dispatcher.definitions_for(supports_images)
+        core.dispatcher.definitions_for_client(
+            supports_images,
+            core.client_capabilities.question_request == Some(1),
+        )
     } else {
-        core.dispatcher.definitions_for_child(supports_images)
+        core.dispatcher.definitions_for_child(
+            supports_images,
+            core.client_capabilities.question_request == Some(1),
+        )
     }
-}
-
-fn is_agent_tool(name: &str) -> bool {
-    super::super::agents::is_agent_tool(name)
 }
 
 fn serialize_history_entry(entry: &HistoryEntry, include_images: bool) -> Value {

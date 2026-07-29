@@ -20,7 +20,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout, Command},
     runtime::Handle,
-    sync::{Mutex as AsyncMutex, oneshot, watch},
+    sync::{Mutex as AsyncMutex, mpsc, oneshot, watch},
     time::timeout,
 };
 
@@ -133,6 +133,45 @@ impl ProviderProcess {
         Ok(receiver)
     }
 
+    pub(super) async fn send_chat(
+        &self,
+        id: ProviderRequestId,
+        params: Value,
+    ) -> Result<
+        (
+            oneshot::Receiver<Result<Value, PendingFailure>>,
+            mpsc::UnboundedReceiver<Result<ProviderEvent, PendingFailure>>,
+        ),
+        ProviderError,
+    > {
+        let (response_sender, response_receiver) = oneshot::channel();
+        let (stream_sender, stream_receiver) = mpsc::unbounded_channel();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("provider transport mutex must not be poisoned");
+            if let Some(failure) = state.failure.clone() {
+                return Err(failure.into_error(&self.provider, id));
+            }
+            // Both routes exist before stdin is written because a plugin may reply immediately.
+            state.pending.insert(id.get(), response_sender);
+            state.streams.insert(id.get(), stream_sender);
+        }
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": id.get(),
+            "method": "chat.start",
+            "params": params,
+        });
+        if let Err(error) = self.write_message(&message).await {
+            let failure = PendingFailure::Transport(error.to_string());
+            self.fail(failure.clone()).await;
+            return Err(failure.into_error(&self.provider, id));
+        }
+        Ok((response_receiver, stream_receiver))
+    }
+
     pub(super) async fn send_notification(
         &self,
         method: &str,
@@ -157,14 +196,21 @@ impl ProviderProcess {
     }
 
     pub(super) async fn cancel(&self, id: ProviderRequestId) -> Result<(), ProviderError> {
-        let pending = self
-            .state
-            .lock()
-            .expect("provider transport mutex must not be poisoned")
-            .pending
-            .remove(&id.get());
+        let (pending, stream) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("provider transport mutex must not be poisoned");
+            (
+                state.pending.remove(&id.get()),
+                state.streams.remove(&id.get()),
+            )
+        };
         if let Some(sender) = pending {
             // The waiter may have dropped its receiver after a racing response; cancel stands.
+            let _ = sender.send(Err(PendingFailure::Cancelled));
+        }
+        if let Some(sender) = stream {
             let _ = sender.send(Err(PendingFailure::Cancelled));
         }
         self.send_notification("chat.cancel", json!({ "request_id": id.get() }))

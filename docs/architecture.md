@@ -99,16 +99,29 @@ flowchart LR
     draining. The model is not notified when a background command finishes: it must pull new output
     and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed
     once, while the terminal summary and client snapshot remain in the recent-task registry.
+14. A main conversation may spawn up to four process-local child-agent sessions. Each child owns
+    an ephemeral history, cancellation/request slots, inbox, model selection, and command owner;
+    only the main history is persisted. Children inherit a completed parent-history prefix and
+    cannot recursively spawn agents. Concurrent chats on one provider are routed by request ID.
+15. Background agent results reserve one of eight lossless mailbox slots and are pulled by the
+    model with `agent_wait`; `AgentFinished` independently informs clients. Child commands share
+    the 64-process limit, are capped at 48 collectively and 16 per child, and are reaped before
+    terminal agent publication. Main plus four active child histories retain at most 100 MiB of
+    image payloads; retained semantic transcripts omit image bytes and use a 1 MiB budget.
+16. Agent records belong to the current root-conversation generation. Session switching refuses
+    live, mailbox, or retained agent state until a client explicitly confirms discard. Shutdown
+    closes agent admission, stops and reaps children, then shuts down commands and providers.
 
 ## Fixed Constraints
 
 - The architecture is approved and changes only by explicit user decision.
 - Provider plugins are language-independent standalone packages and subprocesses.
-- The selected model is a default for direct interaction, not a global singleton assumption; future agents may use other provider/model pairs.
+- The selected model is the main-session default; a child may select another cached,
+  authenticated provider/model pair.
 - External clients must reuse the `misy-core` contract, including its public async operations,
   events, cancellation methods, and `CoreSnapshot` projection.
-- The multimodal public-domain additions ship with the workspace contract version `0.2.0`;
-  provider protocol v2 remains compatible because image fields are capability-gated.
+- Child agents ship with workspace contract version `0.3.0`; provider protocol v2 remains
+  compatible because concurrent chat notifications already carry request IDs.
 
 ## Change Impact
 

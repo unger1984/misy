@@ -89,10 +89,12 @@ model, authentication, session, and tool orchestration remain in the core.
   or recent activities exist and separately counts running tasks, terminal tasks, and active
   agents. `Down` from an empty composer focuses it and `Enter` opens it. The popup has `All`,
   `Agents`, and `Tasks` tabs, includes `Main`, supports filtering, and shows a bounded tail preview
-  for the selected task. `Enter` opens its ordered output in a fullscreen log viewer. `Up`, `Down`,
+  for the selected task or semantic child-agent transcript. Agent rows show `agent-N`, model,
+  title, and status. `Enter` opens command output or the agent transcript in a fullscreen viewer.
+  `Up`, `Down`,
   `PageUp`, and `PageDown` scroll; live output follows the tail until the user scrolls upward, and
   `Escape` restores the same popup tab, filter, and selection. `Ctrl+X` immediately stops the
-  selected running task. This stop shortcut is named
+  selected running task or agent through the generic core stop operation. This stop shortcut is named
   `activities.stop` in config version 2 and may be rebound; popup hints use the effective binding.
 
   ```toml
@@ -168,8 +170,14 @@ model, authentication, session, and tool orchestration remain in the core.
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event and background-operation processing are bounded per tick so continuous streaming cannot
   starve input handling.
+- A background `AgentFinished` event adds one compact transcript notice. The model-facing mailbox
+  remains independent, and a missed lossy event can be recovered from `CoreSnapshot.agents` and
+  `agent_transcript`. Synchronous agent results are already visible as tool results and are not
+  duplicated as notices.
 - Conversation persistence belongs to the core. The TUI only requests list/new/resume operations
   and projects the returned canonical history; it never reads or writes session JSONL directly.
+- When session switching encounters retained agent state, the TUI preserves it until the user
+  confirms discard; confirmation calls the core cleanup operation before retrying the switch.
 - The TUI never owns task processes. It polls bounded client output while an activity preview or
   log viewer is visible and sends stop requests through the core; core shutdown remains responsible
   for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the

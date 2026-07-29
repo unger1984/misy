@@ -12,6 +12,8 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[path = "core/agents.rs"]
+mod agents;
 #[path = "core/auth.rs"]
 mod auth;
 #[path = "core/basic.rs"]

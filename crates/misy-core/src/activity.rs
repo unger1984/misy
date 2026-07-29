@@ -1,7 +1,17 @@
 //! Core-owned background activity contracts shared with frontend clients.
 
+use crate::AgentId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// Internal owner used to scope model-facing command access and admission.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ActivityOwner {
+    /// Direct-interaction root session.
+    Main,
+    /// Independent child-agent session.
+    Agent(AgentId),
+}
 
 /// Stable identifier for one background activity in the current Misy process.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -68,6 +78,9 @@ pub struct ActivitySummary {
     pub id: ActivityId,
     /// Activity category used by client filters.
     pub kind: ActivityKind,
+    /// Child-agent identifier when this activity represents an agent session.
+    #[serde(default)]
+    pub agent_id: Option<AgentId>,
     /// Current lifecycle state.
     pub status: ActivityStatus,
     /// Short user-facing label.

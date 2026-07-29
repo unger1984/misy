@@ -1,7 +1,9 @@
 //! Cheap, in-memory state snapshots for headless-core clients.
 
 use super::{MisyCore, SubmissionId};
-use crate::{ActivitySummary, ModelRef, ProviderId};
+use crate::{ActivitySummary, AgentSummary, ModelRef, ProviderId};
+
+const MAX_TERMINAL_ACTIVITIES: usize = 20;
 
 /// One provider's cached local authentication state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +21,8 @@ pub struct ProviderAuthState {
 pub struct CoreSnapshot {
     /// Active activities followed by the most recent terminal activities.
     pub activities: Vec<ActivitySummary>,
+    /// Live child agents followed by retained terminal child agents.
+    pub agents: Vec<AgentSummary>,
     /// Model selected for direct interaction, if any.
     pub selected_model: Option<ModelRef>,
     /// Submission currently occupying the FIFO session slot, if any.
@@ -58,8 +62,28 @@ impl MisyCore {
             .lock()
             .expect("credential state mutex must not be poisoned");
         let (active_submission, queued_submissions) = submission_queue.snapshot();
+        let agents = state.agents.list();
+        let pinned = state.agents.pinned_activity_ids();
+        let mut activities = state.dispatcher.activities();
+        activities.extend(agents.iter().map(AgentSummary::activity_summary));
+        activities.sort_by_key(|activity| {
+            (
+                activity.status.is_terminal(),
+                activity.status.is_terminal() && !pinned.contains(&activity.id),
+                std::cmp::Reverse(activity.started_at_ms),
+            )
+        });
+        let mut terminal_count = 0;
+        activities.retain(|activity| {
+            if !activity.status.is_terminal() {
+                return true;
+            }
+            terminal_count += 1;
+            terminal_count <= MAX_TERMINAL_ACTIVITIES
+        });
         CoreSnapshot {
-            activities: state.dispatcher.activities(),
+            activities,
+            agents,
             selected_model: selected_model.clone(),
             active_submission,
             queued_submissions,

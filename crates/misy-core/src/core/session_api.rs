@@ -89,6 +89,13 @@ impl MisyCore {
         &self,
     ) -> Result<std::sync::MutexGuard<'_, super::queue::SubmissionQueue>, CoreError> {
         self.inner.state.ensure_running()?;
+        let (live_agents, pending_results) = self.inner.state.agents.pending_state();
+        if live_agents > 0 || pending_results > 0 || !self.inner.state.agents.list().is_empty() {
+            return Err(CoreError::SessionAgentStatePending {
+                live_agents,
+                pending_results,
+            });
+        }
         let queue = self
             .inner
             .state

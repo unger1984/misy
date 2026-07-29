@@ -425,6 +425,38 @@ impl CoreState {
         present: bool,
     ) -> Result<(), CoreError> {
         let _credentials = self.credential_operations.lock().await;
+        self.store_credentials_locked(provider, response, present)
+            .await
+    }
+
+    /// Stores a chat credential rotation only when it was produced against the current epoch.
+    ///
+    /// The epoch comparison shares the credential mutation lock with file writes, so a newer
+    /// refresh or logout wins over a late chat response without restoring stale credentials.
+    pub(super) async fn store_credentials_if_epoch(
+        &self,
+        provider: &ProviderId,
+        expected: CredentialEpoch,
+        response: &mut Value,
+        present: bool,
+    ) -> Result<(), CoreError> {
+        let _credentials = self.credential_operations.lock().await;
+        if self.credential_epoch(provider).value != expected.value {
+            if let Some(object) = response.as_object_mut() {
+                object.remove("credentials");
+            }
+            return Ok(());
+        }
+        self.store_credentials_locked(provider, response, present)
+            .await
+    }
+
+    async fn store_credentials_locked(
+        &self,
+        provider: &ProviderId,
+        response: &mut Value,
+        present: bool,
+    ) -> Result<(), CoreError> {
         // A credential-less mutation (the `none` flow) carries no record to derive a method
         // from, so the previously recorded method stays untouched.
         let method_change = match response.get("credentials") {

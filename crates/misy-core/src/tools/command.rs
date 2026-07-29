@@ -1,6 +1,6 @@
 //! Unified shell-command parsing, spawning, and bounded foreground yielding.
 
-use crate::{ActivityOutput, ActivityStatus, ToolCall, ToolResult};
+use crate::{ActivityOutput, ActivityStatus, ToolCall, ToolResult, activity::ActivityOwner};
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use serde_json::Value;
 use std::{io, process::Stdio, time::Duration};
@@ -118,6 +118,7 @@ impl CommandRequest {
 
 pub(super) async fn run(
     call: &ToolCall,
+    owner: ActivityOwner,
     manager: &ActivityManager,
     timeout_override: Option<Duration>,
     cancellation: Option<tokio::sync::watch::Receiver<bool>>,
@@ -132,7 +133,7 @@ pub(super) async fn run(
         request.yield_after
     };
     let max_output_tokens = request.max_output_tokens;
-    let pending = match manager.start(&request) {
+    let pending = match manager.start_for_owner(owner, &request) {
         Ok(pending) => pending,
         Err(message) => return spawn_error(call, &message),
     };

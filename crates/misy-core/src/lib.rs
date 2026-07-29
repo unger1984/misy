@@ -74,6 +74,7 @@ pub use activity::{
 };
 pub use config::{Config, ConfigError, ConfigStore, CredentialError, MisyPaths};
 pub use core::{
+    AgentId, AgentSummary, AgentTranscript, AgentTranscriptEntry, AgentTranscriptEntryKind,
     AvailableModels, CoreError, CoreEvent, CoreSnapshot, HistoryEntry, MisyCore, ProviderAuthState,
     ProviderModelError, ResumeOutcome, SessionError, SessionSummary, SubmissionId,
 };
@@ -101,7 +102,8 @@ pub use config::CredentialStore;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use providers::{
-    PendingProviderRequest, ProviderCatalog, ProviderDeadlines, ProviderEvent, ProviderHost,
+    PendingProviderChat, PendingProviderRequest, ProviderCatalog, ProviderDeadlines, ProviderEvent,
+    ProviderHost,
 };
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

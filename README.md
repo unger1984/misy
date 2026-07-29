@@ -73,6 +73,8 @@ The repository already contains a working development-stage vertical slice:
 - Rust-owned filesystem and unified `exec_command` tools, including JSON Schema validation,
   automatic foreground-to-background yielding, optional macOS/Linux PTY input through
   `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
+- independent synchronous and background child-agent sessions with inherited context, scoped
+  tools, addressable messaging, bounded transcripts, and a pull-based completion mailbox;
 - unit, integration, end-to-end, and provider contract tests that use local fixtures instead of
   real accounts or external network access.
 
@@ -85,7 +87,7 @@ The following areas are intentionally deferred and remain open for future develo
 
 - explicit permissions and approval flows for local tools;
 - MCP integration;
-- subagents and richer orchestration;
+- recursive agent trees, roles, batch spawning, and isolated agent worktrees;
 - provider marketplace installation and updates;
 - API-key and generic prompt-based authentication;
 - a daemon or public IPC boundary for multiple clients;

@@ -17,8 +17,9 @@ use super::{
     state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
-    ActivityId, ActivityOutput, AvailableModels, CoreError, CoreEvent, MisyCore, MisyPaths,
-    ModelRef, ProviderDisplayName, ProviderId, ProviderManifest, SubmissionId, UsageReport,
+    ActivityId, ActivityOutput, AgentId, AgentTranscript, AvailableModels, CoreError, CoreEvent,
+    MisyCore, MisyPaths, ModelRef, ProviderDisplayName, ProviderId, ProviderManifest, SubmissionId,
+    UsageReport,
 };
 use serde_json::Value;
 use snapshot::provider_choices;
@@ -76,6 +77,14 @@ pub(super) enum ProviderOperationResult {
     // `SubmissionAccepted` maps the transcript; this result gates draft clearing and history.
     Submit(SubmissionRequest, Result<SubmissionId, String>),
     ActivityOutput(ActivityId, Option<ActivityOutput>),
+    AgentTranscript(AgentId, Result<AgentTranscript, String>),
+    DiscardAgents(Result<(), String>),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum PendingSessionSwitch {
+    New,
+    Resume(String),
 }
 
 pub(super) struct SubmissionRequest {
@@ -103,6 +112,7 @@ pub struct TuiClient<B> {
     composer_submission_pending: bool,
     activity_output_pending: bool,
     next_activity_output_refresh: std::time::Instant,
+    pending_session_switch: Option<PendingSessionSwitch>,
     keymap: Keymap,
 }
 
@@ -172,6 +182,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             composer_submission_pending: false,
             activity_output_pending: false,
             next_activity_output_refresh: std::time::Instant::now(),
+            pending_session_switch: None,
             keymap,
         }
     }
@@ -458,15 +469,34 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
     }
 
+    fn start_agent_transcript_refresh(&mut self, id: AgentId) {
+        if self.activity_output_pending {
+            return;
+        }
+        self.activity_output_pending = true;
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let transcript = core.agent_transcript(id).map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::AgentTranscript(id, transcript));
+        });
+    }
+
     fn refresh_activity_output_if_due(&mut self) {
-        let Some(id) = self.state.activity_output_target() else {
+        let command = self.state.activity_output_target();
+        let agent = self.state.agent_transcript_target();
+        if command.is_none() && agent.is_none() {
             self.activity_output_pending = false;
             return;
-        };
+        }
         let now = std::time::Instant::now();
         if now >= self.next_activity_output_refresh {
             self.next_activity_output_refresh = now + Duration::from_millis(200);
-            self.start_activity_output_refresh(id);
+            if let Some(id) = command {
+                self.start_activity_output_refresh(id);
+            } else if let Some(id) = agent {
+                self.start_agent_transcript_refresh(id);
+            }
         }
     }
 
@@ -480,7 +510,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 .add_error(format!("task `{id}` is already finished"));
         }
         if refresh_detail {
-            self.start_activity_output_refresh(id);
+            if let Some(agent) = self.state.agent_transcript_target() {
+                self.start_agent_transcript_refresh(agent);
+            } else {
+                self.start_activity_output_refresh(id);
+            }
         }
     }
 
@@ -521,6 +555,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.state.open_activity_detail(id);
                     self.start_activity_output_refresh(id);
                 }
+                Some(super::activity_picker::ActivityChoice::Agent(id, agent)) => {
+                    self.state.open_agent_detail(id, agent);
+                    self.start_agent_transcript_refresh(agent);
+                }
                 None => {}
             },
             UiMode::SessionList => {
@@ -528,10 +566,35 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.resume_session(&id)?;
                 }
             }
+            UiMode::Confirmation => {
+                if self.state.selected_agent_discard() == Some(true) {
+                    self.start_agent_discard();
+                } else {
+                    self.pending_session_switch = None;
+                    self.state.view = None;
+                    self.state
+                        .add_info("Agent state kept; session switch cancelled");
+                }
+            }
             UiMode::ActivityDetail => {}
             UiMode::Input => {}
         }
         Ok(())
+    }
+
+    fn start_agent_discard(&mut self) {
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let result = core
+                .discard_agent_state()
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::DiscardAgents(result));
+        });
+        self.state.view = None;
+        self.state
+            .add_info("Stopping agents and discarding retained results…");
     }
 
     fn provider_display_name<'a>(&'a self, provider: &'a ProviderId) -> &'a str {

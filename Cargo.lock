@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "misy-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "atomicwrites",
  "base64",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "misy-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "base64",

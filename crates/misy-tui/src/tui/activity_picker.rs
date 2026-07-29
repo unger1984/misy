@@ -1,12 +1,13 @@
 //! Filterable activity list shared by tasks and future agent sessions.
 
 use super::list::{ListRow, ListRowDisplay, ListView};
-use misy_core::{ActivityId, ActivityKind, ActivityStatus, ActivitySummary};
+use misy_core::{ActivityId, ActivityKind, ActivityStatus, ActivitySummary, AgentId, AgentSummary};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ActivityChoice {
     Main,
     Activity(ActivityId),
+    Agent(ActivityId, AgentId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,24 +20,28 @@ enum ActivityTab {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ActivityPicker {
     activities: Vec<ActivitySummary>,
+    agents: Vec<AgentSummary>,
     tab: ActivityTab,
     view: ListView<ActivityChoice>,
 }
 
 impl ActivityPicker {
-    pub(super) fn new(activities: Vec<ActivitySummary>) -> Self {
+    pub(super) fn new(activities: Vec<ActivitySummary>, agents: Vec<AgentSummary>) -> Self {
         let tab = ActivityTab::All;
-        let view = ListView::new("Activities", rows(&activities, tab));
+        let view = ListView::new("Activities", rows(&activities, &agents, tab));
         Self {
             activities,
+            agents,
             tab,
             view,
         }
     }
 
-    pub(super) fn refresh(&mut self, activities: Vec<ActivitySummary>) {
+    pub(super) fn refresh(&mut self, activities: Vec<ActivitySummary>, agents: Vec<AgentSummary>) {
         self.activities = activities;
-        self.view.replace_rows(rows(&self.activities, self.tab));
+        self.agents = agents;
+        self.view
+            .replace_rows(rows(&self.activities, &self.agents, self.tab));
     }
 
     pub(super) fn insert_filter(&mut self, text: &str) {
@@ -96,11 +101,16 @@ impl ActivityPicker {
 
     fn set_tab(&mut self, tab: ActivityTab) {
         self.tab = tab;
-        self.view.replace_rows(rows(&self.activities, tab));
+        self.view
+            .replace_rows(rows(&self.activities, &self.agents, tab));
     }
 }
 
-fn rows(activities: &[ActivitySummary], tab: ActivityTab) -> Vec<ListRow<ActivityChoice>> {
+fn rows(
+    activities: &[ActivitySummary],
+    agents: &[AgentSummary],
+    tab: ActivityTab,
+) -> Vec<ListRow<ActivityChoice>> {
     let mut rows = Vec::new();
     if tab != ActivityTab::Tasks {
         rows.push(ListRow::current(
@@ -113,7 +123,7 @@ fn rows(activities: &[ActivitySummary], tab: ActivityTab) -> Vec<ListRow<Activit
         activities
             .iter()
             .filter(|activity| included(activity.kind, tab))
-            .map(activity_row),
+            .map(|activity| activity_row(activity, agents)),
     );
     if rows.is_empty() {
         rows.push(ListRow::informational("No matching activities"));
@@ -129,7 +139,7 @@ fn included(kind: ActivityKind, tab: ActivityTab) -> bool {
     }
 }
 
-fn activity_row(activity: &ActivitySummary) -> ListRow<ActivityChoice> {
+fn activity_row(activity: &ActivitySummary, agents: &[AgentSummary]) -> ListRow<ActivityChoice> {
     let status = match activity.status {
         ActivityStatus::Queued => "queued",
         ActivityStatus::Running => "running",
@@ -138,10 +148,30 @@ fn activity_row(activity: &ActivitySummary) -> ListRow<ActivityChoice> {
         ActivityStatus::Failed => "failed",
         ActivityStatus::Stopped => "stopped",
     };
+    let choice = activity
+        .agent_id
+        .map_or(ActivityChoice::Activity(activity.id), |agent| {
+            ActivityChoice::Agent(activity.id, agent)
+        });
+    let identifier = activity
+        .agent_id
+        .map_or_else(|| activity.id.to_string(), |agent| agent.to_string());
+    let model = activity.agent_id.and_then(|id| {
+        agents.iter().find(|agent| agent.id == id).map(|agent| {
+            format!(
+                " · {}/{}",
+                agent.model.provider.as_str(),
+                agent.model.model.as_str()
+            )
+        })
+    });
     ListRow::selectable_with_search(
-        ActivityChoice::Activity(activity.id),
+        choice,
         format!("{} {}", status_marker(activity.status), activity.title),
-        Some(format!("{} · {status}", activity.id)),
+        Some(format!(
+            "{identifier} · {status}{}",
+            model.unwrap_or_default()
+        )),
         activity.cwd.clone().unwrap_or_default(),
     )
 }
@@ -158,7 +188,7 @@ fn status_marker(status: ActivityStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::ActivityPicker;
-    use misy_core::ActivitySummary;
+    use misy_core::{ActivitySummary, AgentSummary};
 
     fn activity(status: &str) -> ActivitySummary {
         serde_json::from_value(serde_json::json!({
@@ -175,11 +205,47 @@ mod tests {
 
     #[test]
     fn distinguishes_running_completed_and_failed_tasks_with_markers() {
-        let running = ActivityPicker::new(vec![activity("running")]);
+        let running = ActivityPicker::new(vec![activity("running")], Vec::new());
         assert_eq!(running.visible_rows(8)[1].label, "○ fixture task");
-        let completed = ActivityPicker::new(vec![activity("completed")]);
+        let completed = ActivityPicker::new(vec![activity("completed")], Vec::new());
         assert_eq!(completed.visible_rows(8)[1].label, "● fixture task");
-        let failed = ActivityPicker::new(vec![activity("failed")]);
+        let failed = ActivityPicker::new(vec![activity("failed")], Vec::new());
         assert_eq!(failed.visible_rows(8)[1].label, "× fixture task");
+    }
+
+    #[test]
+    fn agent_tab_uses_agent_id_and_model() {
+        let activity: ActivitySummary = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "kind": "agent",
+            "agent_id": 3,
+            "status": "running",
+            "title": "Review races",
+            "cwd": null,
+            "started_at_ms": 1,
+            "exit_code": null
+        }))
+        .expect("deserialize agent activity");
+        let agent: AgentSummary = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "activity_id": 7,
+            "title": "Review races",
+            "model": {"provider": "fixture", "model": "model-a"},
+            "status": "running",
+            "run_in_background": true,
+            "started_at_ms": 1,
+            "finished_at_ms": null,
+            "terminal_message": null
+        }))
+        .expect("deserialize agent summary");
+        let mut picker = ActivityPicker::new(vec![activity], vec![agent]);
+        picker.tab_right();
+        let rows = picker.visible_rows(8);
+        assert_eq!(rows[0].label, "Main");
+        assert_eq!(rows[1].label, "○ Review races");
+        assert_eq!(
+            rows[1].description.as_deref(),
+            Some("agent-3 · running · fixture/model-a")
+        );
     }
 }

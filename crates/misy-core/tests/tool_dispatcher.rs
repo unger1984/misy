@@ -39,10 +39,16 @@ fn dispatcher_declares_every_registered_tool() {
     assert_eq!(
         names,
         [
+            "agent_list",
+            "agent_message",
+            "agent_output",
+            "agent_stop",
+            "agent_wait",
             "custom_echo",
             "exec_command",
             "list_directory",
             "read_file",
+            "spawn_agent",
             "task_list",
             "task_stop",
             "view_image",

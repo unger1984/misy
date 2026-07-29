@@ -3,12 +3,14 @@
 mod activities;
 mod events;
 mod sessions;
+mod spinner;
 #[cfg(test)]
 mod tests;
 mod transcript;
 mod turns;
 
 pub(super) use activities::output_content_labels;
+pub(super) use spinner::spinner_frame;
 pub use transcript::TranscriptRow;
 
 use super::{
@@ -25,8 +27,8 @@ use super::{
     startup_header::StartupHeader,
 };
 use misy_core::{
-    ActivityOutput, CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderDisplayName, ProviderId,
-    SubmissionId,
+    ActivityOutput, AgentTranscript, CoreSnapshot, ModelRef, ProviderAuthMethod,
+    ProviderDisplayName, ProviderId, SubmissionId,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,7 +62,8 @@ pub(super) enum ActiveView {
     Models(ModelPicker),
     Activities(ActivityPicker),
     Sessions(SessionPicker),
-    ActivityLog(activities::ActivityLogView),
+    AgentDiscard(ListView<bool>),
+    ActivityLog(Box<activities::ActivityLogView>),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -121,6 +124,7 @@ pub struct UiState {
     pub(super) transcript_expand_hint: String,
     tool_output_expanded: bool,
     pub(super) activity_preview: Option<ActivityOutput>,
+    pub(super) agent_preview: Option<AgentTranscript>,
     session_id: Option<String>,
 }
 
@@ -134,6 +138,7 @@ impl Default for UiState {
             provider_names: BTreeMap::new(),
             snapshot: CoreSnapshot {
                 activities: Vec::new(),
+                agents: Vec::new(),
                 selected_model: None,
                 active_submission: None,
                 queued_submissions: Vec::new(),
@@ -156,6 +161,7 @@ impl Default for UiState {
             transcript_expand_hint: "Ctrl+O".to_owned(),
             tool_output_expanded: false,
             activity_preview: None,
+            agent_preview: None,
             session_id: None,
         }
     }
@@ -189,6 +195,7 @@ impl UiState {
             Some(ActiveView::Models(_)) => UiMode::ModelList,
             Some(ActiveView::Activities(_)) => UiMode::ActivityList,
             Some(ActiveView::Sessions(_)) => UiMode::SessionList,
+            Some(ActiveView::AgentDiscard(_)) => UiMode::Confirmation,
             Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
         }
     }
@@ -228,6 +235,7 @@ impl UiState {
                 .map(|row| row.label)
                 .collect(),
             Some(ActiveView::Sessions(view)) => view.labels(),
+            Some(ActiveView::AgentDiscard(view)) => view.labels(),
             Some(ActiveView::ActivityLog(view)) => view
                 .output
                 .as_ref()
@@ -313,13 +321,14 @@ impl UiState {
             self.capture_turn_transition(snapshot.active_submission, now);
         }
         let activities = snapshot.activities.clone();
+        let agents = snapshot.agents.clone();
         self.snapshot = snapshot;
         if !self.activity_bar_visible() {
             self.activity_bar_focused = false;
         }
         match &mut self.view {
-            Some(ActiveView::Activities(picker)) => picker.refresh(activities),
-            Some(ActiveView::ActivityLog(view)) => view.picker.refresh(activities),
+            Some(ActiveView::Activities(picker)) => picker.refresh(activities, agents),
+            Some(ActiveView::ActivityLog(view)) => view.picker.refresh(activities, agents),
             _ => {}
         }
     }
@@ -446,6 +455,7 @@ impl UiState {
             Some(ActiveView::Activities(view)) => Some(activities::activity_presentation(
                 view,
                 self.activity_preview.as_ref(),
+                self.agent_preview.as_ref(),
                 visible_rows,
                 &self.activity_stop_hint,
             )),
@@ -457,6 +467,15 @@ impl UiState {
                 tabs: Vec::new(),
                 loading: false,
                 help_hint: None,
+            }),
+            Some(ActiveView::AgentDiscard(view)) => Some(ModalPresentation {
+                title: "Discard agent state?".to_owned(),
+                rows: view.visible_rows(visible_rows),
+                operation: None,
+                back_hint: false,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: Some("enter choose  esc keep agent state".to_owned()),
             }),
             Some(ActiveView::ActivityLog(_)) => None,
             Some(ActiveView::ProviderSettings {
@@ -547,6 +566,7 @@ impl UiState {
             Some(ActiveView::Models(view)) => view.insert_filter(text),
             Some(ActiveView::Activities(view)) => view.insert_filter(text),
             Some(ActiveView::Sessions(view)) => view.insert_filter(text),
+            Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
@@ -559,6 +579,7 @@ impl UiState {
             Some(ActiveView::Models(view)) => view.backspace_filter(),
             Some(ActiveView::Activities(view)) => view.backspace_filter(),
             Some(ActiveView::Sessions(view)) => view.backspace_filter(),
+            Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
@@ -597,6 +618,7 @@ impl UiState {
             Some(ActiveView::Models(view)) => view.select_number(one_based),
             Some(ActiveView::Activities(view)) => view.select_number(one_based),
             Some(ActiveView::Sessions(view)) => view.select_number(one_based),
+            Some(ActiveView::AgentDiscard(view)) => view.select_number(one_based),
             Some(ActiveView::ActivityLog(_)) => false,
             None => false,
         }
@@ -609,6 +631,7 @@ impl UiState {
             Some(ActiveView::Models(view)) => view.move_up(),
             Some(ActiveView::Activities(view)) => view.move_up(),
             Some(ActiveView::Sessions(view)) => view.move_up(),
+            Some(ActiveView::AgentDiscard(view)) => view.move_up(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
             None => {}
         }
@@ -621,6 +644,7 @@ impl UiState {
             Some(ActiveView::Models(view)) => view.move_down(),
             Some(ActiveView::Activities(view)) => view.move_down(),
             Some(ActiveView::Sessions(view)) => view.move_down(),
+            Some(ActiveView::AgentDiscard(view)) => view.move_down(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
             None => {}
         }
@@ -647,7 +671,12 @@ impl UiState {
             Some(ActiveView::ProviderSettings { .. }) => {
                 self.view = Some(ActiveView::Providers(self.provider_list()));
             }
-            Some(ActiveView::Providers(_) | ActiveView::Models(_) | ActiveView::Sessions(_)) => {
+            Some(
+                ActiveView::Providers(_)
+                | ActiveView::Models(_)
+                | ActiveView::Sessions(_)
+                | ActiveView::AgentDiscard(_),
+            ) => {
                 self.view = None;
                 self.provider_operation = None;
                 self.provider_device_code = None;
@@ -657,25 +686,12 @@ impl UiState {
                 let Some(ActiveView::ActivityLog(view)) = self.view.take() else {
                     return;
                 };
+                let view = *view;
                 self.activity_preview = view.output;
+                self.agent_preview = None;
                 self.view = Some(ActiveView::Activities(view.picker));
             }
             None => {}
         }
-    }
-}
-
-pub(super) fn spinner_frame(ticks: u128) -> &'static str {
-    match ticks % 10 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        3 => "⠸",
-        4 => "⠼",
-        5 => "⠴",
-        6 => "⠦",
-        7 => "⠧",
-        8 => "⠇",
-        _ => "⠏",
     }
 }

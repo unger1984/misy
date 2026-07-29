@@ -25,21 +25,40 @@ async fn host_lazily_correlates_concurrent_requests_and_forwards_notifications()
     let provider = ProviderId::new("fixture");
 
     assert_eq!(host.running_provider_count(), 0);
-    let slow = host
-        .request_async(&provider, "chat.start", json!({ "delay": "slow" }))
+    let mut slow = host
+        .start_chat(&provider, json!({ "delay": "slow" }))
         .await
         .expect("slow request");
-    let fast = host
-        .request_async(&provider, "chat.start", json!({ "delay": "fast" }))
+    let mut fast = host
+        .start_chat(&provider, json!({ "delay": "fast" }))
         .await
         .expect("fast request");
 
+    let fast_id = fast.id().get();
+    let slow_id = slow.id().get();
     assert_eq!(
-        fast.wait().await.expect("fast response"),
+        fast.next_event()
+            .await
+            .expect("fast early event")
+            .expect("fast stream event")
+            .params["request_id"],
+        json!(fast_id)
+    );
+    assert_eq!(
+        slow.next_event()
+            .await
+            .expect("slow early event")
+            .expect("slow stream event")
+            .params["request_id"],
+        json!(slow_id)
+    );
+
+    assert_eq!(
+        fast.wait_response().await.expect("fast response"),
         json!({ "reply": "fast" })
     );
     assert_eq!(
-        slow.wait().await.expect("slow response"),
+        slow.wait_response().await.expect("slow response"),
         json!({ "reply": "slow" })
     );
     assert_eq!(

@@ -1,8 +1,12 @@
 //! Serialized model polling and PTY input for published command sessions.
 
 use super::{ActivityInput, ActivityManager, ActivityRecord};
-use crate::{ActivityId, ActivityOutput};
-use std::{io::Write, sync::atomic::Ordering, time::Duration};
+use crate::{ActivityId, ActivityOutput, activity::ActivityOwner};
+use std::{
+    io::Write,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 use tokio::sync::watch;
 
 #[derive(Debug)]
@@ -14,15 +18,28 @@ pub(in crate::tools) enum InteractionError {
 }
 
 impl ActivityManager {
-    pub(in crate::tools) async fn interact(
+    pub(in crate::tools) async fn interact_for_owner(
         &self,
+        owner: ActivityOwner,
         id: ActivityId,
+        chars: &str,
+        wait: Duration,
+        max_output_tokens: usize,
+        cancellation: Option<watch::Receiver<bool>>,
+    ) -> Result<ActivityOutput, InteractionError> {
+        let record = self
+            .record_for_owner(owner, id)
+            .ok_or(InteractionError::Unknown)?;
+        Self::interact_record(record, chars, wait, max_output_tokens, cancellation).await
+    }
+
+    async fn interact_record(
+        record: Arc<ActivityRecord>,
         chars: &str,
         wait: Duration,
         max_output_tokens: usize,
         mut cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<ActivityOutput, InteractionError> {
-        let record = self.record(id).ok_or(InteractionError::Unknown)?;
         let _interaction = record.interaction.lock().await;
         if !record.session_open.load(Ordering::Acquire) {
             return Err(InteractionError::Unknown);

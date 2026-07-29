@@ -8,6 +8,18 @@ impl UiState {
         match event {
             CoreEvent::ActivityChanged { .. } => {}
             CoreEvent::ActivityFinished { output } => self.add_activity_finished(output),
+            CoreEvent::AgentFinished { agent, result } => {
+                let result = result.trim();
+                let detail = if result.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {result}")
+                };
+                self.add_info(format!(
+                    "{} · {} · {:?}{detail}",
+                    agent.id, agent.title, agent.status
+                ));
+            }
             CoreEvent::ProviderDiscovered { .. } | CoreEvent::ModelsListed { .. } => {}
             CoreEvent::AuthenticationChanged { .. } | CoreEvent::ModelSelected { .. } => {}
             CoreEvent::SubmissionAccepted {

@@ -36,8 +36,12 @@ Read this document before making a new architecture or user-interaction choice.
   by adding `description` and `run_in_background`. Its initial and incremental output projections
   share the Codex-style 10,000-token default without claiming wire compatibility.
 - The shared activity UI follows the local Codex and Oh My Pi session/task picker patterns while
-  retaining Misy's core/client boundary. Agent sessions remain deferred, but their activity kind,
-  tabs, and `Main` navigation slot are reserved by the contract.
+  retaining Misy's core/client boundary. `spawn_agent` supports synchronous and detached runs;
+  background results use an explicit pull mailbox. V1 permits four live children, forbids nested
+  spawn, and keeps each child history ephemeral and independent.
+- From Codex, Misy adopts forked child sessions, request-correlated streams, and addressable
+  wait/message/stop operations. From Oh My Pi, it adopts a shared sync/background lifecycle,
+  core-owned activity projection, bounded concurrency, and owner-scoped cleanup.
 - Conversations are always persisted incrementally in flat, versioned, append-only JSONL files
   under `~/.misy/sessions`. Headers carry canonical cwd and model identity; the resume picker and
   `--continue` are scoped to an exact canonical cwd match. Resume is explicit, appends to the same
@@ -50,7 +54,8 @@ Read this document before making a new architecture or user-interaction choice.
 
 ## Deferred Scope
 
-MCP, permissions, subagents, marketplace installation/update, daemon/public IPC, desktop UI,
+MCP, permissions, recursive agents, agent roles/batches/worktree isolation, marketplace
+installation/update, daemon/public IPC, desktop UI,
 API-key authentication, generic prompt-based
 authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.

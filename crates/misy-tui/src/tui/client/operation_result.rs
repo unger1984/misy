@@ -139,6 +139,27 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.state.set_activity_output(output);
                 }
             }
+            ProviderOperationResult::AgentTranscript(_id, transcript) => {
+                self.activity_output_pending = false;
+                match transcript {
+                    Ok(transcript) => self.state.set_agent_transcript(transcript),
+                    Err(error) => self.state.add_error(error),
+                }
+            }
+            ProviderOperationResult::DiscardAgents(result) => match result {
+                Ok(()) => {
+                    let pending = self.pending_session_switch.take();
+                    let outcome = match pending {
+                        Some(super::PendingSessionSwitch::New) => self.start_new_session(),
+                        Some(super::PendingSessionSwitch::Resume(id)) => self.resume_session(&id),
+                        None => Ok(()),
+                    };
+                    if let Err(error) = outcome {
+                        self.state.add_error(error);
+                    }
+                }
+                Err(error) => self.state.add_error(error),
+            },
         }
     }
 

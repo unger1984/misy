@@ -11,6 +11,7 @@ pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
     match event {
         CoreEvent::ActivityChanged { .. }
         | CoreEvent::ActivityFinished { .. }
+        | CoreEvent::AgentFinished { .. }
         | CoreEvent::AuthenticationChanged { .. }
         | CoreEvent::ModelSelected { .. } => true,
         CoreEvent::SubmissionAccepted { .. }
@@ -40,6 +41,7 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
         CoreEvent::AuthenticationChanged { .. } => true,
         CoreEvent::ActivityChanged { .. }
         | CoreEvent::ActivityFinished { .. }
+        | CoreEvent::AgentFinished { .. }
         | CoreEvent::ProviderDiscovered { .. }
         | CoreEvent::ModelsListed { .. }
         | CoreEvent::ModelSelected { .. }

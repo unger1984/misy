@@ -2,9 +2,9 @@
 
 use super::session::SessionError;
 use crate::{
-    ActivitySummary, ConfigError, CredentialError, ImageAttachment, InputModality, Message,
-    ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId,
-    ToolCall, ToolResult,
+    ActivitySummary, AgentId, AgentSummary, ConfigError, CredentialError, ImageAttachment,
+    InputModality, Message, ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName,
+    ProviderError, ProviderId, ToolCall, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,6 +73,16 @@ pub enum CoreEvent {
     ActivityFinished {
         /// Final metadata and bounded process output.
         output: crate::ActivityOutput,
+    },
+    /// A background child agent reached its terminal state.
+    ///
+    /// This client-facing notification is independent from the model-facing mailbox. Bounded
+    /// subscribers may recover it from [`CoreSnapshot::agents`](crate::CoreSnapshot::agents).
+    AgentFinished {
+        /// Final bounded roster metadata.
+        agent: AgentSummary,
+        /// Final bounded child result or failure description.
+        result: String,
     },
     /// A package was discovered during core construction.
     ProviderDiscovered {
@@ -235,10 +245,31 @@ pub enum CoreError {
     NoModelSelected,
     /// No active submission has this identifier.
     UnknownSubmission(SubmissionId),
+    /// The process-wide live child-agent limit has been reached.
+    AgentLimitReached,
+    /// Every lossless background-completion mailbox slot is reserved.
+    AgentMailboxFull,
+    /// No retained child agent has this identifier.
+    UnknownAgent(AgentId),
+    /// The requested child agent has already reached a terminal state.
+    AgentAlreadyFinished(AgentId),
+    /// A requested child model is absent or unavailable in the local cache.
+    AgentModelUnavailable(ModelRef),
+    /// A child cannot continue without interactive provider authentication.
+    AgentAuthenticationRequired(ProviderId),
+    /// A synchronous child exceeded the core-owned execution deadline.
+    AgentTimedOut(AgentId),
     /// Conversation-session storage or lookup failed.
     Session(SessionError),
     /// A session switch was requested while queued or active work still owns the conversation.
     SessionBusy,
+    /// A session switch requires explicit disposal of retained child-agent state.
+    SessionAgentStatePending {
+        /// Live children that will be stopped by disposal.
+        live_agents: usize,
+        /// Unconsumed background results that will be discarded.
+        pending_results: usize,
+    },
     /// The core has been shut down.
     Shutdown,
 }
@@ -290,10 +321,35 @@ impl fmt::Display for CoreError {
             }
             Self::NoModelSelected => formatter.write_str("no model is selected"),
             Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
+            Self::AgentLimitReached => formatter.write_str("four child agents are already active"),
+            Self::AgentMailboxFull => {
+                formatter.write_str("the background agent result mailbox is full")
+            }
+            Self::UnknownAgent(id) => write!(formatter, "unknown agent `{id}`"),
+            Self::AgentAlreadyFinished(id) => write!(formatter, "agent `{id}` is already finished"),
+            Self::AgentModelUnavailable(model) => write!(
+                formatter,
+                "agent model `{}/{}` is unavailable",
+                model.provider.as_str(),
+                model.model.as_str()
+            ),
+            Self::AgentAuthenticationRequired(provider) => write!(
+                formatter,
+                "agent provider `{}` requires authentication",
+                provider.as_str()
+            ),
+            Self::AgentTimedOut(id) => write!(formatter, "agent `{id}` timed out"),
             Self::Session(error) => write!(formatter, "session error: {error}"),
             Self::SessionBusy => {
                 formatter.write_str("cannot switch sessions while a submission is active or queued")
             }
+            Self::SessionAgentStatePending {
+                live_agents,
+                pending_results,
+            } => write!(
+                formatter,
+                "session has {live_agents} live agents and {pending_results} pending agent results"
+            ),
             Self::Shutdown => formatter.write_str("misy core has shut down"),
         }
     }

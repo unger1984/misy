@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added independent synchronous and background child agents with inherited context, correlated
+  provider streams, scoped command ownership, addressable messaging, bounded transcripts, and a
+  pull-based completion mailbox.
+- Added agent roster, preview, fullscreen transcript, stop handling, and completion notices to the
+  shared TUI activity workflow.
 - Added private, versioned, append-only conversation sessions with automatic incremental
   persistence, cwd-scoped resume, model restoration, transcript replay, `/new`, `/clear`,
   `/resume [id]`, `--continue`, and `--resume [id]`.

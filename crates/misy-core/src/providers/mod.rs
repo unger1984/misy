@@ -6,6 +6,9 @@ mod manifest;
 mod protocol;
 mod redaction;
 
+#[cfg(feature = "test-support")]
+pub use host::PendingProviderChat;
+pub(crate) use host::ProviderStreamReceiver;
 pub use host::{PendingProviderRequest, ProviderDeadlines, ProviderHost};
 pub use manifest::{
     ProviderAuthMethod, ProviderCapability, ProviderCatalog, ProviderDiscoveryError,

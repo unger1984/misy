@@ -15,9 +15,15 @@ fn registry_exposes_the_builtin_tool_definitions() {
     assert_eq!(
         names,
         [
+            "agent_list",
+            "agent_message",
+            "agent_output",
+            "agent_stop",
+            "agent_wait",
             "exec_command",
             "list_directory",
             "read_file",
+            "spawn_agent",
             "task_list",
             "task_stop",
             "view_image",

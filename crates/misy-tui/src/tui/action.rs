@@ -104,6 +104,8 @@ pub enum UiMode {
     ActivityList,
     /// Saved conversation-session picker.
     SessionList,
+    /// Confirmation before discarding retained child-agent state.
+    Confirmation,
     /// Output for one command activity.
     ActivityDetail,
 }

@@ -347,3 +347,29 @@ fn terminal_activity_event_adds_one_complete_transcript_item() {
         [super::TranscriptRow::ActivityFinished(output)]
     );
 }
+
+#[test]
+fn background_agent_finished_event_adds_compact_notice() {
+    let mut state = UiState::default();
+    let agent = serde_json::from_value(serde_json::json!({
+        "id": 4,
+        "activity_id": 9,
+        "title": "Check cleanup",
+        "model": {"provider": "fixture", "model": "model-a"},
+        "status": "completed",
+        "run_in_background": true,
+        "started_at_ms": 1,
+        "finished_at_ms": 2,
+        "terminal_message": "clean"
+    }))
+    .expect("deserialize agent summary");
+    state.apply_core_event(CoreEvent::AgentFinished {
+        agent,
+        result: "clean".to_owned(),
+    });
+    assert!(matches!(
+        state.transcript(),
+        [super::TranscriptRow::Info(message)]
+            if message == "agent-4 · Check cleanup · Completed · clean"
+    ));
+}

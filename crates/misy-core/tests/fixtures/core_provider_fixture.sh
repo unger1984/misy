@@ -36,6 +36,12 @@ call_background_shell() {
   printf '%s\n' '"arguments":{"cmd":"sleep 0.05; printf background-done","description":"Background fixture","run_in_background":true}}}'
 }
 
+call_tool() {
+  printf '{"jsonrpc":"2.0","method":"tool_call","params":'
+  printf '{"request_id":%s,"id":"%s","name":"%s",' "$id" "$1" "$2"
+  printf '"arguments":%s}}\n' "$3"
+}
+
 failed() {
   printf '{"jsonrpc":"2.0","method":"failed","params":'
   printf '{"request_id":%s,"message":"%s"}}\n' "$id" "$1"
@@ -446,6 +452,83 @@ chat_start() {
       ;;
     *'"content":"cancel-me"'*)
       sleep 2
+      reply '{}'
+      ;;
+    *'"tool_call_id":"wait-message"'*)
+      text message-observed
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"message-1"'*)
+      call_tool wait-message agent_wait '{"agent_ids":["agent-1"],"timeout_ms":300000}'
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"spawn-message"'*)
+      call_tool message-1 agent_message '{"agent_id":"agent-1","message":"follow-up child"}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"follow-up child"'*)
+      text follow-up-answer
+      complete
+      reply '{}'
+      ;;
+    *'"content":"child-message-task"'*)
+      sleep 1
+      text first-answer
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-message"'*)
+      call_tool spawn-message spawn_agent \
+        '{"task":"child-message-task","description":"Message child","run_in_background":true}'
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"wait-background"'*)
+      text background-observed
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"spawn-background"'*)
+      call_tool wait-background agent_wait '{"agent_ids":["agent-1"],"timeout_ms":300000}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"child-background-task"'*)
+      sleep 1
+      text child-background-answer
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-background"'*)
+      call_tool spawn-background spawn_agent \
+        '{"task":"child-background-task","description":"Background child","run_in_background":true}'
+      complete
+      reply '{}'
+      ;;
+    *'"tool_call_id":"spawn-sync"'*)
+      text sync-observed
+      complete
+      reply '{}'
+      ;;
+    *'"content":"child-sync-task"'*)
+      case "$line" in
+        *'"name":"spawn_agent"'*)
+          failed 'child received agent tool definitions'
+          reply '{}'
+          return
+          ;;
+      esac
+      text child-sync-answer
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-sync"'*)
+      call_tool spawn-sync spawn_agent \
+        '{"task":"child-sync-task","description":"Sync child","run_in_background":false}'
+      complete
       reply '{}'
       ;;
     *'"content":"rotate-credentials-chat"'*)

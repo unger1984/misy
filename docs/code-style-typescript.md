@@ -27,7 +27,10 @@ it is unreviewable, and the current provider package is the reason this sentence
 
 ## Required Checks
 
-Green before every commit, from the package root:
+Green before a commit that changes the package's TypeScript source, tests, configuration, generated
+output, or consumed shared contract, from the affected package root. Documentation-only, Rust-only,
+and unrelated provider changes do not require these commands. A shared SDK change also requires
+the checks of providers that consume the changed surface.
 
 ```bash
 bunx tsc --noEmit

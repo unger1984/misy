@@ -23,7 +23,10 @@ adds what is specific to Rust and does not repeat what is already there.
 
 ## Required Checks
 
-Green before every commit:
+Green before a commit that changes Rust source, Rust tests, Cargo inputs, generated Rust, or a
+compiled Rust example. Documentation-only and unrelated provider changes do not require these
+commands. Use focused tests first; run the full workspace test suite only when the change crosses
+Rust crate boundaries or affects shared workspace behavior.
 
 ```bash
 cargo fmt --all -- --check

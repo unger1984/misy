@@ -22,6 +22,23 @@ Read this document before implementation, verification, or changes to the test s
 
 ## Required Checks
 
+Required checks are selected by impact; this is not a command list to run after every change.
+Run a check only when the change modifies an input, generated artifact, or behavior that the check
+can validate. Start with focused tests, then widen to the affected package or workspace boundary.
+
+- Rust source, Rust tests, Cargo manifests, or shared Rust contracts: run `cargo fmt` and Clippy,
+  plus focused tests for the changed behavior. Run the full Rust workspace only for shared-crate,
+  workspace-configuration, or cross-crate changes.
+- A provider package: run that package's typecheck, tests, and Biome check. Run other providers
+  only when a shared SDK or wire contract they consume changed.
+- Documentation-only changes: do not run Rust or TypeScript suites unless the documentation
+  contains compiled examples, drives generated output, or changes an executable contract covered
+  by those suites. `git diff --check` remains relevant because it validates the changed text.
+- Mixed changes: combine only the checks required by the affected areas. A later documentation or
+  changelog edit does not invalidate already completed code checks.
+
+Canonical commands, when their area is affected:
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,7 +57,8 @@ bun test
 bunx tsc --noEmit
 ```
 
-One rule is not covered by the tools above and needs its own check.
+One source-code rule is not covered by the tools above and needs its own check when Rust or
+TypeScript source changed.
 
 `rustfmt` leaves macro bodies alone and Biome does not wrap single-line comments, so the 100-column
 limit from [Code Style](code-style.md#file-and-function-size) can be broken while `cargo fmt

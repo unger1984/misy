@@ -161,9 +161,12 @@ Development happens on `dev`; do not work directly on `main`. Keep changes withi
 architecture, add tests for behavior changes, and update the relevant documentation when a public
 contract or user-visible behavior changes.
 
-Before submitting a change, run the checks for every area you touched. The complete, authoritative
-command list is maintained in [docs/development-and-testing.md](docs/development-and-testing.md).
-At minimum, Rust changes should pass formatting, Clippy, and the test suite:
+Before submitting a change, run only checks that validate the inputs or behavior you changed. A
+documentation-only edit does not require Rust or provider suites unless it changes compiled
+examples, generated output, or executable contracts. The complete, authoritative selection rules
+and command list are maintained in
+[docs/development-and-testing.md](docs/development-and-testing.md). Rust changes should pass the
+applicable formatting, Clippy, and focused or workspace tests:
 
 ```console
 cargo fmt --all -- --check

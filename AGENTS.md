@@ -11,6 +11,10 @@
 - Keep external contracts capability-scoped and versioned.
 - Follow [Code Style](docs/code-style.md): size limits, module boundaries, `why`-not-`what`
   comments, documented public APIs. It is binding for every language in the tree.
+- Verification is impact-scoped. Run a formatter, linter, compiler, or test suite only when the
+  change modifies inputs or behavior that the check can validate. Documentation-only changes do
+  not require Rust or TypeScript checks unless they alter compiled examples, generated artifacts,
+  or executable contracts. Do not rerun unaffected language or provider suites.
 
 ## Documentation Routing
 

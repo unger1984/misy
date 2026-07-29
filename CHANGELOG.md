@@ -2,13 +2,32 @@
 
 ## 2026-07-29
 
+### Added
+
+- Added clipboard image paste through `Ctrl+V` and `Cmd+V`, including image-only prompts,
+  removable composer placeholders, multimodal OpenAI, Anthropic, and Kimi requests, and the
+  core-owned `view_image` tool.
+- Added optional Unix PTY command sessions with interactive `write_stdin`, bounded polling,
+  process-group termination, and a fullscreen TUI activity log viewer.
+
 ### Changed
 
+- Redesigned the session transcript with a consistent left inset, distinct user and assistant
+  blocks, paired friendly tool calls and results, compact head/tail output, global `Ctrl+O`
+  expansion, background-task completion cards, and successful tool-work separators.
 - Moved the complete `/provider` workflow into the centered popup used by `/model`, including the
   provider list, provider actions, authentication progress, device codes, and logout progress.
+- Unified model-facing command execution under `exec_command`, with inline completion, automatic
+  bounded yield, explicit background execution, ordered output, and a 64-process core limit.
 
 ### Fixed
 
+- Prevented foreground commands from being terminated when they transition to background while
+  all remaining process permits are occupied.
+- Preserved pasted images when recalling the latest submitted prompt with `Up`, while keeping
+  persisted prompt history text-only and bounding in-memory image history.
+- Aligned OpenAI and Kimi image capability discovery and request routing with their reference
+  clients, including OpenAI Responses image detail and Kimi's model-specific wire protocol.
 - Made `Esc` cancel a pending provider browser/device authentication wait, restore the provider
   actions immediately, and terminate the blocked provider process so a later attempt starts clean.
 - Made provider rows allocate width adaptively and truncate arbitrary long names or statuses with

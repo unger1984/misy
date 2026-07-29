@@ -10,10 +10,16 @@ export { endpointUrl, fetchWithTimeout } from "./http";
 export { preferredDefaultModel } from "./models";
 export { type ProviderAdapter, serve } from "./serve";
 export {
+	type ChatMessage,
 	type ChatRequest,
 	type Credentials,
+	type ImageAttachment,
+	imageAttachments,
+	imageDataUrl,
+	isImageAttachment,
 	isRecord,
 	type Json,
 	type Notify,
 	type ToolDefinition,
+	type ToolResult,
 } from "./types";

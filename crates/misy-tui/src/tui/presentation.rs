@@ -30,6 +30,7 @@ pub(super) fn list_presentation<T>(
         back_hint: false,
         tabs: Vec::new(),
         loading: false,
+        help_hint: None,
     }
 }
 
@@ -44,6 +45,7 @@ pub(super) fn model_picker_presentation(
         back_hint: false,
         tabs: picker.tabs(),
         loading: picker.is_loading(),
+        help_hint: None,
     }
 }
 

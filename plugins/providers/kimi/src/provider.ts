@@ -1,11 +1,18 @@
 /** Kimi provider facade joining OAuth, headers, catalog, and chat translation. */
 
 import { endpointUrl, fetchWithTimeout, preferredDefaultModel } from "@misy/provider-sdk";
+import { createAnthropicRequest, notifyAnthropicEvents } from "./anthropic-wire";
 import { OAuthClient, refreshIfNeeded } from "./auth";
 import { createChatRequest, notifyChatEvents } from "./chat-wire";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { KimiHeaders } from "./headers";
-import { DEFAULT_MODEL_ID, listModels } from "./model-catalog";
+import {
+	DEFAULT_MODEL_ID,
+	discoverModelProtocol,
+	type KimiProtocol,
+	listModelCatalog,
+	ModelCatalogRequestError,
+} from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Model, Notify } from "./types";
 import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
 
@@ -14,12 +21,14 @@ export class KimiProvider {
 	private readonly config: ProviderConfig;
 	private readonly headers: KimiHeaders;
 	private readonly oauth: OAuthClient;
+	private protocols: ReadonlyMap<string, KimiProtocol>;
 
 	/** Creates a provider, allowing endpoint and storage overrides for local tests. */
 	constructor(config: Partial<ProviderConfig> = {}) {
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.headers = new KimiHeaders(this.config);
 		this.oauth = new OAuthClient(this.config, this.headers);
+		this.protocols = new Map();
 	}
 
 	/** Starts the device authorization flow. */
@@ -52,7 +61,9 @@ export class KimiProvider {
 
 	/** Lists live Kimi models, falling back to the bundled catalog if the endpoint is unavailable. */
 	async listModels(credentials: Credentials | undefined): Promise<Model[]> {
-		return await listModels(this.config, this.headers, credentials);
+		const catalog = await listModelCatalog(this.config, this.headers, credentials);
+		if (catalog.authoritative) this.protocols = catalog.protocols;
+		return catalog.models;
 	}
 
 	/** Returns normalized Kimi Coding subscription limits plus credentials rotated by a refresh. */
@@ -88,14 +99,25 @@ export class KimiProvider {
 	): Promise<{ metadata: Json; credentials?: Credentials }> {
 		try {
 			let credentials = await refreshIfNeeded(this.oauth, request.credentials);
-			let response = await this.chatRequest(request, credentials, signal);
+			let protocol: KimiProtocol;
+			try {
+				protocol = await this.resolveProtocol(request.model_id, credentials, signal);
+			} catch (cause) {
+				if (!(cause instanceof ModelCatalogRequestError) || cause.status !== 401) throw cause;
+				credentials = await this.oauth.refresh(credentials);
+				protocol = await this.resolveProtocol(request.model_id, credentials, signal);
+			}
+			let response = await this.chatRequest(request, credentials, protocol, signal);
 			if (response.status === 401) {
 				credentials = await this.oauth.refresh(credentials);
-				response = await this.chatRequest(request, credentials, signal);
+				response = await this.chatRequest(request, credentials, protocol, signal);
 			}
 			if (!response.ok) throw await chatError(response);
 			if (!response.body) throw new Error("Kimi chat stream did not include a body");
-			const metadata = await notifyChatEvents(response.body, requestId, notify);
+			const metadata =
+				protocol === "anthropic"
+					? await notifyAnthropicEvents(response.body, requestId, notify)
+					: await notifyChatEvents(response.body, requestId, notify);
 			// Same rotation contract as usage(): the core persists replacement credentials.
 			return credentials === request.credentials ? { metadata } : { metadata, credentials };
 		} catch (cause) {
@@ -104,6 +126,27 @@ export class KimiProvider {
 			notify("failed", { request_id: requestId, message });
 			throw cause;
 		}
+	}
+
+	private async resolveProtocol(
+		modelId: string,
+		credentials: Credentials,
+		signal: AbortSignal | undefined,
+	): Promise<KimiProtocol> {
+		const known = this.protocols.get(modelId);
+		if (known !== undefined) return known;
+		const discovered = await discoverModelProtocol(
+			this.config,
+			this.headers,
+			credentials,
+			modelId,
+			signal,
+		);
+		if (discovered !== undefined) {
+			this.protocols = new Map(this.protocols).set(modelId, discovered);
+			return discovered;
+		}
+		throw new Error(`Kimi model protocol is unavailable for ${modelId}; refresh the model catalog`);
 	}
 
 	/** Returns the preferred bundled default when present, otherwise the first returned live model. */
@@ -116,10 +159,14 @@ export class KimiProvider {
 	private async chatRequest(
 		request: ChatRequest,
 		credentials: Credentials,
+		protocol: KimiProtocol,
 		signal: AbortSignal | undefined,
 	): Promise<Response> {
 		return await fetchWithTimeout(
-			endpointUrl(this.config.apiBaseUrl, "chat/completions"),
+			endpointUrl(
+				this.config.apiBaseUrl,
+				protocol === "anthropic" ? "messages" : "chat/completions",
+			),
 			{
 				method: "POST",
 				signal,
@@ -128,8 +175,13 @@ export class KimiProvider {
 					authorization: `Bearer ${credentials.access_token}`,
 					accept: "text/event-stream",
 					"content-type": "application/json",
+					...(protocol === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
 				},
-				body: JSON.stringify(createChatRequest(request.model_id, request.messages, request.tools)),
+				body: JSON.stringify(
+					protocol === "anthropic"
+						? createAnthropicRequest(request.model_id, request.messages, request.tools)
+						: createChatRequest(request.model_id, request.messages, request.tools),
+				),
 			},
 			this.config.requestTimeoutMs,
 		);

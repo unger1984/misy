@@ -33,8 +33,9 @@ model, authentication, session, and tool orchestration remain in the core.
   application-owned render state while Misy is open, with the newest transcript rows above the
   composer. Leaving Misy restores the terminal screen and scrollback that existed before startup.
 - The fullscreen layout is ordered transcript, optional one-line busy indicator,
-  persistent bordered composer, an optional slash-command popup, and a footer. Provider and model
-  workflows use centered modal popups over that layout.
+  persistent bordered composer, an optional slash-command popup, an activity row when active or
+  recent work exists, and a footer. Provider, model, and activity workflows use centered modal
+  popups.
 - A responsive startup card is the first item in the transcript flow. It shows the Misy version,
   initial model, working directory, and brief input hints; it scrolls off the top with earlier
   conversation content and is never a persistent header.
@@ -50,8 +51,15 @@ model, authentication, session, and tool orchestration remain in the core.
 - A plain left click in composer text moves its cursor. Dragging across any visible Misy content
   renders an application-owned selection; releasing the mouse sends the selected text over OSC 52
   and immediately clears the highlight. This lets a terminal host such as Herdr own clipboard
-  access and display its normal copy feedback. Bracketed paste and forwarded `Cmd+V` insert text
-  atomically at the cursor and never submit embedded newlines.
+  access and display its normal copy feedback. Bracketed paste inserts text atomically at the
+  cursor and never submits embedded newlines. Forwarded `Ctrl+V` and `Cmd+V` first inspect the
+  clipboard for an image and insert a numbered `[Image #N]` placeholder when one is available;
+  otherwise they paste text. Deleting a placeholder removes its payload, and image-only prompts
+  are valid. A draft accepts at most four images. `Up` restores the latest submitted image prompt
+  with its attachment during the current process; older image entries become text-only to bound
+  memory. Persisted input history excludes both attachment
+  payloads and their placeholders. Composer placeholders are presentation-only and are not sent
+  as prompt text; accepted events carry only the image count needed to reconstruct transcript rows.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
   without taking focus from it. The popup shows at most eight commands; `Up` and `Down` scroll its
   window and wrap between the first and last matching commands. `Tab` completes the selected
@@ -66,6 +74,23 @@ model, authentication, session, and tool orchestration remain in the core.
   out, or the report is invalid, the TUI renders the error without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
+- `/tasks` opens the shared activity popup. The row below the composer remains visible while active
+  or recent activities exist and separately counts running tasks, terminal tasks, and active
+  agents. `Down` from an empty composer focuses it and `Enter` opens it. The popup has `All`,
+  `Agents`, and `Tasks` tabs, includes `Main`, supports filtering, and shows a bounded tail preview
+  for the selected task. `Enter` opens its ordered output in a fullscreen log viewer. `Up`, `Down`,
+  `PageUp`, and `PageDown` scroll; live output follows the tail until the user scrolls upward, and
+  `Escape` restores the same popup tab, filter, and selection. `Ctrl+X` immediately stops the
+  selected running task. This stop shortcut is named
+  `activities.stop` in config version 2 and may be rebound; popup hints use the effective binding.
+
+  ```toml
+  version = 2
+
+  [keybindings]
+  "activities.stop" = ["Ctrl+X"]
+  "transcript.expand" = ["Ctrl+O"]
+  ```
 - `/provider` opens a centered provider popup. Selecting a provider replaces the popup contents
   with its available `Authorize` or `Log out` actions; authorization progress, device codes, and
   logout progress remain in the same popup. `/model` immediately opens a centered model popup from
@@ -85,9 +110,17 @@ model, authentication, session, and tool orchestration remain in the core.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.
-- Transcript rows use semantic styling: dim user prompts and service messages, normal assistant
-  text, structured tool calls with indented results, and red failures. An active submission adds an
-  animated one-line spinner with elapsed time and the `esc to interrupt` hint above the composer.
+- Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting
+  full-width row inside that transcript area; assistant segments have one leading marker, service
+  messages remain dim, and failures have a red marker. Tool calls use friendly built-in names with
+  an indented result attached by call ID;
+  pending, successful, and failed calls have distinct markers. Results keep their head and tail in
+  a width-aware four-row compact budget. The named `transcript.expand` shortcut (`Ctrl+O` by
+  default) globally toggles a twelve-row budget without changing the draft or active popup; an
+  effective-binding hint appears only when compact output is hidden. Successful turns that used a
+  tool end with a separator, including `Worked for Xm Ys` only after one minute. An active
+  submission adds an animated one-line spinner with elapsed time and the `esc to interrupt` hint
+  above the composer.
 - Entered prompts join a bounded queue preview above the composer once the core accepts them:
   the core emits a self-sufficient `SubmissionAccepted` event — carrying the submission ID and
   the message — under the queue lock before enqueueing, so acceptances arrive in FIFO order and
@@ -99,6 +132,10 @@ model, authentication, session, and tool orchestration remain in the core.
   text the activity row says `Thinking…`; once text begins it says `Responding…`.
 
 ## Lifecycle and Safety
+
+- The TUI keeps the current draft and pasted images until the core accepts a submission. If image
+  normalization or the selected provider/model capability check fails, the draft remains editable
+  and the error is shown. The core repeats validation at its public submission boundary.
 
 - Opening the provider list does not start every plugin; local manifest/credential state is used
   until a concrete provider action requires the process.
@@ -120,6 +157,14 @@ model, authentication, session, and tool orchestration remain in the core.
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event and background-operation processing are bounded per tick so continuous streaming cannot
   starve input handling.
+- The TUI never owns task processes. It polls bounded client output while an activity preview or
+  log viewer is visible and sends stop requests through the core; core shutdown remains responsible
+  for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the
+  core capture tasks, with stderr labelled in place.
+- A background command's terminal core event adds one transcript item with its task ID, label,
+  final output, and exit status. It uses the same compact/expanded transcript budgets as ordinary
+  tool results, while the activity log viewer retains the complete bounded output. The initial tool
+  result is rendered as a compact background-start notice instead of raw command-result JSON.
 - `Esc` interrupts the active turn identified by the current core snapshot. Repeated presses are
   idempotent for that turn and never clear the remaining FIFO queue; the next queued prompt starts
   after cancellation.

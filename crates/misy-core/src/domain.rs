@@ -2,6 +2,7 @@
 //! serializable because it crosses a process or client boundary, and the identifier newtypes
 //! ([`ProviderId`], [`ModelId`]) keep provider and model identity from decaying into bare
 //! strings that cannot be told apart at the type level.
+use crate::{ImageAttachment, InputModality};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -95,6 +96,9 @@ pub struct ModelInfo {
     pub display_name: String,
     /// Maximum context size advertised by the provider.
     pub context_window: u32,
+    /// Input modalities accepted by this provider model.
+    #[serde(default = "text_input_modalities")]
+    pub input_modalities: Vec<InputModality>,
 }
 
 impl ModelInfo {
@@ -104,8 +108,24 @@ impl ModelInfo {
             model,
             display_name: display_name.into(),
             context_window,
+            input_modalities: text_input_modalities(),
         }
     }
+
+    /// Replaces the conservative text-only default with provider-advertised modalities.
+    pub fn with_input_modalities(mut self, input_modalities: Vec<InputModality>) -> Self {
+        self.input_modalities = input_modalities;
+        self
+    }
+
+    /// Reports whether this model accepts one normalized input modality.
+    pub fn supports(&self, modality: InputModality) -> bool {
+        self.input_modalities.contains(&modality)
+    }
+}
+
+fn text_input_modalities() -> Vec<InputModality> {
+    vec![InputModality::Text]
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -201,6 +221,9 @@ pub struct ToolResult {
     pub tool_call_id: String,
     /// UTF-8 result contents.
     pub content: String,
+    /// Validated images returned to an image-capable model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ImageAttachment>,
     /// Whether the tool execution failed.
     pub is_error: bool,
 }
@@ -211,6 +234,7 @@ impl ToolResult {
         Self {
             tool_call_id: tool_call_id.into(),
             content: content.into(),
+            attachments: Vec::new(),
             is_error: false,
         }
     }
@@ -220,7 +244,22 @@ impl ToolResult {
         Self {
             tool_call_id: tool_call_id.into(),
             content: content.into(),
+            attachments: Vec::new(),
             is_error: true,
+        }
+    }
+
+    /// Creates a successful result containing text and validated images.
+    pub fn success_with_attachments(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        attachments: Vec<ImageAttachment>,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            content: content.into(),
+            attachments,
+            is_error: false,
         }
     }
 }

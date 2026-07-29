@@ -1,8 +1,8 @@
 //! Headless-core integration tests.
 
 use misy_core::{
-    CoreEvent, Message, MisyCore, MisyPaths, ModelId, ModelRef, ProviderDeadlines, ProviderId,
-    SubmissionId,
+    CoreEvent, ImageAttachment, InputModality, Message, MisyCore, MisyPaths, ModelId, ModelRef,
+    ProviderDeadlines, ProviderId, SubmissionId,
 };
 use serde_json::json;
 use std::{
@@ -22,6 +22,8 @@ mod cache_integration;
 mod concurrency;
 #[path = "core/contracts_integration.rs"]
 mod contracts_integration;
+#[path = "core/images.rs"]
+mod images;
 #[path = "core/lifecycle.rs"]
 mod lifecycle;
 #[path = "core/limits.rs"]
@@ -48,7 +50,10 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
   "kind": "provider",
   "protocol_version": 2,
   "description": "Core fixture",
-  "capabilities": {{"usage": {{"version": 1}}}},
+  "capabilities": {{
+    "usage": {{"version": 1}},
+    "image_input": {{"version": 1}}
+  }},
   "author": "Misy",
   "homepage": "https://example.test/plugin",
   "repository": "https://example.test/repository",

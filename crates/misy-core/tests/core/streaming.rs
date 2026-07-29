@@ -66,6 +66,58 @@ async fn core_streams_a_tool_round_trip_and_keeps_provider_and_model_on_every_tu
 }
 
 #[tokio::test]
+async fn background_command_emits_one_terminal_event_with_final_output() {
+    let (_temporary, core, _) = test_core("background-command");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    let mut events = core.subscribe_lossless();
+    core.submit(Message::user("background-command"))
+        .await
+        .expect("submit");
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("background publication deadline")
+            .expect("core event stream closed");
+        if matches!(
+            event,
+            CoreEvent::ActivityChanged { ref activity }
+                if activity.title == "Background fixture"
+        ) {
+            break;
+        }
+    }
+    core.shutdown().await.expect("shutdown");
+
+    let mut finished = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("shutdown event deadline")
+            .expect("core event stream closed");
+        match event {
+            CoreEvent::ActivityFinished { output } => finished.push(output),
+            CoreEvent::Shutdown => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(finished.len(), 1);
+    let output = &finished[0];
+    assert_eq!(output.activity.title, "Background fixture");
+    assert!(output.activity.status.is_terminal());
+    assert!(output.stderr.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err(),
+        "no activity completion may follow shutdown"
+    );
+}
+
+#[tokio::test]
 async fn core_losslessly_collects_a_burst_of_provider_stream_events() {
     let (_temporary, core, _) = test_core("burst");
     core.select_model(fixture_model())

@@ -39,6 +39,14 @@ pub const USAGE_CAPABILITY_VERSION: u32 = 1;
 /// JSON-RPC method required from providers advertising usage capability version 1.
 pub const USAGE_METHOD: &str = "usage.get";
 
+/// Optional multimodal chat and tool-result capability identifier.
+pub const IMAGE_INPUT_CAPABILITY: &str = "image_input";
+
+/// Image-input capability contract revision supported by this host.
+pub const IMAGE_INPUT_CAPABILITY_VERSION: u32 = 1;
+/// Maximum encoded size of one newline-delimited provider protocol frame.
+pub(crate) const MAX_PROTOCOL_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
 /// Methods every version 2 provider package must implement.
 pub const PROVIDER_METHODS: &[&str] = &[
     "auth.status",

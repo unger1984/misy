@@ -1,11 +1,12 @@
 //! Headless orchestration of provider sessions, credentials, events, and FIFO submissions.
 
 use crate::{
-    ConfigStore, MisyPaths, ModelInfo, ModelRef, ProviderId, ProviderManifest, ProviderRequestId,
+    ActivityId, ActivityOutput, ConfigStore, MisyPaths, ModelInfo, ModelRef, ProviderId,
+    ProviderManifest, ProviderRequestId,
     config::CredentialStore,
     model_cache::ModelCatalogStore,
     providers::{ProviderCatalog, ProviderDeadlines, ProviderHost},
-    tools::{ToolDispatcher, ToolRegistry},
+    tools::{ActivityEvent, ToolDispatcher, ToolRegistry},
 };
 use serde_json::{Value, json};
 use std::{
@@ -23,6 +24,7 @@ mod authentication;
 mod cache;
 mod contracts;
 mod events;
+mod images;
 mod models;
 mod queue;
 mod runtime;
@@ -74,6 +76,7 @@ pub(super) struct CoreState {
     pub(super) credential_store: CredentialStore,
     pub(super) model_cache: Arc<ModelCatalogStore>,
     pub(super) selected_model: Mutex<Option<ModelRef>>,
+    pub(super) keybindings: BTreeMap<String, Vec<String>>,
     pub(super) history: Mutex<Vec<HistoryEntry>>,
     pub(super) dispatcher: ToolDispatcher,
     pub(super) subscribers: EventSubscribers,
@@ -201,6 +204,7 @@ impl MisyCore {
             credential_store,
             model_cache: Arc::new(ModelCatalogStore::new(paths)),
             selected_model: Mutex::new(config.default_model),
+            keybindings: config.keybindings,
             history: Mutex::new(Vec::new()),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
             subscribers: EventSubscribers::default(),
@@ -220,6 +224,7 @@ impl MisyCore {
             Arc::clone(&state),
             state.host.subscribe_lossless(),
         );
+        start_activity_event_router(&runtime.handle, Arc::clone(&state));
         let core = Self {
             inner: Arc::new(CoreInner { state, runtime }),
         };
@@ -239,6 +244,11 @@ impl MisyCore {
             .packages()
             .map(|package| package.manifest().clone())
             .collect()
+    }
+
+    /// Returns frontend-owned named keybinding overrides from the current configuration.
+    pub fn keybindings(&self) -> BTreeMap<String, Vec<String>> {
+        self.inner.state.keybindings.clone()
     }
 
     /// Returns the number of provider processes that are currently healthy and running.
@@ -442,6 +452,20 @@ impl MisyCore {
         self.inner.state.cancel_submission(submission).await
     }
 
+    /// Returns bounded output for one command activity, optionally waiting for a state change.
+    pub async fn activity_output(
+        &self,
+        id: ActivityId,
+        wait: Option<std::time::Duration>,
+    ) -> Option<ActivityOutput> {
+        self.inner.state.dispatcher.activity_output(id, wait).await
+    }
+
+    /// Requests termination of one active command activity.
+    pub fn stop_activity(&self, id: ActivityId) -> bool {
+        self.inner.state.dispatcher.stop_activity(id)
+    }
+
     /// Signals shutdown and waits for provider/process cleanup to finish.
     ///
     /// # Errors
@@ -516,8 +540,28 @@ impl CoreState {
     pub(super) async fn shutdown_services(&self) {
         self.close_admission();
         self.cancel_all_submissions().await;
+        self.dispatcher.shutdown().await;
         // Provider shutdown is best effort; clients must still observe the Shutdown event.
         let _ = self.host.shutdown().await;
         self.subscribers.emit(&CoreEvent::Shutdown);
     }
+}
+
+fn start_activity_event_router(handle: &tokio::runtime::Handle, state: Arc<CoreState>) {
+    let mut activities = state.dispatcher.subscribe_activities();
+    handle.spawn(async move {
+        while let Some(event) = activities.recv().await {
+            match event {
+                ActivityEvent::Changed(activity) => state
+                    .subscribers
+                    .emit(&CoreEvent::ActivityChanged { activity }),
+                ActivityEvent::Finished(output) => state
+                    .subscribers
+                    .emit(&CoreEvent::ActivityFinished { output }),
+                ActivityEvent::Flush(completion) => {
+                    let _ = completion.send(());
+                }
+            }
+        }
+    });
 }

@@ -1,13 +1,18 @@
 //! Deterministic state rendered by the terminal client.
 
+mod activities;
 mod events;
+#[cfg(test)]
+mod tests;
 mod transcript;
 mod turns;
 
+pub(super) use activities::output_content_labels;
 pub use transcript::TranscriptRow;
 
 use super::{
     action::{UiAction, UiMode},
+    activity_picker::ActivityPicker,
     composer::Composer,
     list::{ListRow, ListView},
     model_picker::ModelPicker,
@@ -18,7 +23,8 @@ use super::{
     startup_header::StartupHeader,
 };
 use misy_core::{
-    CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderDisplayName, ProviderId, SubmissionId,
+    ActivityOutput, CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderDisplayName, ProviderId,
+    SubmissionId,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,6 +56,8 @@ pub(super) enum ActiveView {
         actions: ListView<ProviderAction>,
     },
     Models(ModelPicker),
+    Activities(ActivityPicker),
+    ActivityLog(activities::ActivityLogView),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -61,6 +69,7 @@ pub(super) struct ModalPresentation {
     pub(super) back_hint: bool,
     pub(super) tabs: Vec<(String, bool)>,
     pub(super) loading: bool,
+    pub(super) help_hint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,12 +105,19 @@ pub struct UiState {
     response_submission: Option<SubmissionId>,
     cancelled_submissions: BTreeSet<u64>,
     submission_started_at: Option<Instant>,
+    turn_had_tool_activity: bool,
+    terminal_turn: Option<turns::TerminalTurn>,
     response_started: bool,
     quit_shortcut_expires_at: Option<Instant>,
     should_exit: bool,
     pub(super) view: Option<ActiveView>,
     pub(super) provider_operation: Option<(OperationScope, ProviderOperationKind)>,
     pub(super) provider_device_code: Option<String>,
+    pub(super) activity_bar_focused: bool,
+    pub(super) activity_stop_hint: String,
+    pub(super) transcript_expand_hint: String,
+    tool_output_expanded: bool,
+    pub(super) activity_preview: Option<ActivityOutput>,
 }
 
 impl Default for UiState {
@@ -113,6 +129,7 @@ impl Default for UiState {
             providers: BTreeMap::new(),
             provider_names: BTreeMap::new(),
             snapshot: CoreSnapshot {
+                activities: Vec::new(),
                 selected_model: None,
                 active_submission: None,
                 queued_submissions: Vec::new(),
@@ -122,12 +139,19 @@ impl Default for UiState {
             response_submission: None,
             cancelled_submissions: BTreeSet::new(),
             submission_started_at: None,
+            turn_had_tool_activity: false,
+            terminal_turn: None,
             response_started: false,
             quit_shortcut_expires_at: None,
             should_exit: false,
             view: None,
             provider_operation: None,
             provider_device_code: None,
+            activity_bar_focused: false,
+            activity_stop_hint: "Ctrl+X".to_owned(),
+            transcript_expand_hint: "Ctrl+O".to_owned(),
+            tool_output_expanded: false,
+            activity_preview: None,
         }
     }
 }
@@ -158,6 +182,8 @@ impl UiState {
             Some(ActiveView::Providers(_)) => UiMode::ProviderList,
             Some(ActiveView::ProviderSettings { .. }) => UiMode::ProviderDetail,
             Some(ActiveView::Models(_)) => UiMode::ModelList,
+            Some(ActiveView::Activities(_)) => UiMode::ActivityList,
+            Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
         }
     }
 
@@ -190,6 +216,16 @@ impl UiState {
                 }
             }
             Some(ActiveView::Models(view)) => view.labels(),
+            Some(ActiveView::Activities(view)) => view
+                .visible_rows(usize::MAX)
+                .into_iter()
+                .map(|row| row.label)
+                .collect(),
+            Some(ActiveView::ActivityLog(view)) => view
+                .output
+                .as_ref()
+                .map(activities::output_labels)
+                .unwrap_or_else(|| vec!["Loading output…".to_owned()]),
         }
     }
 
@@ -197,6 +233,7 @@ impl UiState {
     pub fn picker_tabs(&self) -> Vec<(String, bool)> {
         match &self.view {
             Some(ActiveView::Models(picker)) => picker.tabs(),
+            Some(ActiveView::Activities(picker)) => picker.tabs(),
             _ => Vec::new(),
         }
     }
@@ -214,6 +251,11 @@ impl UiState {
     /// Returns the number of retained prompt-history entries.
     pub fn history_len(&self) -> usize {
         self.composer.history_len()
+    }
+
+    /// Returns the number of validated images attached to the current draft.
+    pub fn composer_attachment_count(&self) -> usize {
+        self.composer.attachment_count()
     }
 
     /// Returns whether the non-modal slash-command popup is visible.
@@ -245,6 +287,7 @@ impl UiState {
             | UiAction::ShowProviders
             | UiAction::StartAuth(_)
             | UiAction::ShowModels
+            | UiAction::ShowActivities
             | UiAction::ShowUsage
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
@@ -252,11 +295,23 @@ impl UiState {
     }
 
     pub(super) fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
+        self.apply_snapshot_at(snapshot, Instant::now());
+    }
+
+    fn apply_snapshot_at(&mut self, snapshot: CoreSnapshot, now: Instant) {
         if self.snapshot.active_submission != snapshot.active_submission {
-            self.submission_started_at = snapshot.active_submission.map(|_| Instant::now());
-            self.response_started = false;
+            self.capture_turn_transition(snapshot.active_submission, now);
         }
+        let activities = snapshot.activities.clone();
         self.snapshot = snapshot;
+        if !self.activity_bar_visible() {
+            self.activity_bar_focused = false;
+        }
+        match &mut self.view {
+            Some(ActiveView::Activities(picker)) => picker.refresh(activities),
+            Some(ActiveView::ActivityLog(view)) => view.picker.refresh(activities),
+            _ => {}
+        }
     }
 
     pub(super) fn set_startup_header(
@@ -374,6 +429,13 @@ impl UiState {
                     .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
             Some(ActiveView::Models(view)) => Some(model_picker_presentation(view, visible_rows)),
+            Some(ActiveView::Activities(view)) => Some(activities::activity_presentation(
+                view,
+                self.activity_preview.as_ref(),
+                visible_rows,
+                &self.activity_stop_hint,
+            )),
+            Some(ActiveView::ActivityLog(_)) => None,
             Some(ActiveView::ProviderSettings {
                 display_name,
                 credential_method,
@@ -393,6 +455,7 @@ impl UiState {
                     back_hint: true,
                     tabs: Vec::new(),
                     loading: false,
+                    help_hint: None,
                 })
             }
         }
@@ -455,6 +518,8 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.insert_filter(text),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.insert_filter(text),
             Some(ActiveView::Models(view)) => view.insert_filter(text),
+            Some(ActiveView::Activities(view)) => view.insert_filter(text),
+            Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
     }
@@ -464,6 +529,8 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.backspace_filter(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.backspace_filter(),
             Some(ActiveView::Models(view)) => view.backspace_filter(),
+            Some(ActiveView::Activities(view)) => view.backspace_filter(),
+            Some(ActiveView::ActivityLog(_)) => {}
             None => {}
         }
     }
@@ -499,6 +566,8 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.select_number(one_based),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.select_number(one_based),
             Some(ActiveView::Models(view)) => view.select_number(one_based),
+            Some(ActiveView::Activities(view)) => view.select_number(one_based),
+            Some(ActiveView::ActivityLog(_)) => false,
             None => false,
         }
     }
@@ -508,6 +577,8 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.move_up(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_up(),
             Some(ActiveView::Models(view)) => view.move_up(),
+            Some(ActiveView::Activities(view)) => view.move_up(),
+            Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
             None => {}
         }
     }
@@ -517,19 +588,25 @@ impl UiState {
             Some(ActiveView::Providers(view)) => view.move_down(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_down(),
             Some(ActiveView::Models(view)) => view.move_down(),
+            Some(ActiveView::Activities(view)) => view.move_down(),
+            Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
             None => {}
         }
     }
 
     fn move_picker_tab_left(&mut self) {
-        if let Some(ActiveView::Models(picker)) = &mut self.view {
-            picker.tab_left();
+        match &mut self.view {
+            Some(ActiveView::Models(picker)) => picker.tab_left(),
+            Some(ActiveView::Activities(picker)) => picker.tab_left(),
+            _ => {}
         }
     }
 
     fn move_picker_tab_right(&mut self) {
-        if let Some(ActiveView::Models(picker)) = &mut self.view {
-            picker.tab_right();
+        match &mut self.view {
+            Some(ActiveView::Models(picker)) => picker.tab_right(),
+            Some(ActiveView::Activities(picker)) => picker.tab_right(),
+            _ => {}
         }
     }
 
@@ -542,6 +619,14 @@ impl UiState {
                 self.view = None;
                 self.provider_operation = None;
                 self.provider_device_code = None;
+            }
+            Some(ActiveView::Activities(_)) => self.view = None,
+            Some(ActiveView::ActivityLog(_)) => {
+                let Some(ActiveView::ActivityLog(view)) = self.view.take() else {
+                    return;
+                };
+                self.activity_preview = view.output;
+                self.view = Some(ActiveView::Activities(view.picker));
             }
             None => {}
         }
@@ -560,99 +645,5 @@ pub(super) fn spinner_frame(ticks: u128) -> &'static str {
         7 => "⠧",
         8 => "⠇",
         _ => "⠏",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ActiveView, ProviderAction, ProviderChoice, UiState};
-    use crate::tui::action::UiAction;
-    use misy_core::{ProviderAuthMethod, ProviderDisplayName, ProviderId};
-
-    fn provider_choice(id: &str, display_name: &str, authenticated: bool) -> ProviderChoice {
-        ProviderChoice {
-            id: ProviderId::new(id),
-            display_name: ProviderDisplayName::new(display_name),
-            authenticated,
-            credential_method: authenticated.then(|| "oauth".to_owned()),
-            auth_methods: vec![ProviderAuthMethod {
-                id: "oauth".to_owned(),
-                display_name: "Browser OAuth".to_owned(),
-            }],
-        }
-    }
-
-    fn refreshed_choices() -> Vec<ProviderChoice> {
-        vec![
-            provider_choice("fixture", "Fixture AI", true),
-            provider_choice("fixture-two", "Second AI", false),
-        ]
-    }
-
-    #[test]
-    fn refresh_providers_keeps_picker_filter_and_selection_while_updating_rows() {
-        let mut state = UiState::default();
-        state.open_providers(vec![
-            provider_choice("fixture", "Fixture AI", false),
-            provider_choice("fixture-two", "Second AI", false),
-        ]);
-        state.insert_filter("second");
-
-        state.refresh_providers(refreshed_choices());
-
-        let Some(ActiveView::Providers(view)) = &state.view else {
-            panic!("provider picker must stay open");
-        };
-        assert_eq!(view.labels(), ["Second AI"]);
-
-        for _ in 0.."second".len() {
-            state.backspace_filter();
-        }
-        state.reduce(&UiAction::PickerDown);
-
-        state.refresh_providers(refreshed_choices());
-
-        let Some(ActiveView::Providers(view)) = &state.view else {
-            panic!("provider picker must stay open");
-        };
-        assert_eq!(view.labels(), ["Fixture AI", "Second AI"]);
-        assert_eq!(view.selected_value(), Some(&ProviderId::new("fixture-two")));
-        let rows = view.visible_rows(8);
-        assert_eq!(
-            rows.first().and_then(|row| row.description.as_deref()),
-            Some("✓ authenticated")
-        );
-        assert!(rows.last().is_some_and(|row| row.selected));
-    }
-
-    #[test]
-    fn refresh_providers_updates_settings_rows_without_rebuilding_the_view() {
-        let mut state = UiState::default();
-        state.open_providers(vec![provider_choice("fixture", "Fixture AI", false)]);
-        state.open_provider_settings(&ProviderId::new("fixture"));
-        assert_eq!(
-            state.selected_provider_action(),
-            Some((
-                ProviderId::new("fixture"),
-                ProviderAction::Authorize("oauth".to_owned())
-            ))
-        );
-
-        state.refresh_providers(vec![provider_choice("fixture", "Fixture AI", true)]);
-
-        let Some(ActiveView::ProviderSettings {
-            credential_method,
-            actions,
-            ..
-        }) = &state.view
-        else {
-            panic!("provider settings must stay open");
-        };
-        assert_eq!(credential_method.as_deref(), Some("oauth"));
-        assert_eq!(actions.labels(), ["Log out"]);
-        assert_eq!(
-            state.selected_provider_action(),
-            Some((ProviderId::new("fixture"), ProviderAction::Logout))
-        );
     }
 }

@@ -40,7 +40,12 @@ async fn accepted_command_history_survives_a_new_client_and_restores_its_draft()
     first.insert_text("session-one");
     first.submit_composer().expect("accepted prompt");
     wait_for(&mut first, |client| {
-        client.state().active_submission().is_none()
+        client.state().composer_input().is_empty()
+            && client
+                .state()
+                .transcript()
+                .iter()
+                .any(|row| matches!(row, TranscriptRow::UserPrompt(text) if text == "session-one"))
     })
     .await;
     drop(first);

@@ -10,12 +10,21 @@ export type Model = {
 	id: string;
 	display_name: string;
 	context_window: number;
+	input_modalities: ("text" | "image")[];
 };
 
 const BUNDLED_MODELS: readonly Model[] = [
-	{ id: "claude-opus-4-8", display_name: "Claude Opus 4.8", context_window: 1_000_000 },
-	{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", context_window: 1_000_000 },
-	{ id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5", context_window: 200_000 },
+	imageModel({ id: "claude-opus-4-8", display_name: "Claude Opus 4.8", context_window: 1_000_000 }),
+	imageModel({
+		id: "claude-sonnet-4-6",
+		display_name: "Claude Sonnet 4.6",
+		context_window: 1_000_000,
+	}),
+	imageModel({
+		id: "claude-haiku-4-5-20251001",
+		display_name: "Claude Haiku 4.5",
+		context_window: 200_000,
+	}),
 ];
 
 /** The preferred bundled model when it is available to the signed-in account. */
@@ -75,7 +84,12 @@ function parseModel(value: Json): Model {
 		id,
 		display_name: typeof displayName === "string" && displayName.length > 0 ? displayName : id,
 		context_window: contextWindow(id),
+		input_modalities: ["text", "image"],
 	};
+}
+
+function imageModel(model: Omit<Model, "input_modalities">): Model {
+	return { ...model, input_modalities: ["text", "image"] };
 }
 
 function contextWindow(id: string): number {
@@ -83,5 +97,8 @@ function contextWindow(id: string): number {
 }
 
 function bundledModels(): Model[] {
-	return BUNDLED_MODELS.map((model) => ({ ...model }));
+	return BUNDLED_MODELS.map((model) => ({
+		...model,
+		input_modalities: [...model.input_modalities],
+	}));
 }

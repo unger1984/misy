@@ -5,7 +5,8 @@
 //! surface shared by the event projection ([`super::events`]) and the client.
 
 use super::UiState;
-use std::fmt;
+use misy_core::ActivityOutput;
+use std::{fmt, time::Duration};
 
 /// A renderable, user-visible transcript item.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +49,13 @@ pub enum TranscriptRow {
         /// The user-visible local tool result, when available.
         content: Option<String>,
     },
+    /// Final output delivered when a background command exits.
+    ActivityFinished(ActivityOutput),
+    /// Successful completion of a turn that performed tool work.
+    WorkSeparator {
+        /// Duration captured when the core advanced its active submission.
+        elapsed: Duration,
+    },
     /// Informational lifecycle message.
     Info(String),
     /// User-visible failure.
@@ -58,6 +66,15 @@ impl UiState {
     /// Returns the transcript rows in display order.
     pub fn transcript(&self) -> &[TranscriptRow] {
         &self.transcript
+    }
+
+    /// Returns whether tool output uses the expanded viewport budget.
+    pub fn tool_output_expanded(&self) -> bool {
+        self.tool_output_expanded
+    }
+
+    pub(in crate::tui) fn toggle_tool_output(&mut self) {
+        self.tool_output_expanded = !self.tool_output_expanded;
     }
 
     pub(in crate::tui) fn add_error(&mut self, error: impl fmt::Display) {

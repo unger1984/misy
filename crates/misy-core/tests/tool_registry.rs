@@ -4,7 +4,7 @@ use misy_core::{ToolDefinition, ToolRegistry};
 use serde_json::json;
 
 #[test]
-fn registry_exposes_the_four_builtin_tool_definitions() {
+fn registry_exposes_the_builtin_tool_definitions() {
     let registry = ToolRegistry::new();
     let definitions = registry.definitions();
     let names: Vec<_> = definitions
@@ -14,8 +14,46 @@ fn registry_exposes_the_four_builtin_tool_definitions() {
 
     assert_eq!(
         names,
-        ["list_directory", "read_file", "run_command", "write_file"]
+        [
+            "exec_command",
+            "list_directory",
+            "read_file",
+            "task_list",
+            "task_stop",
+            "view_image",
+            "write_file",
+            "write_stdin"
+        ]
     );
+}
+
+#[test]
+fn registry_accepts_only_the_unified_command_contract() {
+    let registry = ToolRegistry::new();
+    assert!(
+        registry
+            .validate_arguments("exec_command", &json!({"cmd": "printf ok"}))
+            .is_ok()
+    );
+    assert!(
+        registry
+            .validate_arguments(
+                "exec_command",
+                &json!({"cmd": "printf ok", "yield_time_ms": 250})
+            )
+            .is_ok()
+    );
+    assert!(
+        registry
+            .validate_arguments(
+                "exec_command",
+                &json!({"cmd": "printf ok", "yield-time-ms": 250})
+            )
+            .is_err()
+    );
+    for legacy in ["run_command", "run_shell", "shell_command", "task_output"] {
+        assert!(registry.validate_arguments(legacy, &json!({})).is_err());
+    }
 }
 
 #[test]

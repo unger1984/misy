@@ -1,13 +1,16 @@
 //! Deterministic terminal client for the headless Misy core.
 
 mod action;
+mod activity_picker;
 mod auth_flow;
 mod browser;
 mod client;
 mod clipboard;
 mod composer;
+mod composer_attachment;
 mod display_width;
 mod history;
+mod keymap;
 mod list;
 mod model_picker;
 mod model_popup;
@@ -20,6 +23,8 @@ mod startup_header;
 mod state;
 mod style;
 mod terminal;
+mod tool_render;
+mod transcript_render;
 mod usage;
 
 pub use action::{UiAction, UiKey, UiMode, map_input, map_key};

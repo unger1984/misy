@@ -1,6 +1,14 @@
 /** OpenAI Responses request construction and SSE normalization. */
 import { supportsReasoning } from "./model-catalog";
-import { isRecord, type Json, type Notify, type ToolDefinition } from "./types";
+import {
+	type ImageAttachment,
+	imageAttachments,
+	imageDataUrl,
+	isRecord,
+	type Json,
+	type Notify,
+	type ToolDefinition,
+} from "./types";
 
 /** Builds the complete Responses body required by the subscription backend. */
 export function createResponsesRequest(
@@ -70,11 +78,7 @@ export async function notifyResponseEvents(
 					notify("completed", { request_id: requestId, metadata });
 				}
 				if (event === "response.failed" || event === "error")
-					throw new Error(
-						typeof data["message"] === "string"
-							? data["message"]
-							: "OpenAI Responses stream failed",
-					);
+					throw new Error(responseErrorMessage(data));
 			}
 			if (read.done) break;
 		}
@@ -88,6 +92,7 @@ export async function notifyResponseEvents(
 	}
 	return metadata;
 }
+
 function record(value: unknown): Record<string, Json> {
 	return isRecord(value) ? value : {};
 }
@@ -96,8 +101,10 @@ function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 	for (const message of messages) {
 		if (message["role"] === "system") continue;
 		input.push(...reasoningInputs(message["provider_metadata"]));
-		if (message["role"] === "assistant" && Array.isArray(message["tool_calls"]))
-			for (const call of message["tool_calls"]) {
+		if (message["role"] === "assistant") {
+			const content = typeof message["content"] === "string" ? message["content"] : "";
+			if (content.length > 0) input.push({ role: "assistant", content });
+			for (const call of Array.isArray(message["tool_calls"]) ? message["tool_calls"] : []) {
 				const value = record(call);
 				input.push({
 					type: "function_call",
@@ -106,23 +113,56 @@ function responseInput(messages: readonly Record<string, unknown>[]): Json[] {
 					arguments: JSON.stringify(value["arguments"] ?? {}),
 				});
 			}
+			continue;
+		}
 		if (message["role"] === "tool" && Array.isArray(message["tool_results"])) {
 			for (const result of message["tool_results"]) {
 				const value = record(result);
 				input.push({
 					type: "function_call_output",
 					call_id: typeof value["tool_call_id"] === "string" ? value["tool_call_id"] : "",
-					output: typeof value["content"] === "string" ? value["content"] : "",
+					output: functionOutput(value),
 				});
 			}
 			continue;
 		}
 		input.push({
 			role: typeof message["role"] === "string" ? message["role"] : "user",
-			content: typeof message["content"] === "string" ? message["content"] : "",
+			content: messageContent(message),
 		});
 	}
 	return input;
+}
+
+function messageContent(message: Record<string, unknown>): Json {
+	const text = typeof message["content"] === "string" ? message["content"] : "";
+	const attachments = imageAttachments(message["attachments"]);
+	if (message["role"] !== "user" || attachments.length === 0) return text;
+	return richContent(text, attachments);
+}
+
+function functionOutput(result: Record<string, Json>): Json {
+	const text = typeof result["content"] === "string" ? result["content"] : "";
+	const attachments = imageAttachments(result["attachments"]);
+	return attachments.length === 0 ? text : richContent(text, attachments);
+}
+
+function richContent(text: string, attachments: readonly ImageAttachment[]): Json[] {
+	const content: Json[] = text.length > 0 ? [{ type: "input_text", text }] : [];
+	for (const attachment of attachments) {
+		content.push({ type: "input_image", image_url: imageDataUrl(attachment), detail: "high" });
+	}
+	return content;
+}
+
+function responseErrorMessage(data: Record<string, Json>): string {
+	const response = record(data["response"]);
+	const responseError = record(response["error"]);
+	const error = record(data["error"]);
+	for (const candidate of [responseError["message"], error["message"], data["message"]]) {
+		if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
+	}
+	return "OpenAI Responses stream failed";
 }
 
 function reasoningInputs(metadata: unknown): Json[] {
@@ -142,7 +182,9 @@ function collectReasoningInputs(value: unknown, inputs: Json[], seen: Set<string
 	const encrypted = item["encrypted_content"];
 	if (item["type"] === "reasoning" && typeof encrypted === "string" && !seen.has(encrypted)) {
 		seen.add(encrypted);
-		inputs.push({ type: "reasoning", encrypted_content: encrypted });
+		// Responses validates opaque reasoning items as a unit. Replaying only the encrypted blob
+		// drops server-owned fields such as `id` and `summary` and makes the next tool turn invalid.
+		inputs.push({ ...item });
 	}
 	for (const nested of Object.values(item)) collectReasoningInputs(nested, inputs, seen);
 }

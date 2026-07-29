@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { OpenAiProvider } from "../src/provider";
-import type { Credentials } from "../src/types";
+import type { Credentials, ImageAttachment } from "../src/types";
 
 type CapturedRequest = {
 	url: string;
@@ -121,10 +121,22 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 		return Response.json({
 			models: [
 				{ slug: "zeta", display_name: "Zeta", priority: 2, context_window: 16_000 },
-				{ slug: "gpt-5.6-codex", priority: 1, default_reasoning_level: "medium" },
-				{ id: "alpha", priority: 1, supported_reasoning_levels: ["low"] },
+				{
+					slug: "gpt-5.6-codex",
+					priority: 1,
+					default_reasoning_level: "medium",
+					input_modalities: ["text", "image"],
+				},
+				{
+					id: "alpha",
+					priority: 1,
+					supported_reasoning_levels: ["low"],
+					input_modalities: ["text"],
+				},
 				{ slug: "hidden", visibility: "hidden", priority: 0 },
 				{ slug: "hide", visibility: "hide", priority: 0 },
+				{ slug: "null-modalities", priority: 3, input_modalities: null },
+				{ slug: "invalid-modalities", priority: 4, input_modalities: ["text", "audio"] },
 			],
 		});
 	});
@@ -146,14 +158,41 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 	expect(received?.headers.get("version")).toBe("0.144.1");
 	expect(received?.headers.get("accept")).toBe("application/json");
 	expect(models).toEqual([
-		{ id: "alpha", display_name: "alpha", context_window: 272_000, reasoning: true },
+		{
+			id: "alpha",
+			display_name: "alpha",
+			context_window: 272_000,
+			reasoning: true,
+			input_modalities: ["text"],
+		},
 		{
 			id: "gpt-5.6-codex",
 			display_name: "gpt-5.6-codex",
 			context_window: 372_000,
 			reasoning: true,
+			input_modalities: ["text", "image"],
 		},
-		{ id: "zeta", display_name: "Zeta", context_window: 16_000, reasoning: false },
+		{
+			id: "zeta",
+			display_name: "Zeta",
+			context_window: 16_000,
+			reasoning: false,
+			input_modalities: ["text", "image"],
+		},
+		{
+			id: "null-modalities",
+			display_name: "null-modalities",
+			context_window: 272_000,
+			reasoning: false,
+			input_modalities: ["text"],
+		},
+		{
+			id: "invalid-modalities",
+			display_name: "invalid-modalities",
+			context_window: 272_000,
+			reasoning: false,
+			input_modalities: ["text"],
+		},
 	]);
 });
 
@@ -175,6 +214,7 @@ test("retries model discovery through the compatibility path", async () => {
 			display_name: "fallback-route",
 			context_window: 48_000,
 			reasoning: false,
+			input_modalities: ["text", "image"],
 		},
 	]);
 });
@@ -286,7 +326,8 @@ test("sends account identity and complete subscription request fields", async ()
 		reasoning: { effort: "medium", summary: "auto" },
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 		text: { verbosity: "medium" },
-		input: expect.arrayContaining([
+		input: [
+			{ role: "user", content: "Hi" },
 			{
 				type: "function_call",
 				call_id: "call-1",
@@ -294,7 +335,69 @@ test("sends account identity and complete subscription request fields", async ()
 				arguments: '{"path":"README.md"}',
 			},
 			{ type: "function_call_output", call_id: "call-1", output: "contents" },
-		]),
+		],
+	});
+});
+
+test("maps user and tool-result PNGs to Responses image content", async () => {
+	let received: CapturedRequest | undefined;
+	const base = fakeServer((request) => {
+		received = request;
+		return new Response("event: response.completed\ndata: {}\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+	const image: ImageAttachment = {
+		type: "image",
+		media_type: "image/png",
+		data_base64:
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y" +
+			"AAAAASUVORK5CYII=",
+	};
+
+	await new OpenAiProvider({ issuer: base, codexBaseUrl: base }).streamChat(
+		{
+			model_id: "gpt-5.5",
+			messages: [
+				{ role: "user", content: "look", attachments: [image] },
+				{
+					role: "tool",
+					tool_results: [{ tool_call_id: "call-1", content: "done", attachments: [image] }],
+				},
+			],
+			tools: [],
+			credentials: credentials(),
+		},
+		11,
+		() => {},
+	);
+
+	expect(received?.body).toMatchObject({
+		input: [
+			{
+				role: "user",
+				content: [
+					{ type: "input_text", text: "look" },
+					{
+						type: "input_image",
+						image_url: `data:image/png;base64,${image.data_base64}`,
+						detail: "high",
+					},
+				],
+			},
+			{
+				type: "function_call_output",
+				call_id: "call-1",
+				output: [
+					{ type: "input_text", text: "done" },
+					{
+						type: "input_image",
+						image_url: `data:image/png;base64,${image.data_base64}`,
+						detail: "high",
+					},
+				],
+			},
+		],
 	});
 });
 
@@ -304,8 +407,8 @@ test("replays encrypted reasoning from completed metadata on the next turn", asy
 		bodies.push(request.body);
 		return new Response(
 			"event: response.completed\n" +
-				'data: {"response":{"output":[{"type":"reasoning",' +
-				'"encrypted_content":"opaque-reasoning"}]}}\n\n',
+				'data: {"response":{"output":[{"type":"reasoning","id":"reasoning-1",' +
+				'"summary":[],"encrypted_content":"opaque-reasoning"}]}}\n\n',
 			{ headers: { "content-type": "text/event-stream" } },
 		);
 	});
@@ -338,7 +441,14 @@ test("replays encrypted reasoning from completed metadata on the next turn", asy
 		() => {},
 	);
 	expect(bodies[1]).toMatchObject({
-		input: expect.arrayContaining([{ type: "reasoning", encrypted_content: "opaque-reasoning" }]),
+		input: expect.arrayContaining([
+			{
+				type: "reasoning",
+				id: "reasoning-1",
+				summary: [],
+				encrypted_content: "opaque-reasoning",
+			},
+		]),
 	});
 });
 
@@ -564,4 +674,29 @@ test("fails a stream cut off mid-event without leaking a partial delta", async (
 		{ method: "text_delta", request_id: 19, delta: "hello" },
 		{ method: "failed", request_id: 19, message: "OpenAI Responses stream ended mid-event" },
 	]);
+});
+
+test("preserves the nested Responses failure message", async () => {
+	const message = "Function call output did not match any pending tool call";
+	const payload = JSON.stringify({
+		type: "response.failed",
+		response: { status: "failed", error: { code: "invalid_request_error", message } },
+	});
+	const base = fakeServer(
+		() =>
+			new Response(`event: response.failed\ndata: ${payload}\n\n`, {
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+	const provider = new OpenAiProvider({ issuer: base, codexBaseUrl: base });
+	const notifications: Array<Record<string, unknown>> = [];
+
+	await expect(
+		provider.streamChat(
+			{ model_id: "gpt-5.5", messages: [], tools: [], credentials: credentials() },
+			20,
+			(method, params) => notifications.push({ method, ...params }),
+		),
+	).rejects.toThrow(message);
+	expect(notifications).toEqual([{ method: "failed", request_id: 20, message }]);
 });

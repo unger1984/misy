@@ -5,8 +5,9 @@ use super::{
     composer::CommandPopupRow,
     display_width::{text_width, truncate_to_width},
     list::ListRowDisplay,
-    state::{TranscriptRow, UiState},
+    state::UiState,
     style,
+    transcript_render::transcript_lines,
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -19,6 +20,7 @@ use std::time::Instant;
 const MAX_VIEW_ROWS: usize = 8;
 const MAX_QUEUED_PROMPT_ROWS: usize = 3;
 const POPUP_TOP_SPACE: u16 = 1;
+const TRANSCRIPT_INSET: u16 = 2;
 
 /// Renders the complete fullscreen client.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
@@ -27,6 +29,10 @@ pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
 
 pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiState) -> Rect {
     let area = frame.area();
+    if state.mode() == UiMode::ActivityDetail {
+        render_activity_log(frame, area, state);
+        return area;
+    }
     let popup_rows = state.command_popup_rows_for_render();
     let modal = state.modal_presentation(MAX_VIEW_ROWS);
     let composer_height = composer_height(state);
@@ -39,6 +45,7 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
         Constraint::Length(u16::from(busy.is_some())),
         Constraint::Length(composer_height),
         Constraint::Length(surface_height),
+        Constraint::Length(u16::from(state.activity_bar_visible())),
         Constraint::Length(1),
     ])
     .split(area);
@@ -59,17 +66,49 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     }
     render_composer(frame, areas[3], state);
     render_surface(frame, areas[4], &popup_rows);
+    if state.activity_bar_visible() {
+        render_activity_bar(frame, areas[5], state);
+    }
     if let Some(modal) = modal.as_ref() {
         super::model_popup::render(frame, area, state, modal);
     }
-    render_footer(frame, areas[5], state);
+    render_footer(frame, areas[6], state);
     render_cursor(frame, areas[3], state);
     areas[3]
 }
 
-/// Converts transcript rows into styled terminal lines.
-pub(super) fn transcript_lines(rows: &[TranscriptRow]) -> Vec<Line<'static>> {
-    rows.iter().flat_map(row_lines).collect()
+fn render_activity_log(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(style::accent())
+        .title(
+            state
+                .activity_log_title()
+                .unwrap_or_else(|| "Task output".to_owned()),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
+    let areas = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+    let lines = state
+        .activity_log_lines(usize::from(areas[0].height))
+        .into_iter()
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "↑↓ scroll  pgup/pgdn page  esc back",
+            style::muted(),
+        )),
+        areas[1],
+    );
 }
 
 fn composer_height(state: &UiState) -> u16 {
@@ -90,90 +129,27 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
         return;
     }
     let mut lines = state.startup_header.lines(area.width);
-    lines.extend(transcript_lines(state.transcript()));
+    let transcript_width = area.width.saturating_sub(TRANSCRIPT_INSET);
+    lines.extend(
+        transcript_lines(
+            state.transcript(),
+            transcript_width,
+            state.tool_output_expanded(),
+            &state.transcript_expand_hint,
+        )
+        .into_iter()
+        .map(inset_transcript_line),
+    );
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     let total_height = u16::try_from(paragraph.line_count(area.width)).unwrap_or(u16::MAX);
     let scroll = total_height.saturating_sub(area.height);
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
-fn row_lines(row: &TranscriptRow) -> Vec<Line<'static>> {
-    match row {
-        TranscriptRow::Provider { id, authenticated } => {
-            vec![provider_status_line(id, *authenticated)]
-        }
-        TranscriptRow::Model {
-            provider,
-            id,
-            selected,
-        } => vec![model_status_line(provider, id, *selected)],
-        TranscriptRow::UserPrompt(prompt) => user_prompt_lines(prompt),
-        TranscriptRow::AssistantText(text) => text
-            .split('\n')
-            .map(|line| Line::raw(line.to_owned()))
-            .collect(),
-        TranscriptRow::ToolCall {
-            name, arguments, ..
-        } => vec![tool_call_line(name, arguments.as_deref())],
-        TranscriptRow::ToolResult {
-            is_error, content, ..
-        } => tool_result_lines(*is_error, content.as_deref()),
-        TranscriptRow::Info(message) => vec![Line::styled(format!("  {message}"), style::muted())],
-        TranscriptRow::Error(message) => vec![Line::styled(format!("  {message}"), style::error())],
-    }
-}
-
-fn provider_status_line(id: &str, authenticated: bool) -> Line<'static> {
-    let status = if authenticated {
-        "authenticated"
-    } else {
-        "offline"
-    };
-    Line::styled(format!("  provider {id}: {status}"), style::muted())
-}
-
-fn model_status_line(provider: &str, id: &str, selected: bool) -> Line<'static> {
-    let marker = if selected { " ✓" } else { "" };
-    Line::styled(format!("  model: {provider}/{id}{marker}"), style::muted())
-}
-
-fn user_prompt_lines(prompt: &str) -> Vec<Line<'static>> {
-    prompt
-        .split('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            let marker = if index == 0 { "• " } else { "  " };
-            Line::from(vec![
-                Span::styled(marker, style::muted()),
-                Span::styled(line.to_owned(), style::muted()),
-            ])
-        })
-        .collect()
-}
-
-fn tool_call_line(name: &str, arguments: Option<&str>) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("⏺ ", style::accent()),
-        Span::raw(format!("{name}({})", arguments.unwrap_or_default())),
-    ])
-}
-
-fn tool_result_lines(is_error: bool, content: Option<&str>) -> Vec<Line<'static>> {
-    let row_style = if is_error {
-        style::error()
-    } else {
-        style::muted()
-    };
-    let fallback = if is_error { "tool failed" } else { "completed" };
-    content
-        .unwrap_or(fallback)
-        .split('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            let prefix = if index == 0 { "  ⎿ " } else { "    " };
-            Line::styled(format!("{prefix}{line}"), row_style)
-        })
-        .collect()
+fn inset_transcript_line(mut line: Line<'static>) -> Line<'static> {
+    line.spans
+        .insert(0, Span::raw(" ".repeat(usize::from(TRANSCRIPT_INSET))));
+    line
 }
 
 fn render_composer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
@@ -374,8 +350,26 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
     );
 }
 
+fn render_activity_bar(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            state.activity_bar_label(),
+            if state.activity_bar_focused {
+                style::accent()
+            } else {
+                style::muted()
+            },
+        )),
+        area,
+    );
+}
+
 fn render_cursor(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
-    if state.mode() != UiMode::Input || area.width < 3 || area.height < 3 {
+    if state.mode() != UiMode::Input
+        || state.activity_bar_focused
+        || area.width < 3
+        || area.height < 3
+    {
         return;
     }
     let (column, row) = state.composer_cursor_position();
@@ -415,5 +409,17 @@ mod tests {
 
         assert!(line.width() <= 32);
         assert!(rendered.contains("…  authentica…"), "{rendered:?}");
+    }
+
+    #[test]
+    fn transcript_content_has_a_two_column_inset() {
+        let line = inset_transcript_line(Line::raw("● Read file"));
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "  ● Read file");
     }
 }

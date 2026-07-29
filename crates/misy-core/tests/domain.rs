@@ -1,7 +1,8 @@
 //! Domain-contract integration tests.
 
 use misy_core::{
-    Message, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition, ToolResult,
+    InputModality, Message, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition,
+    ToolResult,
 };
 use serde_json::json;
 
@@ -32,4 +33,16 @@ fn normalized_domain_types_round_trip_through_json() {
         .expect("deserialize model reference"),
         model
     );
+}
+
+#[test]
+fn legacy_model_json_defaults_to_text_only() {
+    let model: ModelInfo = serde_json::from_value(json!({
+        "model": {"provider": "legacy", "model": "text-model"},
+        "display_name": "Legacy text model",
+        "context_window": 8_192
+    }))
+    .expect("deserialize legacy model info");
+
+    assert_eq!(model.input_modalities, vec![InputModality::Text]);
 }

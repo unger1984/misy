@@ -8,9 +8,12 @@
  * malformed request fails with a JSON-RPC error instead of a blind cast.
  */
 import { oauthCredentials, requireOauthCredentials } from "./credentials";
+import { type InputFrame, NdjsonFramer } from "./ndjson";
 import {
+	type ChatMessage,
 	type ChatRequest,
 	type Credentials,
+	isImageAttachment,
 	isRecord,
 	type Json,
 	type Notify,
@@ -70,22 +73,30 @@ class ProtocolServer {
 
 	/** Reads NDJSON frames until EOF, then aborts live chats and drains in-flight replies. */
 	async run(): Promise<void> {
-		const decoder = new TextDecoder();
-		let pending = "";
+		const framer = new NdjsonFramer();
 		const tasks = new Set<Promise<void>>();
 		for await (const chunk of Bun.stdin.stream()) {
-			pending += decoder.decode(chunk, { stream: true });
-			const lines = pending.split("\n");
-			pending = lines.pop() ?? "";
-			for (const line of lines) {
-				if (line.trim().length === 0) continue;
-				const task = this.handleLine(line).finally(() => tasks.delete(task));
-				tasks.add(task);
-			}
+			for (const frame of framer.push(chunk)) this.schedule(frame, tasks);
 		}
+		const finalFrame = framer.finish();
+		if (finalFrame !== undefined) this.schedule(finalFrame, tasks);
 		for (const controller of this.chats.values()) controller.abort();
 		this.adapter.shutdown?.();
 		await Promise.allSettled(tasks);
+	}
+
+	private schedule(frame: InputFrame, tasks: Set<Promise<void>>): void {
+		if (frame.kind === "too_large") {
+			this.send({
+				jsonrpc: "2.0",
+				id: null,
+				error: { code: -32700, message: "Input frame exceeds 32 MiB limit" },
+			});
+			return;
+		}
+		if (frame.line.trim().length === 0) return;
+		const task = this.handleLine(frame.line).finally(() => tasks.delete(task));
+		tasks.add(task);
 	}
 
 	private async handleLine(line: string): Promise<void> {
@@ -190,11 +201,30 @@ function chatRequest(params: Record<string, Json>, credentials: Credentials): Ch
 	if (!Array.isArray(tools)) throw new Error("chat.start requires tools to be an array");
 	return {
 		model_id: modelId,
-		// Validated by the every() check above; map re-narrows because every() cannot.
-		messages: messages.map(recordOf),
+		messages: messages.map(message),
 		tools: tools.map(toolDefinition),
 		credentials,
 	};
+}
+
+function message(value: Json): ChatMessage {
+	const entry = recordOf(value);
+	validateAttachments(entry["attachments"]);
+	const results = entry["tool_results"];
+	if (results !== undefined) {
+		if (!Array.isArray(results) || !results.every(isRecord)) {
+			throw new Error("chat.start tool_results must be an array of objects");
+		}
+		for (const result of results) validateAttachments(recordOf(result)["attachments"]);
+	}
+	return entry;
+}
+
+function validateAttachments(value: Json | undefined): void {
+	if (value === undefined) return;
+	if (!Array.isArray(value) || !value.every(isImageAttachment)) {
+		throw new Error("chat.start attachments require base64 image/png objects");
+	}
 }
 
 function toolDefinition(value: Json): ToolDefinition {

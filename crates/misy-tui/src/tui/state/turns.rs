@@ -2,9 +2,38 @@
 
 use super::{TranscriptRow, UiState, spinner_frame};
 use misy_core::SubmissionId;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TerminalTurn {
+    pub(super) submission: SubmissionId,
+    pub(super) elapsed: Duration,
+    pub(super) had_tool_activity: bool,
+}
 
 impl UiState {
+    pub(super) fn capture_turn_transition(
+        &mut self,
+        next_submission: Option<SubmissionId>,
+        now: Instant,
+    ) {
+        if let Some(submission) = self.snapshot.active_submission {
+            let elapsed = self
+                .submission_started_at
+                .map_or(Duration::ZERO, |started| {
+                    now.saturating_duration_since(started)
+                });
+            self.terminal_turn = Some(TerminalTurn {
+                submission,
+                elapsed,
+                had_tool_activity: self.turn_had_tool_activity,
+            });
+        }
+        self.submission_started_at = next_submission.map(|_| now);
+        self.turn_had_tool_activity = false;
+        self.response_started = false;
+    }
+
     /// Returns the submission currently occupying the core-owned FIFO slot.
     pub fn active_submission(&self) -> Option<SubmissionId> {
         self.snapshot.active_submission
@@ -56,5 +85,9 @@ impl UiState {
                 .push(TranscriptRow::UserPrompt(text.clone()));
         }
         self.response_submission = Some(submission);
+        if self.active_submission() == Some(submission) {
+            self.submission_started_at.get_or_insert_with(Instant::now);
+            self.turn_had_tool_activity = false;
+        }
     }
 }

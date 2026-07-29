@@ -1,8 +1,9 @@
 //! Public values and errors exposed by the headless core.
 
 use crate::{
-    ConfigError, CredentialError, Message, ModelInfo, ModelRef, ProviderDiscoveryError,
-    ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
+    ActivitySummary, ConfigError, CredentialError, ImageAttachment, InputModality, Message,
+    ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId,
+    ToolCall, ToolResult,
 };
 use serde_json::Value;
 use std::{error::Error, fmt};
@@ -23,6 +24,8 @@ impl SubmissionId {
 pub struct HistoryEntry {
     /// User, assistant, or tool message retained for the next provider request.
     pub message: Message,
+    /// Images supplied with this message while its submission is active.
+    pub attachments: Vec<ImageAttachment>,
     /// Tool calls emitted alongside [`Self::message`].
     pub tool_calls: Vec<ToolCall>,
     /// Local tool results emitted after [`Self::tool_calls`].
@@ -56,6 +59,19 @@ pub struct ProviderModelError {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreEvent {
+    /// A background activity was added or changed state.
+    ActivityChanged {
+        /// Latest bounded activity projection.
+        activity: ActivitySummary,
+    },
+    /// A published background activity reached a terminal state.
+    ///
+    /// The final bounded output travels with the event so clients can commit one complete
+    /// transcript item without racing a follow-up output query.
+    ActivityFinished {
+        /// Final metadata and bounded process output.
+        output: crate::ActivityOutput,
+    },
     /// A package was discovered during core construction.
     ProviderDiscovered {
         /// Discovered provider identifier.
@@ -92,6 +108,8 @@ pub enum CoreEvent {
         submission: SubmissionId,
         /// Message queued for processing, as retained in session history.
         message: Message,
+        /// Number of image attachments, without exposing their payloads to clients.
+        attachment_count: usize,
     },
     /// A submitted user message began processing.
     SubmissionStarted {
@@ -163,6 +181,27 @@ pub enum CoreError {
     InvalidModels(String),
     /// A provider returned a malformed normalized usage report.
     InvalidUsage(String),
+    /// The selected model does not accept one requested input modality.
+    UnsupportedInput {
+        /// Selected provider-scoped model.
+        model: ModelRef,
+        /// Input modality rejected by the model.
+        modality: InputModality,
+    },
+    /// A submission exceeded the bounded image count.
+    TooManyAttachments {
+        /// Number of images supplied by the client.
+        found: usize,
+        /// Maximum images accepted in one submission.
+        maximum: usize,
+    },
+    /// A submission exceeded the aggregate normalized-image budget.
+    AttachmentPayloadTooLarge {
+        /// Total normalized image bytes supplied by the client.
+        found: usize,
+        /// Maximum normalized image bytes accepted in one active request.
+        maximum: usize,
+    },
     /// The private Tokio runtime could not be started or a runtime task could not complete.
     Runtime(String),
     /// A provider does not advertise the requested optional capability revision.
@@ -202,6 +241,19 @@ impl fmt::Display for CoreError {
             Self::Provider(error) => write!(formatter, "provider error: {error}"),
             Self::InvalidModels(message) => write!(formatter, "invalid models response: {message}"),
             Self::InvalidUsage(message) => write!(formatter, "invalid usage response: {message}"),
+            Self::UnsupportedInput { model, modality } => write!(
+                formatter,
+                "model `{}` does not support {modality:?} input",
+                model.model.as_str()
+            ),
+            Self::TooManyAttachments { found, maximum } => write!(
+                formatter,
+                "submission contains {found} images; maximum is {maximum}"
+            ),
+            Self::AttachmentPayloadTooLarge { found, maximum } => write!(
+                formatter,
+                "submission images contain {found} bytes; maximum is {maximum}"
+            ),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
             Self::UnsupportedCapability {
                 provider,

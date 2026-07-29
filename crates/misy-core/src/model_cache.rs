@@ -1,6 +1,8 @@
 //! Persistent, best-effort cache of provider model catalogs.
 
-use crate::{MisyPaths, ModelId, ModelInfo, ModelRef, ProviderId, config::write_atomic};
+use crate::{
+    InputModality, MisyPaths, ModelId, ModelInfo, ModelRef, ProviderId, config::write_atomic,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, error::Error, fmt, fs, sync::Mutex};
 
@@ -56,6 +58,8 @@ struct CachedModel {
     id: String,
     display_name: String,
     context_window: u32,
+    #[serde(default = "text_only_modalities")]
+    input_modalities: Vec<InputModality>,
 }
 
 /// Versioned model catalogs saved by the core after successful provider requests.
@@ -78,7 +82,7 @@ pub(crate) struct PendingModelCatalogWrite {
 
 impl ModelCatalogStore {
     /// Current model-cache schema revision.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Creates a model catalog store rooted at `paths`.
     pub fn new(paths: MisyPaths) -> Self {
@@ -237,6 +241,12 @@ fn read_file(paths: &MisyPaths) -> ModelCatalogFile {
     let Ok(cache) = serde_json::from_slice::<ModelCatalogFile>(&contents) else {
         return ModelCatalogFile::default();
     };
+    if cache.version == 1 {
+        return ModelCatalogFile {
+            version: ModelCatalogStore::VERSION,
+            providers: cache.providers,
+        };
+    }
     if cache.version != ModelCatalogStore::VERSION {
         return ModelCatalogFile::default();
     }
@@ -249,6 +259,7 @@ impl From<&ModelInfo> for CachedModel {
             id: model.model.model.as_str().to_owned(),
             display_name: model.display_name.clone(),
             context_window: model.context_window,
+            input_modalities: model.input_modalities.clone(),
         }
     }
 }
@@ -263,8 +274,13 @@ fn cached_models(provider: &ProviderId, catalog: CachedProvider) -> Vec<ModelInf
                 model.display_name,
                 model.context_window,
             )
+            .with_input_modalities(model.input_modalities)
         })
         .collect()
+}
+
+fn text_only_modalities() -> Vec<InputModality> {
+    vec![InputModality::Text]
 }
 
 #[cfg(test)]
@@ -306,7 +322,7 @@ mod tests {
 
         let contents = fs::read(paths.models_file()).expect("read cache file");
         let json: serde_json::Value = serde_json::from_slice(&contents).expect("cache json");
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["version"], 2);
         assert!(
             json["providers"].get("provider-a").is_some(),
             "provider id must stay a plain string key: {json}"
@@ -326,10 +342,37 @@ mod tests {
     fn treats_an_incompatible_cache_version_as_empty() {
         let temporary = tempdir().expect("temporary root");
         let paths = MisyPaths::from_root(temporary.path());
-        fs::write(paths.models_file(), br#"{"version":2,"providers":{}}"#)
+        fs::write(paths.models_file(), br#"{"version":3,"providers":{}}"#)
             .expect("write incompatible cache");
 
         assert!(ModelCatalogStore::new(paths).load().is_empty());
+    }
+
+    #[test]
+    fn migrates_version_one_models_to_text_only() {
+        let temporary = tempdir().expect("temporary root");
+        let paths = MisyPaths::from_root(temporary.path());
+        fs::create_dir_all(paths.models_file().parent().expect("models parent"))
+            .expect("create models parent");
+        fs::write(
+            paths.models_file(),
+            br#"{
+                "version": 1,
+                "providers": {
+                    "provider-a": {"models": [{
+                        "id": "model-a",
+                        "display_name": "Legacy",
+                        "context_window": 4096
+                    }]}
+                }
+            }"#,
+        )
+        .expect("write legacy cache");
+
+        let models = ModelCatalogStore::new(paths).load();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].input_modalities, vec![InputModality::Text]);
     }
 
     #[test]

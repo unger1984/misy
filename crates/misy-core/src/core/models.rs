@@ -1,7 +1,7 @@
 //! Provider model-catalog validation for the core.
 
 use super::CoreError;
-use crate::{ModelId, ModelInfo, ModelRef, ProviderId};
+use crate::{InputModality, ModelId, ModelInfo, ModelRef, ProviderId};
 use serde_json::Value;
 
 pub(super) fn parse_models(
@@ -40,7 +40,32 @@ fn parse_model(provider: &ProviderId, value: &Value) -> Result<ModelInfo, CoreEr
         ModelRef::new(provider.clone(), ModelId::new(id)),
         display_name,
         context_window,
-    ))
+    )
+    .with_input_modalities(input_modalities(value)))
+}
+
+fn input_modalities(value: &Value) -> Vec<InputModality> {
+    let Some(values) = value.get("input_modalities").and_then(Value::as_array) else {
+        return vec![InputModality::Text];
+    };
+    let mut modalities = Vec::new();
+    for value in values {
+        match value.as_str() {
+            Some("text") if !modalities.contains(&InputModality::Text) => {
+                modalities.push(InputModality::Text);
+            }
+            Some("image") if !modalities.contains(&InputModality::Image) => {
+                modalities.push(InputModality::Image);
+            }
+            Some("text" | "image") => {}
+            _ => return vec![InputModality::Text],
+        }
+    }
+    if modalities.contains(&InputModality::Text) {
+        modalities
+    } else {
+        vec![InputModality::Text]
+    }
 }
 
 pub(super) fn select_catalog_default(

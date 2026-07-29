@@ -67,6 +67,7 @@ async fn submission_accepted_arrives_in_fifo_order_with_the_message_before_any_t
             CoreEvent::SubmissionAccepted {
                 submission,
                 message,
+                ..
             } => Some((*submission, message)),
             _ => None,
         })

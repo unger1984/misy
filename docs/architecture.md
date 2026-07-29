@@ -31,22 +31,25 @@ flowchart LR
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
-- `config.toml`, the credential files, and `models.json` each carry a format version, but no
-  migration path is implemented yet: a version mismatch is rejected (`UnsupportedVersion`) or
-  treated as empty. This is an accepted MVP trade-off — the first version bump of any of these
-  formats MUST ship with a migration (or an explicit reset-with-notice policy), because silently
-  rejecting the previous format would log every user out and drop the model catalog on a routine
-  upgrade.
+- `config.toml`, the credential files, and `models.json` each carry an independent format version.
+  Config version 1 is atomically migrated to version 2, which adds frontend-owned named
+  keybindings; newer unknown revisions are rejected. Credential storage remains version 1 and the
+  model cache has its own migration. Every future version bump MUST ship with a migration or an
+  explicit reset-with-notice policy.
 - `misy-core` is an async Tokio library. It owns a private multi-thread Tokio runtime so provider
   supervision and queued work survive callers using another runtime or dropping an operation
   future. Its public async operations are safe to call from a client's runtime.
 - The `misy-tui` workspace crate and future desktop or third-party programs are clients of the
   core. They do not duplicate orchestration state.
-- `CoreSnapshot` is the cheap, in-memory client projection of the selected model, active and
-  queued submissions, and cached provider authentication state. Reading it never performs
+- `CoreSnapshot` is the cheap, in-memory client projection of activities, the selected model,
+  active and queued submissions, and cached provider authentication state. Reading it never performs
   filesystem, process, or network I/O; clients refresh their projections after relevant core
   events rather than maintaining a competing source of truth.
-- Rust owns local tool definitions and execution. Provider plugins only translate between Misy's normalized contract and a remote provider protocol.
+- Rust owns local tool definitions and execution. Provider plugins only translate between Misy's
+  normalized contract and a remote provider protocol.
+- Frontends acquire clipboard media, but the core owns image validation, normalized bytes,
+  session attachment state, and `view_image` execution. Provider plugins receive only normalized
+  image data and never read local image paths.
 - One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
 
 ## Runtime Flow
@@ -70,6 +73,24 @@ flowchart LR
    injects its opaque credentials, bounds `usage.get` to 30 seconds, and strictly validates the
    normalized result. The provider retains ownership of remote endpoint selection, headers, and
    provider-specific response parsing.
+10. Image input requires both provider capability version 1 and model image modality support.
+    The core refreshes stale selected-provider metadata before rejecting a submission, includes
+    normalized images in bounded in-memory history for visual follow-ups, and replaces older image
+    payloads when the user attaches a new image set. Text-only models receive image-free history.
+11. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
+    Every live process reserves one of 64 permits before spawn; foreground calls may publish the
+    same process after a bounded yield without acquiring another permit. Pipe commands use process
+    groups with closed stdin. On macOS and Linux, optional PTY commands use a writable terminal and
+    a dedicated process group; stop and shutdown close input and escalate bounded `TERM` to `KILL`
+    before reaping. Windows PTY support remains deferred and `tty = true` fails explicitly there.
+    Ordered stdout/stderr capture has one 1 MiB data-plus-metadata budget per activity, model
+    delivery has a separate `max_output_tokens` projection, and the latest twenty terminal tasks
+    remain available to clients.
+12. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
+    refresh its activity popup, fullscreen log viewer, and transcript after cleanup and output
+    draining. The model is not notified when a background command finishes: it must pull new output
+    and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed
+    once, while the terminal summary and client snapshot remain in the recent-task registry.
 
 ## Fixed Constraints
 
@@ -78,6 +99,8 @@ flowchart LR
 - The selected model is a default for direct interaction, not a global singleton assumption; future agents may use other provider/model pairs.
 - External clients must reuse the `misy-core` contract, including its public async operations,
   events, cancellation methods, and `CoreSnapshot` projection.
+- The multimodal public-domain additions ship with the workspace contract version `0.2.0`;
+  provider protocol v2 remains compatible because image fields are capability-gated.
 
 ## Change Impact
 

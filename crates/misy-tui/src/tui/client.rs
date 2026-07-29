@@ -4,16 +4,20 @@ mod authentication;
 mod interrupts;
 mod operation_result;
 mod snapshot;
+mod submission;
 
 use super::{
     action::{UiAction, UiKey, UiMode},
     browser::BrowserHandoff,
+    composer::ComposerSnapshot,
+    composer_attachment::ComposerDraft,
     history::PromptHistoryStore,
+    keymap::Keymap,
     state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
-    AvailableModels, CoreError, CoreEvent, MisyCore, MisyPaths, ModelRef, ProviderDisplayName,
-    ProviderId, ProviderManifest, SubmissionId, UsageReport,
+    ActivityId, ActivityOutput, AvailableModels, CoreError, CoreEvent, MisyCore, MisyPaths,
+    ModelRef, ProviderDisplayName, ProviderId, ProviderManifest, SubmissionId, UsageReport,
 };
 use serde_json::Value;
 use snapshot::provider_choices;
@@ -68,16 +72,23 @@ pub(super) enum ProviderOperationResult {
     Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
     Usage(ModelRef, Result<UsageReport, String>),
-    // The accepted submission is mapped by `CoreEvent::SubmissionAccepted`, so only a failure
-    // needs the client's attention here.
-    Submit(Result<SubmissionId, String>),
+    // `SubmissionAccepted` maps the transcript; this result gates draft clearing and history.
+    Submit(SubmissionRequest, Result<SubmissionId, String>),
+    ActivityOutput(ActivityId, Option<ActivityOutput>),
+}
+
+pub(super) struct SubmissionRequest {
+    pub(super) draft: ComposerDraft,
+    pub(super) clear_composer: bool,
+    pub(super) history_text: Option<String>,
+    pub(super) history_snapshot: Option<ComposerSnapshot>,
 }
 
 /// Thin interactive client that translates input into headless core operations.
 pub struct TuiClient<B> {
     pub(super) core: MisyCore,
     events: UnboundedReceiver<CoreEvent>,
-    submission_sender: UnboundedSender<String>,
+    submission_sender: UnboundedSender<SubmissionRequest>,
     browser: B,
     pub(super) state: UiState,
     pub(super) operation_sender: UnboundedSender<ProviderOperationResult>,
@@ -88,6 +99,10 @@ pub struct TuiClient<B> {
     prompt_history: Option<PromptHistoryStore>,
     pub(super) model_refresh_generation: u64,
     auth_task: Option<(ProviderId, ProviderOperationKind, AbortHandle)>,
+    composer_submission_pending: bool,
+    activity_output_pending: bool,
+    next_activity_output_refresh: std::time::Instant,
+    keymap: Keymap,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
@@ -102,7 +117,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     }
 
     async fn build(core: MisyCore, browser: B, prompt_history: Option<PromptHistoryStore>) -> Self {
+        let events = core.subscribe_lossless();
         let snapshot = core.snapshot();
+        let (keymap, keymap_warnings) = Keymap::from_overrides(&core.keybindings());
         let provider_manifests = core.providers().await;
         let provider_names: BTreeMap<ProviderId, ProviderDisplayName> = provider_manifests
             .iter()
@@ -118,6 +135,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
             submission_requests,
         );
         let mut state = UiState::default();
+        state.activity_stop_hint = keymap.stop_hint().to_owned();
+        state.transcript_expand_hint = keymap.expand_hint().to_owned();
+        for warning in keymap_warnings {
+            state.add_error(warning);
+        }
         // The header simply omits the directory when the process cwd is no longer readable.
         let working_directory = std::env::current_dir().ok();
         state.set_startup_header(
@@ -133,7 +155,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         state.apply_snapshot(snapshot);
         state.set_provider_names(provider_names.clone());
         Self {
-            events: core.subscribe_lossless(),
+            events,
             core,
             submission_sender,
             browser,
@@ -146,6 +168,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
             prompt_history,
             model_refresh_generation: 0,
             auth_task: None,
+            composer_submission_pending: false,
+            activity_output_pending: false,
+            next_activity_output_refresh: std::time::Instant::now(),
+            keymap,
         }
     }
 
@@ -167,8 +193,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Inserts text into the focused composer or modal filter.
     pub fn insert_text(&mut self, text: &str) {
         self.state.clear_quit_shortcut();
+        self.state.activity_bar_focused = false;
         if self.state.mode() == UiMode::Input {
-            self.state.composer.insert_str(text);
+            if !self.composer_submission_pending {
+                self.state.composer.insert_str(text);
+            }
         } else {
             self.state.insert_filter(text);
         }
@@ -177,9 +206,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Inserts one terminal paste without interpreting embedded newlines as submissions.
     pub fn paste_text(&mut self, text: &str) {
         self.state.clear_quit_shortcut();
+        self.state.activity_bar_focused = false;
         let normalized = normalize_paste(text);
         if self.state.mode() == UiMode::Input {
-            self.state.composer.insert_str(&normalized);
+            if !self.composer_submission_pending {
+                self.state.composer.insert_str(&normalized);
+            }
         } else {
             self.state
                 .insert_filter(&normalized.replace(['\n', '\t'], " "));
@@ -188,6 +220,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     pub(super) fn position_composer_cursor(&mut self, row: u16, column: u16) {
         self.state.clear_quit_shortcut();
+        self.state.activity_bar_focused = false;
         if self.state.mode() == UiMode::Input {
             self.state.composer.position_cursor(row, column);
         }
@@ -195,7 +228,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
 
     /// Inserts a newline without submitting the composer.
     pub fn insert_newline(&mut self) {
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Input && !self.composer_submission_pending {
             self.state.composer.insert_newline();
         }
     }
@@ -203,7 +236,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Deletes the character before the focused cursor.
     pub fn backspace(&mut self) {
         if self.state.mode() == UiMode::Input {
-            self.state.composer.backspace();
+            if !self.composer_submission_pending {
+                self.state.composer.backspace();
+            }
         } else {
             self.state.backspace_filter();
         }
@@ -213,73 +248,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.state.add_error(error);
     }
 
-    /// Submits the composer or accepts its slash-command completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns core or browser-handoff errors produced by the selected action.
-    pub fn submit_composer(&mut self) -> Result<(), TuiError> {
-        if self.state.mode() != UiMode::Input {
-            return Ok(());
-        }
-        if self.state.composer.popup_visible()
-            && let Some(command) = self.state.composer.selected_command()
-        {
-            let command = command.to_owned();
-            self.state.composer.clear();
-            let (result, accepted) = self.handle_submitted_input(&command);
-            if accepted {
-                self.record_prompt_history(&command);
-            }
-            return result;
-        }
-        let input = self.state.composer.take_text();
-        let (result, accepted) = self.handle_submitted_input(&input);
-        if accepted {
-            self.record_prompt_history(&input);
-        }
-        result
+    pub(super) fn configured_key(&self, key: crossterm::event::KeyEvent) -> Option<UiKey> {
+        self.keymap.resolve(key)
     }
-
-    /// Parses and executes submitted text.
-    ///
-    /// # Errors
-    ///
-    /// Returns failures from core calls initiated by the resulting action.
-    pub fn handle_input(&mut self, input: &str) -> Result<(), TuiError> {
-        self.state.clear_quit_shortcut();
-        self.handle_submitted_input(input).0
-    }
-
-    fn handle_submitted_input(&mut self, input: &str) -> (Result<(), TuiError>, bool) {
-        match super::action::map_input(input) {
-            Ok(UiAction::Noop) => (Ok(()), false),
-            Ok(action) => {
-                let result = self
-                    .execute(action)
-                    .inspect_err(|error| self.state.add_error(error));
-                let accepted = result.is_ok();
-                (result, accepted)
-            }
-            Err(error) => {
-                self.state.add_error(error);
-                (Ok(()), false)
-            }
-        }
-    }
-
-    fn record_prompt_history(&mut self, text: &str) {
-        if !self.state.composer.record_submitted(text) {
-            return;
-        }
-        if let Some(history) = &self.prompt_history
-            && let Err(error) = history.append(text)
-        {
-            self.state
-                .add_error(format!("could not save prompt history: {error}"));
-        }
-    }
-
     /// Routes a normalized key through modal view, popup, then composer layers.
     ///
     /// # Errors
@@ -287,6 +258,26 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// Returns failures from an accepted selection or submitted prompt.
     pub fn handle_key(&mut self, key: UiKey) -> Result<(), TuiError> {
         self.state.clear_quit_shortcut();
+        if key == UiKey::OpenActivities {
+            self.state.open_activities();
+            return Ok(());
+        }
+        if key == UiKey::StopActivity {
+            self.stop_selected_activity();
+            return Ok(());
+        }
+        if key == UiKey::ToggleToolOutput {
+            self.state.toggle_tool_output();
+            return Ok(());
+        }
+        if self.state.activity_bar_focused {
+            match key {
+                UiKey::Up | UiKey::Escape => self.state.activity_bar_focused = false,
+                UiKey::Enter => self.state.open_activities(),
+                _ => {}
+            }
+            return Ok(());
+        }
         if self.state.mode() != UiMode::Input {
             return self.handle_view_key(key);
         }
@@ -299,6 +290,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
             if !self.state.composer.popup_visible() {
                 return Ok(());
             }
+        }
+        if self.composer_submission_pending && composer_key_mutates_draft(key) {
+            return Ok(());
         }
         if self.state.composer.popup_visible() {
             match key {
@@ -341,10 +335,23 @@ impl<B: BrowserHandoff> TuiClient<B> {
             };
             self.apply_operation_result(result);
         }
+        self.refresh_activity_output_if_due();
         received
     }
 
     fn handle_view_key(&mut self, key: UiKey) -> Result<(), TuiError> {
+        if self.state.mode() == UiMode::ActivityDetail {
+            match key {
+                UiKey::Up => self.state.scroll_activity_log_up(false),
+                UiKey::Down => self.state.scroll_activity_log_down(false),
+                UiKey::PageUp => self.state.scroll_activity_log_up(true),
+                UiKey::PageDown => self.state.scroll_activity_log_down(true),
+                UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
+                UiKey::StopActivity => self.stop_selected_activity(),
+                _ => {}
+            }
+            return Ok(());
+        }
         match key {
             UiKey::Up => self.state.reduce(&UiAction::PickerUp),
             UiKey::Down => self.state.reduce(&UiAction::PickerDown),
@@ -389,10 +396,20 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiKey::Delete => self.state.composer.delete(),
             UiKey::Newline => self.state.composer.insert_newline(),
             UiKey::Up => self.state.composer.history_previous(),
+            UiKey::Down
+                if self.state.composer_input().is_empty() && self.state.activity_bar_visible() =>
+            {
+                self.state.activity_bar_focused = true;
+            }
             UiKey::Down => self.state.composer.history_next(),
             UiKey::PageUp | UiKey::PageDown => {}
             UiKey::Enter => return self.submit_composer(),
-            UiKey::Escape | UiKey::Tab | UiKey::SelectIndex(_) => {}
+            UiKey::Escape
+            | UiKey::Tab
+            | UiKey::SelectIndex(_)
+            | UiKey::OpenActivities
+            | UiKey::StopActivity
+            | UiKey::ToggleToolOutput => {}
         }
         Ok(())
     }
@@ -401,6 +418,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         match action {
             UiAction::ShowProviders => self.show_providers()?,
             UiAction::ShowModels => self.start_model_refresh(),
+            UiAction::ShowActivities => self.state.open_activities(),
             UiAction::ShowUsage => self.show_usage()?,
             UiAction::SubmitPrompt(prompt) => self.submit_prompt(prompt),
             UiAction::SelectModel(model) => self.select_model(model),
@@ -421,6 +439,45 @@ impl<B: BrowserHandoff> TuiClient<B> {
             action => self.state.reduce(&action),
         }
         Ok(())
+    }
+
+    fn start_activity_output_refresh(&mut self, id: ActivityId) {
+        if self.activity_output_pending {
+            return;
+        }
+        self.activity_output_pending = true;
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let output = core.activity_output(id, None).await;
+            let _ = sender.send(ProviderOperationResult::ActivityOutput(id, output));
+        });
+    }
+
+    fn refresh_activity_output_if_due(&mut self) {
+        let Some(id) = self.state.activity_output_target() else {
+            self.activity_output_pending = false;
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now >= self.next_activity_output_refresh {
+            self.next_activity_output_refresh = now + Duration::from_millis(200);
+            self.start_activity_output_refresh(id);
+        }
+    }
+
+    fn stop_selected_activity(&mut self) {
+        let Some(id) = self.state.selected_activity_to_stop() else {
+            return;
+        };
+        let refresh_detail = self.state.activity_detail_id() == Some(id);
+        if !self.core.stop_activity(id) {
+            self.state
+                .add_error(format!("task `{id}` is already finished"));
+        }
+        if refresh_detail {
+            self.start_activity_output_refresh(id);
+        }
     }
 
     fn show_providers(&mut self) -> Result<(), TuiError> {
@@ -454,6 +511,15 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.select_model(model);
                 }
             }
+            UiMode::ActivityList => match self.state.selected_activity_choice() {
+                Some(super::activity_picker::ActivityChoice::Main) => self.state.view = None,
+                Some(super::activity_picker::ActivityChoice::Activity(id)) => {
+                    self.state.open_activity_detail(id);
+                    self.start_activity_output_refresh(id);
+                }
+                None => {}
+            },
+            UiMode::ActivityDetail => {}
             UiMode::Input => {}
         }
         Ok(())
@@ -522,6 +588,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
         true
     }
+}
+
+fn composer_key_mutates_draft(key: UiKey) -> bool {
+    matches!(
+        key,
+        UiKey::Backspace | UiKey::Delete | UiKey::Newline | UiKey::Up | UiKey::Down | UiKey::Tab
+    )
 }
 
 fn normalize_paste(text: &str) -> String {

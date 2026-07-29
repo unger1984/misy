@@ -47,6 +47,8 @@
 
 ### Fixed
 
+- Translated Misy history into strict OpenAI Chat Completions messages for AnyModel instead of
+  forwarding internal metadata and tool records that upstream rejects with HTTP 400.
 - Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal
   stream failure against a second JSON-RPC error for the same chat request.
 - Rendered pending Kimi-style questions inline in the composer slot, preserving hidden drafts and

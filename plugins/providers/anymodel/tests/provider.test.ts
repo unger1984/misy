@@ -121,6 +121,78 @@ test("streams text and fragmented tools with the exact upstream model id", async
 	});
 });
 
+test("maps core history to strict OpenAI chat messages", async () => {
+	let body: unknown;
+	const baseUrl = fakeServer(async (request) => {
+		body = await request.json();
+		return new Response("data: [DONE]\n\n", {
+			headers: { "content-type": "text/event-stream" },
+		});
+	});
+	await provider(baseUrl).streamChat(
+		{
+			model_id: "am/glm-5.2",
+			messages: [
+				{
+					role: "system",
+					content: "instructions",
+					tool_calls: [],
+					tool_results: [],
+					provider_metadata: null,
+				},
+				{
+					role: "user",
+					content: "run it",
+					tool_calls: [],
+					tool_results: [],
+					provider_metadata: null,
+					attachments: [],
+				},
+				{
+					role: "assistant",
+					content: "",
+					tool_calls: [{ id: "call-1", name: "SetTodoList", arguments: { todos: [] } }],
+					tool_results: [],
+					provider_metadata: { ignored: true },
+				},
+				{
+					role: "tool",
+					content: "",
+					tool_calls: [],
+					tool_results: [{ tool_call_id: "call-1", content: "updated", is_error: false }],
+					provider_metadata: null,
+				},
+			],
+			tools: [],
+			credentials: credentials(),
+		},
+		8,
+		() => undefined,
+		undefined,
+	);
+
+	expect(body).toMatchObject({
+		messages: [
+			{ role: "system", content: "instructions" },
+			{ role: "user", content: "run it" },
+			{
+				role: "assistant",
+				content: "",
+				tool_calls: [
+					{
+						id: "call-1",
+						type: "function",
+						function: { name: "SetTodoList", arguments: '{"todos":[]}' },
+					},
+				],
+			},
+			{ role: "tool", tool_call_id: "call-1", content: "updated" },
+		],
+	});
+	expect(JSON.stringify(body)).not.toContain("provider_metadata");
+	expect(JSON.stringify(body)).not.toContain("tool_results");
+});
+
 test("maps user and tool-result images to OpenAI content parts", async () => {
 	let body: unknown;
 	const baseUrl = fakeServer(async (request) => {

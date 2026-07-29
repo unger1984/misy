@@ -1,13 +1,7 @@
 /** OpenAI-compatible AnyModel request construction and bounded SSE event normalization. */
-import {
-	type ImageAttachment,
-	imageAttachments,
-	imageDataUrl,
-	isRecord,
-	type Json,
-	type Notify,
-	type ToolDefinition,
-} from "./types";
+
+import { openAiMessages } from "./messages-wire";
+import { isRecord, type Json, type Notify, type ToolDefinition } from "./types";
 
 type ToolAccumulator = { id: string; name: string; arguments: string };
 
@@ -25,89 +19,13 @@ export function createChatRequest(
 ): Record<string, unknown> {
 	return {
 		model,
-		messages: mapMessages(messages),
+		messages: openAiMessages(messages),
 		tools: tools.map((tool) => ({
 			type: "function",
 			function: { name: tool.name, description: tool.description, parameters: tool.input_schema },
 		})),
 		stream: true,
 	};
-}
-
-function mapMessages(
-	messages: readonly Record<string, unknown>[],
-): readonly Record<string, unknown>[] {
-	if (!messages.some(hasAttachments)) return messages;
-	const mapped: Record<string, unknown>[] = [];
-	for (const message of messages) {
-		const attachments = imageAttachments(message["attachments"]);
-		if (message["role"] === "user" && attachments.length > 0) {
-			mapped.push(withImageContent(message, attachments));
-			continue;
-		}
-		mapped.push(stripAttachments(message));
-		for (const result of toolImageResults(message))
-			mapped.push(toolImageMessage(result.id, result.attachments));
-	}
-	return mapped;
-}
-
-function hasAttachments(message: Record<string, unknown>): boolean {
-	return Object.hasOwn(message, "attachments") || toolImageResults(message).length > 0;
-}
-
-function withImageContent(
-	message: Record<string, unknown>,
-	attachments: readonly ImageAttachment[],
-): Record<string, unknown> {
-	const mapped = { ...message };
-	delete mapped["attachments"];
-	const text = typeof message["content"] === "string" ? message["content"] : "";
-	mapped["content"] = contentParts(text, attachments);
-	return mapped;
-}
-
-function stripAttachments(message: Record<string, unknown>): Record<string, unknown> {
-	const mapped = { ...message };
-	delete mapped["attachments"];
-	if (!Array.isArray(message["tool_results"])) return mapped;
-	mapped["tool_results"] = message["tool_results"].map((value) => {
-		if (!isRecord(value)) return value;
-		const result = { ...value };
-		delete result["attachments"];
-		return result;
-	});
-	return mapped;
-}
-
-function toolImageResults(
-	message: Record<string, unknown>,
-): { id: string; attachments: ImageAttachment[] }[] {
-	if (message["role"] !== "tool" || !Array.isArray(message["tool_results"])) return [];
-	return message["tool_results"].flatMap((value) => {
-		if (!isRecord(value)) return [];
-		const attachments = imageAttachments(value["attachments"]);
-		if (attachments.length === 0) return [];
-		return [
-			{ id: typeof value["tool_call_id"] === "string" ? value["tool_call_id"] : "", attachments },
-		];
-	});
-}
-
-function toolImageMessage(
-	id: string,
-	attachments: readonly ImageAttachment[],
-): Record<string, unknown> {
-	const label = id ? `Images from tool result ${id}:` : "Images from a tool result:";
-	return { role: "user", content: contentParts(label, attachments) };
-}
-
-function contentParts(text: string, attachments: readonly ImageAttachment[]): Json[] {
-	const parts: Json[] = text.length > 0 ? [{ type: "text", text }] : [];
-	for (const attachment of attachments) {
-		parts.push({ type: "image_url", image_url: { url: imageDataUrl(attachment) } });
-	}
-	return parts;
 }
 
 /** Emits correlated text/tool notifications from a streaming OpenAI-compatible response. */

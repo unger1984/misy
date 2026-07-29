@@ -175,7 +175,7 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			display_name: "Zeta",
 			context_window: 16_000,
 			reasoning: false,
-			input_modalities: ["text"],
+			input_modalities: ["text", "image"],
 		},
 	]);
 });
@@ -198,7 +198,7 @@ test("retries model discovery through the compatibility path", async () => {
 			display_name: "fallback-route",
 			context_window: 48_000,
 			reasoning: false,
-			input_modalities: ["text"],
+			input_modalities: ["text", "image"],
 		},
 	]);
 });
@@ -362,7 +362,11 @@ test("maps user and tool-result PNGs to Responses image content", async () => {
 				role: "user",
 				content: [
 					{ type: "input_text", text: "look" },
-					expect.objectContaining({ type: "input_image" }),
+					{
+						type: "input_image",
+						image_url: `data:image/png;base64,${image.data_base64}`,
+						detail: "high",
+					},
 				],
 			},
 			{
@@ -370,7 +374,11 @@ test("maps user and tool-result PNGs to Responses image content", async () => {
 				call_id: "call-1",
 				output: [
 					{ type: "input_text", text: "done" },
-					expect.objectContaining({ type: "input_image" }),
+					{
+						type: "input_image",
+						image_url: `data:image/png;base64,${image.data_base64}`,
+						detail: "high",
+					},
 				],
 			},
 		],

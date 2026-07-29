@@ -74,11 +74,14 @@ pub struct Config {
     pub version: u32,
     /// Model selected for direct interaction, if one has been saved.
     pub default_model: Option<ModelRef>,
+    /// Frontend-owned named keybinding overrides retained across core updates.
+    #[serde(default)]
+    pub keybindings: BTreeMap<String, Vec<String>>,
 }
 
 impl Config {
-    /// Current configuration and credential-file schema revision.
-    pub const VERSION: u32 = 1;
+    /// Current configuration schema revision.
+    pub const VERSION: u32 = 2;
 }
 
 impl Default for Config {
@@ -86,6 +89,7 @@ impl Default for Config {
         Self {
             version: Self::VERSION,
             default_model: None,
+            keybindings: BTreeMap::new(),
         }
     }
 }
@@ -199,10 +203,12 @@ struct CredentialsFile {
     providers: BTreeMap<ProviderId, serde_json::Value>,
 }
 
+const CREDENTIALS_VERSION: u32 = 1;
+
 impl Default for CredentialsFile {
     fn default() -> Self {
         Self {
-            version: Config::VERSION,
+            version: CREDENTIALS_VERSION,
             providers: BTreeMap::new(),
         }
     }
@@ -274,7 +280,7 @@ impl CredentialStore {
         };
         let document: CredentialsFile =
             serde_json::from_slice(&contents).map_err(CredentialError::Parse)?;
-        if document.version != Config::VERSION {
+        if document.version != CREDENTIALS_VERSION {
             return Err(CredentialError::UnsupportedVersion(document.version));
         }
         Ok(document)
@@ -301,8 +307,11 @@ impl ConfigStore {
             }
             Err(error) => return Err(error.into()),
         };
-        let config: Config = toml::from_str(&contents).map_err(ConfigError::Parse)?;
-        if config.version != Config::VERSION {
+        let mut config: Config = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        if config.version == 1 {
+            config.version = Config::VERSION;
+            self.save(&config)?;
+        } else if config.version != Config::VERSION {
             return Err(ConfigError::UnsupportedVersion(config.version));
         }
         Ok(config)

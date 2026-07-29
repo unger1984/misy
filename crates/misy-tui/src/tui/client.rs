@@ -9,6 +9,7 @@ mod submission;
 use super::{
     action::{UiAction, UiKey, UiMode},
     browser::BrowserHandoff,
+    composer::ComposerSnapshot,
     composer_attachment::ComposerDraft,
     history::PromptHistoryStore,
     state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
@@ -78,6 +79,7 @@ pub(super) struct SubmissionRequest {
     pub(super) draft: ComposerDraft,
     pub(super) clear_composer: bool,
     pub(super) history_text: Option<String>,
+    pub(super) history_snapshot: Option<ComposerSnapshot>,
 }
 
 /// Thin interactive client that translates input into headless core operations.

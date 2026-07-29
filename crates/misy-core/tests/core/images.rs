@@ -33,22 +33,35 @@ async fn submits_images_only_to_capable_provider_models() {
         .submit_with_attachments(Message::user("image-input"), vec![pixel()])
         .await
         .expect("submit image");
-    let events = receive_until(&mut events, submission, |event| {
+    let received_events = receive_until(&mut events, submission, |event| {
         matches!(event, CoreEvent::Completed { .. })
     })
     .await;
 
     assert!(
-        events.iter().any(|event| {
+        received_events.iter().any(|event| {
             matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "seen")
         }),
-        "events: {events:?}"
+        "events: {received_events:?}"
     );
     assert!(
         core.history()
             .await
             .iter()
-            .all(|entry| entry.attachments.is_empty())
+            .any(|entry| !entry.attachments.is_empty())
+    );
+    let follow_up = core
+        .submit(Message::user("what color is it?"))
+        .await
+        .expect("submit visual follow-up");
+    let follow_up_events = receive_until(&mut events, follow_up, |event| {
+        matches!(event, CoreEvent::Completed { .. })
+    })
+    .await;
+    assert!(
+        follow_up_events.iter().any(|event| {
+            matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "seen")
+        })
     );
     core.shutdown().await.expect("shutdown");
 }

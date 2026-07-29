@@ -1,7 +1,7 @@
 //! Core-event projection into transcript rows.
 
 use super::{TranscriptRow, UiState};
-use misy_core::{CoreEvent, Message, SubmissionId, ToolResult};
+use misy_core::{CoreEvent, SubmissionId, ToolResult};
 
 impl UiState {
     pub(in crate::tui) fn apply_core_event(&mut self, event: CoreEvent) {
@@ -11,7 +11,8 @@ impl UiState {
             CoreEvent::SubmissionAccepted {
                 submission,
                 message,
-            } => self.note_acceptance(submission, message),
+                attachment_count,
+            } => self.note_acceptance(submission, &message.content, attachment_count),
             CoreEvent::SubmissionStarted { submission, .. } => self.start_submission(submission),
             CoreEvent::TextDelta {
                 submission, delta, ..
@@ -37,8 +38,23 @@ impl UiState {
     // `SubmissionAccepted` always precedes every other event for its submission, so the prompt
     // text is already mapped when the start, stream, and terminal events arrive; no client-side
     // reordering buffer is needed.
-    fn note_acceptance(&mut self, submission: SubmissionId, message: Message) {
-        self.prompt_text.insert(submission.get(), message.content);
+    fn note_acceptance(
+        &mut self,
+        submission: SubmissionId,
+        message: &str,
+        attachment_count: usize,
+    ) {
+        let mut display = (1..=attachment_count)
+            .map(|index| format!("[Image #{index}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !message.is_empty() {
+            if !display.is_empty() {
+                display.push(' ');
+            }
+            display.push_str(message);
+        }
+        self.prompt_text.insert(submission.get(), display);
     }
 
     fn add_tool_result(&mut self, result: ToolResult) {

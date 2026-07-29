@@ -15,19 +15,27 @@ afterEach(() => {
 	while (servers.length > 0) servers.pop()?.stop(true);
 });
 
-function fakeServer(handler: (request: CapturedRequest) => Response | Promise<Response>): string {
+function fakeServer(
+	handler: (request: CapturedRequest) => Response | Promise<Response>,
+	serveDefaultModels = true,
+): string {
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
-		fetch: async (request) =>
-			await handler({
-				path: new URL(request.url).pathname,
+		fetch: async (request) => {
+			const path = new URL(request.url).pathname;
+			if (serveDefaultModels && request.method === "GET" && path === "/models") {
+				return Response.json({ data: [{ id: "k3", protocol: null }] });
+			}
+			return await handler({
+				path,
 				headers: request.headers,
 				body: request.headers.get("content-type")?.includes("application/json")
 					? await request.json()
 					: undefined,
 				request,
-			}),
+			});
+		},
 	});
 	servers.push(server);
 	return `http://127.0.0.1:${server.port}`;
@@ -59,11 +67,12 @@ test("discovers Kimi models dynamically and supplies default context windows", a
 					supports_image_in: true,
 				},
 				{ id: "legacy", supports_image_in: false },
+				{ id: "kimi-k2-turbo-preview", supports_image_in: false },
 				{ id: "missing-image-metadata" },
 				{ id: "invalid-image-metadata", supports_image_in: "true" },
 			],
 		});
-	});
+	}, false);
 	const models = await provider(base).listModels(credentials());
 
 	expect(authorization).toBe("Bearer access");
@@ -79,6 +88,12 @@ test("discovers Kimi models dynamically and supplies default context windows", a
 			display_name: "legacy",
 			context_window: 262_144,
 			input_modalities: ["text"],
+		},
+		{
+			id: "kimi-k2-turbo-preview",
+			display_name: "kimi-k2-turbo-preview",
+			context_window: 262_144,
+			input_modalities: ["text", "image"],
 		},
 		{
 			id: "missing-image-metadata",
@@ -167,7 +182,7 @@ test("maps user PNGs and follows tool results with a Kimi user image message", a
 });
 
 test("falls back to bundled models when Kimi's catalog endpoint is unavailable", async () => {
-	const base = fakeServer(() => new Response("unavailable", { status: 503 }));
+	const base = fakeServer(() => new Response("unavailable", { status: 503 }), false);
 	const models = await provider(base).listModels(credentials());
 
 	expect(models.map((model) => model.id)).toEqual([

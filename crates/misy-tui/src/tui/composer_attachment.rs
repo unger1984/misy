@@ -134,7 +134,7 @@ impl ComposerAttachments {
 
     pub(super) fn draft(&self, text: &str) -> ComposerDraft {
         ComposerDraft {
-            text: text.to_owned(),
+            text: self.text_without_tokens(text),
             images: self
                 .images
                 .iter()
@@ -144,11 +144,15 @@ impl ComposerAttachments {
     }
 
     pub(super) fn history_text(&self, text: &str) -> String {
+        self.text_without_tokens(text).trim().to_owned()
+    }
+
+    fn text_without_tokens(&self, text: &str) -> String {
         let mut plain = text.to_owned();
         for attached in self.images.iter().rev() {
             plain.replace_range(attached.token.clone(), "");
         }
-        plain.trim().to_owned()
+        plain
     }
 
     pub(super) fn clear(&mut self) {

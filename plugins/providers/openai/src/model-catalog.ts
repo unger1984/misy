@@ -153,6 +153,7 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 }
 
 function inputModalities(value: unknown): ("text" | "image")[] {
+	if (value === undefined) return ["text", "image"];
 	if (!Array.isArray(value) || value.some((entry) => entry !== "text" && entry !== "image")) {
 		return ["text"];
 	}

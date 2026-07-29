@@ -78,11 +78,7 @@ export async function notifyResponseEvents(
 					notify("completed", { request_id: requestId, metadata });
 				}
 				if (event === "response.failed" || event === "error")
-					throw new Error(
-						typeof data["message"] === "string"
-							? data["message"]
-							: "OpenAI Responses stream failed",
-					);
+					throw new Error(responseErrorMessage(data));
 			}
 			if (read.done) break;
 		}
@@ -149,9 +145,19 @@ function functionOutput(result: Record<string, Json>): Json {
 function richContent(text: string, attachments: readonly ImageAttachment[]): Json[] {
 	const content: Json[] = text.length > 0 ? [{ type: "input_text", text }] : [];
 	for (const attachment of attachments) {
-		content.push({ type: "input_image", image_url: imageDataUrl(attachment) });
+		content.push({ type: "input_image", image_url: imageDataUrl(attachment), detail: "high" });
 	}
 	return content;
+}
+
+function responseErrorMessage(data: Record<string, Json>): string {
+	const response = record(data["response"]);
+	const responseError = record(response["error"]);
+	const error = record(data["error"]);
+	for (const candidate of [responseError["message"], error["message"], data["message"]]) {
+		if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
+	}
+	return "OpenAI Responses stream failed";
 }
 
 function reasoningInputs(metadata: unknown): Json[] {

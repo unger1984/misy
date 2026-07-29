@@ -99,7 +99,12 @@ async fn image_only_submission_clears_only_after_core_acceptance() {
             && client.state().composer_input().is_empty()
     })
     .await;
-    assert_eq!(client.state().history_len(), 0);
+    assert_eq!(client.state().history_len(), 1);
+    client
+        .handle_key(UiKey::Up)
+        .expect("recall image-only prompt");
+    assert_eq!(client.state().composer_input(), "[Image #1] ");
+    assert_eq!(client.state().composer_attachment_count(), 1);
     assert!(
         client.state().transcript().iter().any(
             |row| matches!(row, TranscriptRow::UserPrompt(text) if text.contains("[Image #1]"))
@@ -174,6 +179,10 @@ async fn persistent_history_records_only_text_from_an_image_prompt() {
     assert!(stored.contains("describe this"));
     assert!(!stored.contains("[Image #"));
     assert!(!stored.contains("data_base64"));
+
+    client.handle_key(UiKey::Up).expect("recall image prompt");
+    assert_eq!(client.state().composer_input(), "[Image #1] describe this");
+    assert_eq!(client.state().composer_attachment_count(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -94,6 +94,8 @@ pub enum CoreEvent {
         submission: SubmissionId,
         /// Message queued for processing, as retained in session history.
         message: Message,
+        /// Number of image attachments, without exposing their payloads to clients.
+        attachment_count: usize,
     },
     /// A submitted user message began processing.
     SubmissionStarted {

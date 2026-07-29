@@ -2,7 +2,7 @@
 
 use super::{BrowserHandoff, SubmissionRequest, TuiClient, TuiError};
 use crate::tui::action::{UiAction, UiMode, map_input};
-use misy_core::{CoreError, ImageAttachment, InputModality};
+use misy_core::{CoreError, ImageAttachment};
 
 impl<B: BrowserHandoff> TuiClient<B> {
     /// Validates and inserts one clipboard RGBA image into the focused composer.
@@ -20,11 +20,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         if self.core.snapshot().selected_model.is_none() {
             self.state.add_error(CoreError::NoModelSelected);
-            return;
-        }
-        if !self.core.selected_model_supports(InputModality::Image) {
-            self.state
-                .add_error("the selected model does not support image input");
             return;
         }
         let image = match ImageAttachment::from_rgba(width, height, rgba) {
@@ -59,6 +54,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         let draft = self.state.composer.draft();
         match map_input(&draft.text) {
+            Ok(UiAction::Noop) if !draft.images.is_empty() => self.enqueue_composer_draft(draft),
             Ok(UiAction::Noop) => Ok(()),
             Ok(UiAction::SubmitPrompt(_)) => self.enqueue_composer_draft(draft),
             Ok(action) => self.execute_local_composer_action(action),
@@ -88,6 +84,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             draft,
             clear_composer: true,
             history_text: (!history_text.is_empty()).then_some(history_text),
+            history_snapshot: Some(self.state.composer.history_snapshot()),
         };
         if self.submission_sender.send(request).is_err() {
             self.state
@@ -140,6 +137,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
         if !self.state.composer.record_submitted(text) {
             return;
         }
+        self.append_prompt_history(text);
+    }
+
+    pub(super) fn append_prompt_history(&mut self, text: &str) {
         if let Some(history) = &self.prompt_history
             && let Err(error) = history.append(text)
         {

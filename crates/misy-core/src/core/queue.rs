@@ -65,9 +65,17 @@ impl MisyCore {
             .selected_model()
             .await
             .ok_or(CoreError::NoModelSelected)?;
-        self.inner
-            .state
-            .validate_image_input(&model, &attachments)?;
+        let validation = self.inner.state.validate_image_input(&model, &attachments);
+        if matches!(&validation, Err(CoreError::UnsupportedInput { .. })) {
+            // A cached catalog can predate provider modality metadata. Refresh once at the
+            // authoritative async submission boundary before rejecting the preserved draft.
+            self.list_models(&model.provider).await?;
+            self.inner
+                .state
+                .validate_image_input(&model, &attachments)?;
+        } else {
+            validation?;
+        }
         let (id, start_worker) =
             self.inner
                 .state
@@ -120,6 +128,7 @@ impl CoreState {
         self.emit(&CoreEvent::SubmissionAccepted {
             submission: id,
             message: message.clone(),
+            attachment_count: attachments.len(),
         });
         queue.pending.push_back(QueuedSubmission {
             id,

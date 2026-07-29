@@ -2,6 +2,7 @@
 
 use misy_core::{Config, ConfigStore, MisyPaths, ModelId, ModelRef, ProviderId};
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -25,6 +26,7 @@ fn config_store_uses_injected_root_and_round_trips_versioned_default_model() {
             ProviderId::new("openai"),
             ModelId::new("gpt-5"),
         )),
+        keybindings: BTreeMap::from([("activities.stop".to_owned(), vec!["Ctrl+X".to_owned()])]),
         ..Config::default()
     };
 
@@ -33,7 +35,8 @@ fn config_store_uses_injected_root_and_round_trips_versioned_default_model() {
 
     assert_eq!(store.load().expect("load config"), config);
     let on_disk = fs::read_to_string(paths.config_file()).expect("read config file");
-    assert!(on_disk.contains("version = 1"));
+    assert!(on_disk.contains("version = 2"));
+    assert!(on_disk.contains("activities.stop"));
     assert!(!root.join("config.toml.tmp").exists());
 
     fs::remove_dir_all(root).expect("remove config test directory");
@@ -44,13 +47,13 @@ fn config_store_rejects_an_unsupported_format_version() {
     let root = test_root("config-version");
     let paths = MisyPaths::from_root(&root);
     fs::create_dir_all(&root).expect("create config test directory");
-    fs::write(paths.config_file(), "version = 2\n").expect("write unsupported config");
+    fs::write(paths.config_file(), "version = 3\n").expect("write unsupported config");
 
     let error = ConfigStore::new(paths)
         .load()
         .expect_err("unsupported config must fail");
 
-    assert!(error.to_string().contains("unsupported config version 2"));
+    assert!(error.to_string().contains("unsupported config version 3"));
     fs::remove_dir_all(root).expect("remove config test directory");
 }
 
@@ -59,16 +62,77 @@ fn config_store_refuses_to_write_an_unsupported_format_version() {
     let root = test_root("config-write-version");
     let store = ConfigStore::new(MisyPaths::from_root(&root));
     let unsupported = Config {
-        version: 2,
+        version: 3,
         default_model: None,
+        keybindings: Default::default(),
     };
 
     let error = store
         .save(&unsupported)
         .expect_err("unsupported config must not save");
 
-    assert!(error.to_string().contains("unsupported config version 2"));
+    assert!(error.to_string().contains("unsupported config version 3"));
     assert!(!root.join("config.toml").exists());
+}
+
+#[test]
+fn config_store_migrates_version_one_without_losing_the_selected_model() {
+    let root = test_root("config-migration");
+    let paths = MisyPaths::from_root(&root);
+    fs::create_dir_all(&root).expect("create config migration directory");
+    fs::write(
+        paths.config_file(),
+        "version = 1\n\n[default_model]\nprovider = \"openai\"\nmodel = \"gpt-5\"\n",
+    )
+    .expect("write version one config");
+
+    let config = ConfigStore::new(paths.clone())
+        .load()
+        .expect("migrate version one config");
+
+    assert_eq!(config.version, Config::VERSION);
+    assert_eq!(
+        config.default_model,
+        Some(ModelRef::new(
+            ProviderId::new("openai"),
+            ModelId::new("gpt-5")
+        ))
+    );
+    assert!(config.keybindings.is_empty());
+    assert!(
+        fs::read_to_string(paths.config_file())
+            .expect("read migrated config")
+            .contains("version = 2")
+    );
+    fs::remove_dir_all(root).expect("remove config migration directory");
+}
+
+#[test]
+fn config_store_loads_existing_version_two_with_empty_keybindings() {
+    let root = test_root("config-version-two");
+    let paths = MisyPaths::from_root(&root);
+    fs::create_dir_all(&root).expect("create version two config directory");
+    fs::write(
+        paths.config_file(),
+        "version = 2\n\n[default_model]\nprovider = \"openai\"\nmodel = \"gpt-5.6-sol\"\n\n\
+         [keybindings]\n",
+    )
+    .expect("write version two config");
+    let store = ConfigStore::new(paths);
+
+    let mut config = store.load().expect("load version two config");
+    assert_eq!(config.version, Config::VERSION);
+    assert!(config.keybindings.is_empty());
+    config.default_model = Some(ModelRef::new(
+        ProviderId::new("openai"),
+        ModelId::new("replacement"),
+    ));
+    store.save(&config).expect("persist replacement model");
+
+    let reloaded = store.load().expect("reload version two config");
+    assert_eq!(reloaded.default_model, config.default_model);
+    assert!(reloaded.keybindings.is_empty());
+    fs::remove_dir_all(root).expect("remove version two config directory");
 }
 
 #[cfg(unix)]

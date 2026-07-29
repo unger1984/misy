@@ -126,17 +126,50 @@ fn image_tokens_are_bounded_and_removed_as_atomic_units() {
 }
 
 #[test]
-fn history_text_and_recall_never_persist_image_tokens() {
+fn submitted_history_recalls_image_attachments_in_the_current_session() {
     let mut composer = Composer::default();
     composer.insert_image(test_image(1)).expect("attach image");
     composer.insert_str("describe this");
     assert_eq!(composer.history_text(), "describe this");
-    composer.record_submitted(&composer.history_text());
+    assert_eq!(composer.draft().text, "describe this");
+    composer.record_submitted_snapshot(composer.history_snapshot());
 
     composer.clear();
     composer.history_previous();
 
-    assert_eq!(composer.text(), "describe this");
+    assert_eq!(composer.text(), "[Image #1] describe this");
+    assert_eq!(composer.attachment_count(), 1);
+}
+
+#[test]
+fn submission_preserves_spacing_and_history_deduplication_ignores_cursor() {
+    let mut composer = Composer::default();
+    composer.insert_str("  preserve spacing  ");
+    assert_eq!(composer.draft().text, "  preserve spacing  ");
+    assert!(composer.record_submitted_snapshot(composer.history_snapshot()));
+
+    composer.move_home();
+    assert!(!composer.record_submitted_snapshot(composer.history_snapshot()));
+    assert_eq!(composer.history_len(), 1);
+}
+
+#[test]
+fn submitted_history_keeps_only_the_latest_image_payload() {
+    let mut composer = Composer::default();
+    composer.insert_image(test_image(1)).expect("attach image");
+    composer.insert_str("first");
+    composer.record_submitted_snapshot(composer.history_snapshot());
+
+    composer.clear();
+    composer.insert_image(test_image(2)).expect("attach image");
+    composer.insert_str("second");
+    composer.record_submitted_snapshot(composer.history_snapshot());
+
+    composer.clear();
+    composer.history_previous();
+    assert_eq!(composer.attachment_count(), 1);
+    composer.history_previous();
+    assert_eq!(composer.text(), "first");
     assert_eq!(composer.attachment_count(), 0);
 }
 

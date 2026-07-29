@@ -77,6 +77,9 @@ impl CoreState {
             submission: id,
             model: model.clone(),
         });
+        if !attachments.is_empty() {
+            self.clear_history_images();
+        }
         self.push_history(HistoryEntry {
             message,
             attachments,
@@ -85,7 +88,6 @@ impl CoreState {
             provider_metadata: Value::Null,
         });
         let outcome = self.run_agent_turns(id, model, active).await;
-        self.redact_history_images();
         match outcome {
             Ok(()) => CoreEvent::Completed { submission: id },
             Err(message) if message == "cancelled" || active.cancelled.load(Ordering::Acquire) => {
@@ -238,7 +240,9 @@ impl CoreState {
         let mut params = json!({
             "provider_id": model.provider.as_str(),
             "model_id": model.model.as_str(),
-            "messages": self.serialized_history(),
+            "messages": self.serialized_history(
+                self.model_supports(model, InputModality::Image)
+            ),
             "tools": self.dispatcher.definitions_for(
                 self.model_supports(model, InputModality::Image)
             ),
@@ -458,12 +462,12 @@ impl CoreState {
         )
     }
 
-    fn serialized_history(&self) -> Vec<Value> {
+    fn serialized_history(&self, include_images: bool) -> Vec<Value> {
         self.history
             .lock()
             .expect("history mutex must not be poisoned")
             .iter()
-            .map(serialize_history_entry)
+            .map(|entry| serialize_history_entry(entry, include_images))
             .collect()
     }
 
@@ -494,7 +498,7 @@ impl CoreState {
             })
     }
 
-    fn redact_history_images(&self) {
+    fn clear_history_images(&self) {
         let mut history = self
             .history
             .lock()
@@ -512,7 +516,7 @@ impl CoreState {
     }
 }
 
-fn serialize_history_entry(entry: &HistoryEntry) -> Value {
+fn serialize_history_entry(entry: &HistoryEntry, include_images: bool) -> Value {
     let role = match entry.message.role {
         MessageRole::System => "system",
         MessageRole::User => "user",
@@ -523,11 +527,21 @@ fn serialize_history_entry(entry: &HistoryEntry) -> Value {
         "role": role,
         "content": entry.message.content,
         "tool_calls": entry.tool_calls,
-        "tool_results": entry.tool_results,
+        "tool_results": serialize_tool_results(entry, include_images),
         "provider_metadata": entry.provider_metadata,
     });
-    if !entry.attachments.is_empty() {
+    if include_images && !entry.attachments.is_empty() {
         value["attachments"] = json!(entry.attachments);
     }
     value
+}
+
+fn serialize_tool_results(entry: &HistoryEntry, include_images: bool) -> Vec<crate::ToolResult> {
+    let mut results = entry.tool_results.clone();
+    if !include_images {
+        for result in &mut results {
+            result.attachments.clear();
+        }
+    }
+    results
 }

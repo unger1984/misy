@@ -31,12 +31,11 @@ flowchart LR
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
-- `config.toml`, the credential files, and `models.json` each carry a format version, but no
-  migration path is implemented yet: a version mismatch is rejected (`UnsupportedVersion`) or
-  treated as empty. This is an accepted MVP trade-off — the first version bump of any of these
-  formats MUST ship with a migration (or an explicit reset-with-notice policy), because silently
-  rejecting the previous format would log every user out and drop the model catalog on a routine
-  upgrade.
+- `config.toml`, the credential files, and `models.json` each carry an independent format version.
+  Config version 1 is atomically migrated to version 2, which retains frontend-owned named
+  keybindings; newer unknown revisions are rejected. Credential storage remains version 1 and the
+  model cache has its own migration. Every future version bump MUST ship with a migration or an
+  explicit reset-with-notice policy.
 - `misy-core` is an async Tokio library. It owns a private multi-thread Tokio runtime so provider
   supervision and queued work survive callers using another runtime or dropping an operation
   future. Its public async operations are safe to call from a client's runtime.
@@ -75,8 +74,9 @@ flowchart LR
    normalized result. The provider retains ownership of remote endpoint selection, headers, and
    provider-specific response parsing.
 10. Image input requires both provider capability version 1 and model image modality support.
-    The core rejects unsupported submissions before acceptance, includes normalized images in the
-    provider request, and clears binary attachment data from completed in-memory history entries.
+    The core refreshes stale selected-provider metadata before rejecting a submission, includes
+    normalized images in bounded in-memory history for visual follow-ups, and replaces older image
+    payloads when the user attaches a new image set. Text-only models receive image-free history.
 
 ## Fixed Constraints
 

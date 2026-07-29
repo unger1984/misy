@@ -73,14 +73,14 @@ pub(super) struct Composer {
     text: String,
     cursor: usize,
     attachments: ComposerAttachments,
-    history: Vec<String>,
+    history: Vec<ComposerSnapshot>,
     history_index: Option<usize>,
     history_draft: Option<ComposerSnapshot>,
     popup: CommandPopup,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ComposerSnapshot {
+pub(super) struct ComposerSnapshot {
     text: String,
     cursor: usize,
     attachments: ComposerAttachments,
@@ -131,6 +131,10 @@ impl Composer {
 
     pub(super) fn history_text(&self) -> String {
         self.attachments.history_text(&self.text)
+    }
+
+    pub(super) fn history_snapshot(&self) -> ComposerSnapshot {
+        self.snapshot()
     }
 
     pub(super) fn matches_draft(&self, draft: &ComposerDraft) -> bool {
@@ -289,10 +293,28 @@ impl Composer {
     }
 
     pub(super) fn record_submitted(&mut self, text: &str) -> bool {
-        if text.trim().is_empty() || self.history.last().map(String::as_str) == Some(text) {
+        self.record_submitted_snapshot(ComposerSnapshot {
+            text: text.to_owned(),
+            cursor: text.len(),
+            attachments: ComposerAttachments::default(),
+        })
+    }
+
+    pub(super) fn record_submitted_snapshot(&mut self, snapshot: ComposerSnapshot) -> bool {
+        if (snapshot.text.trim().is_empty() && snapshot.attachments.len() == 0)
+            || self
+                .history
+                .last()
+                .is_some_and(|entry| entry.matches_entry(&snapshot))
+        {
             return false;
         }
-        self.history.push(text.to_owned());
+        if snapshot.attachments.len() != 0 {
+            for entry in &mut self.history {
+                entry.remove_attachments();
+            }
+        }
+        self.history.push(snapshot);
         if self.history.len() > MAX_HISTORY_ENTRIES {
             self.history.remove(0);
         }
@@ -322,9 +344,7 @@ impl Composer {
             }
         };
         self.history_index = Some(index);
-        self.text.clone_from(&self.history[index]);
-        self.attachments.clear();
-        self.cursor = self.text.len();
+        self.restore_snapshot(self.history[index].clone());
         self.dismiss_recalled_command();
     }
 
@@ -338,12 +358,11 @@ impl Composer {
         if index + 1 < self.history.len() {
             let next = index + 1;
             self.history_index = Some(next);
-            self.text.clone_from(&self.history[next]);
+            self.restore_snapshot(self.history[next].clone());
         } else {
             self.restore_history_draft();
             self.history_index = None;
         }
-        self.cursor = self.text.len();
         self.dismiss_recalled_command();
     }
 
@@ -397,6 +416,10 @@ impl Composer {
             self.attachments.clear();
             return;
         };
+        self.restore_snapshot(snapshot);
+    }
+
+    fn restore_snapshot(&mut self, snapshot: ComposerSnapshot) {
         self.text = snapshot.text;
         self.cursor = snapshot.cursor;
         self.attachments = snapshot.attachments;
@@ -414,6 +437,18 @@ impl Composer {
     fn dismiss_recalled_command(&mut self) {
         self.popup.selected = 0;
         self.popup.dismissed_token = command_token(&self.text, self.cursor).map(str::to_owned);
+    }
+}
+
+impl ComposerSnapshot {
+    fn matches_entry(&self, other: &Self) -> bool {
+        self.text == other.text && self.attachments == other.attachments
+    }
+
+    fn remove_attachments(&mut self) {
+        self.text = self.attachments.history_text(&self.text);
+        self.cursor = self.text.len();
+        self.attachments.clear();
     }
 }
 

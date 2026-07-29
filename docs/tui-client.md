@@ -54,8 +54,11 @@ model, authentication, session, and tool orchestration remain in the core.
   cursor and never submits embedded newlines. Forwarded `Ctrl+V` and `Cmd+V` first inspect the
   clipboard for an image and insert a numbered `[Image #N]` placeholder when one is available;
   otherwise they paste text. Deleting a placeholder removes its payload, and image-only prompts
-  are valid. A draft accepts at most four images. Persisted input history excludes both attachment
-  payloads and their placeholders.
+  are valid. A draft accepts at most four images. `Up` restores the latest submitted image prompt
+  with its attachment during the current process; older image entries become text-only to bound
+  memory. Persisted input history excludes both attachment
+  payloads and their placeholders. Composer placeholders are presentation-only and are not sent
+  as prompt text; accepted events carry only the image count needed to reconstruct transcript rows.
 - Typing `/` at the beginning of an empty draft opens a filtered command popup below the composer
   without taking focus from it. The popup shows at most eight commands; `Up` and `Down` scroll its
   window and wrap between the first and last matching commands. `Tab` completes the selected

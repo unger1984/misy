@@ -43,6 +43,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             },
             clear_composer: false,
             history_text: None,
+            history_snapshot: None,
         };
         if self.submission_sender.send(request).is_err() {
             self.state
@@ -270,8 +271,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 if request.clear_composer && self.state.composer.matches_draft(&request.draft) {
                     self.state.composer.clear();
                 }
-                if let Some(text) = request.history_text {
-                    self.record_prompt_history(&text);
+                if let Some(snapshot) = request.history_snapshot {
+                    let recorded = self.state.composer.record_submitted_snapshot(snapshot);
+                    if recorded && let Some(text) = request.history_text {
+                        self.append_prompt_history(&text);
+                    }
                 }
             }
             Err(error) => self.state.add_error(error),

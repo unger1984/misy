@@ -33,8 +33,8 @@ model, authentication, session, and tool orchestration remain in the core.
   application-owned render state while Misy is open, with the newest transcript rows above the
   composer. Leaving Misy restores the terminal screen and scrollback that existed before startup.
 - The fullscreen layout is ordered transcript, optional one-line busy indicator,
-  persistent bordered composer, then either a slash-command popup or a modal list, and a footer.
-  The popup and modal surface are mutually exclusive; the composer remains visible for both.
+  persistent bordered composer, an optional slash-command popup, and a footer. Provider and model
+  workflows use centered modal popups over that layout.
 - A responsive startup card is the first item in the transcript flow. It shows the Misy version,
   initial model, working directory, and brief input hints; it scrolls off the top with earlier
   conversation content and is never a persistent header.
@@ -66,8 +66,10 @@ model, authentication, session, and tool orchestration remain in the core.
   out, or the report is invalid, the TUI renders the error without changing the selected model.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
-- `/provider` opens an interactive provider list in the lower panel. `/model` immediately opens a
-  centered model popup from the core-owned catalog cache while refreshing the catalog in the
+- `/provider` opens a centered provider popup. Selecting a provider replaces the popup contents
+  with its available `Authorize` or `Log out` actions; authorization progress, device codes, and
+  logout progress remain in the same popup. `/model` immediately opens a centered model popup from
+  the core-owned catalog cache while refreshing the catalog in the
   background. An empty cache shows an animated loading indicator. The popup has an `All` tab and
   one tab for every provider represented by models or an error; `Left` and `Right` switch tabs and
   `Up` and `Down` move within the filtered model list. Its width is capped and centered on wider
@@ -104,6 +106,10 @@ model, authentication, session, and tool orchestration remain in the core.
   then waits for provider completion. `device` does the same while showing the user code in the
   provider operation row. `none` immediately marks the provider authenticated without opening a
   browser. `prompt` reports that field input is not supported by this client yet.
+- `Esc` cancels an in-flight provider authentication start or browser/device completion wait,
+  restores the provider actions in the popup, and asks the core to terminate the blocked provider
+  process. The next attempt starts a clean provider process; late results from the cancelled task
+  cannot change the popup or authentication state.
 - Browser and device authorization URLs are limited to validated HTTP(S) addresses and are passed
   directly to the OS opener without a shell. Unknown authentication kinds are reported as errors.
 - Authentication completion keeps the opaque provider session separate from the empty browser or

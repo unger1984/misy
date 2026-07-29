@@ -85,6 +85,12 @@ auth_start() {
 auth_complete() {
   case "$target" in
     *auth-device*) sleep 1 ;;
+    *hanging-auth*)
+      if [ ! -e "${target}.complete-started" ]; then
+        : > "${target}.complete-started"
+        sleep 30
+      fi
+      ;;
   esac
   case "$line" in
     *'"session":{"id":"remote-error"}'*)

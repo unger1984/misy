@@ -46,7 +46,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             .set_provider_operation(provider.clone(), ProviderOperationKind::Start, None);
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
-        tokio::spawn(async move {
+        let task_provider = provider.clone();
+        let task = tokio::spawn(async move {
             let result = core
                 .start_auth_with_method(&provider, &method)
                 .await
@@ -54,6 +55,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
             // A closed channel means the client is gone, so the result has nowhere to land.
             let _ = sender.send(ProviderOperationResult::Start(provider, method, result));
         });
+        self.track_auth_task(
+            task_provider,
+            ProviderOperationKind::Start,
+            task.abort_handle(),
+        );
     }
 
     pub(super) fn logout(&mut self, provider: ProviderId) {
@@ -102,6 +108,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Complete(provider, _method, result) => {
                 self.apply_complete_result(&provider, result);
             }
+            ProviderOperationResult::CancelAuth(provider, result) => {
+                self.apply_cancel_auth_result(&provider, result);
+            }
             ProviderOperationResult::Logout(provider, result) => {
                 self.apply_logout_result(&provider, result);
             }
@@ -146,6 +155,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
         {
             return;
         }
+        self.finish_auth_task(&provider, ProviderOperationKind::Start);
         match result {
             Ok(auth) => {
                 if let Err(error) = self.open_authorization(provider, method, &auth) {
@@ -163,8 +173,28 @@ impl<B: BrowserHandoff> TuiClient<B> {
         {
             return;
         }
+        self.finish_auth_task(provider, ProviderOperationKind::Complete);
         match result {
             Ok(()) => self.refresh_provider_choices(),
+            Err(error) => self.state.add_error(error),
+        }
+    }
+
+    fn apply_cancel_auth_result(&mut self, provider: &ProviderId, result: Result<(), String>) {
+        if !self
+            .state
+            .finish_provider_operation(provider, ProviderOperationKind::CancelAuth)
+        {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.refresh_provider_choices();
+                self.state.add_info(format!(
+                    "authentication cancelled for {}",
+                    self.provider_display_name(provider)
+                ));
+            }
             Err(error) => self.state.add_error(error),
         }
     }

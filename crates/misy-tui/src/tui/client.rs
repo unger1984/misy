@@ -9,7 +9,7 @@ use super::{
     action::{UiAction, UiKey, UiMode},
     browser::BrowserHandoff,
     history::PromptHistoryStore,
-    state::{ProviderAction, ProviderOperationKind, UiState},
+    state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
     AvailableModels, CoreError, CoreEvent, MisyCore, MisyPaths, ModelRef, ProviderDisplayName,
@@ -19,6 +19,7 @@ use serde_json::Value;
 use snapshot::provider_choices;
 use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TryRecvError};
+use tokio::task::AbortHandle;
 
 const MAX_EVENTS_PER_TICK: usize = 256;
 const MAX_OPERATIONS_PER_TICK: usize = 64;
@@ -62,6 +63,7 @@ impl From<CoreError> for TuiError {
 pub(super) enum ProviderOperationResult {
     Start(ProviderId, String, Result<Value, String>),
     Complete(ProviderId, String, Result<(), String>),
+    CancelAuth(ProviderId, Result<(), String>),
     Logout(ProviderId, Result<(), String>),
     Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
@@ -85,6 +87,7 @@ pub struct TuiClient<B> {
     provider_names: BTreeMap<ProviderId, ProviderDisplayName>,
     prompt_history: Option<PromptHistoryStore>,
     pub(super) model_refresh_generation: u64,
+    auth_task: Option<(ProviderId, ProviderOperationKind, AbortHandle)>,
 }
 
 impl<B: BrowserHandoff> TuiClient<B> {
@@ -142,6 +145,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             provider_names,
             prompt_history,
             model_refresh_generation: 0,
+            auth_task: None,
         }
     }
 
@@ -348,12 +352,14 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiKey::Right => self.state.reduce(&UiAction::PickerTabRight),
             UiKey::Backspace => self.state.backspace_filter(),
             UiKey::Escape => {
+                if self.cancel_active_authentication() {
+                    return Ok(());
+                }
                 if matches!(
                     self.state.provider_operation,
                     Some((
                         _,
-                        ProviderOperationKind::Start
-                            | ProviderOperationKind::Complete
+                        ProviderOperationKind::CancelAuth
                             | ProviderOperationKind::Logout
                             | ProviderOperationKind::SelectModel
                     ))
@@ -458,6 +464,63 @@ impl<B: BrowserHandoff> TuiClient<B> {
             .get(provider)
             .map(ProviderDisplayName::as_str)
             .unwrap_or(provider.as_str())
+    }
+
+    pub(super) fn track_auth_task(
+        &mut self,
+        provider: ProviderId,
+        kind: ProviderOperationKind,
+        task: AbortHandle,
+    ) {
+        self.auth_task = Some((provider, kind, task));
+    }
+
+    pub(super) fn finish_auth_task(&mut self, provider: &ProviderId, kind: ProviderOperationKind) {
+        if self
+            .auth_task
+            .as_ref()
+            .is_some_and(|(active, active_kind, _)| active == provider && *active_kind == kind)
+        {
+            self.auth_task = None;
+        }
+    }
+
+    fn cancel_active_authentication(&mut self) -> bool {
+        let Some((OperationScope::Provider(provider), kind)) =
+            self.state.provider_operation.clone()
+        else {
+            return false;
+        };
+        if !matches!(
+            kind,
+            ProviderOperationKind::Start | ProviderOperationKind::Complete
+        ) {
+            return false;
+        }
+        let Some((task_provider, task_kind, task)) = self.auth_task.take() else {
+            return false;
+        };
+        if task_provider != provider || task_kind != kind {
+            self.auth_task = Some((task_provider, task_kind, task));
+            return false;
+        }
+        task.abort();
+        self.state.finish_provider_operation(&provider, kind);
+        self.state.set_provider_operation(
+            provider.clone(),
+            ProviderOperationKind::CancelAuth,
+            None,
+        );
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let result = core
+                .cancel_authentication(&provider)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::CancelAuth(provider, result));
+        });
+        true
     }
 }
 

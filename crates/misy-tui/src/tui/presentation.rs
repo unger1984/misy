@@ -11,6 +11,7 @@ pub(super) fn operation_label(kind: ProviderOperationKind, device_code: Option<&
         (ProviderOperationKind::Complete, Some(code)) => format!("Code: {code} · waiting…"),
         (ProviderOperationKind::Start, _) => "Opening browser…".to_owned(),
         (ProviderOperationKind::Complete, None) => "Waiting for browser…".to_owned(),
+        (ProviderOperationKind::CancelAuth, _) => "Cancelling authentication…".to_owned(),
         (ProviderOperationKind::Logout, _) => "Logging out…".to_owned(),
         (ProviderOperationKind::Models, _) => "Loading models…".to_owned(),
         (ProviderOperationKind::SelectModel, _) => "Selecting model…".to_owned(),

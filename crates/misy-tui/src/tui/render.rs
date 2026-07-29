@@ -3,8 +3,9 @@
 use super::{
     action::UiMode,
     composer::CommandPopupRow,
+    display_width::{text_width, truncate_to_width},
     list::ListRowDisplay,
-    state::{ModalPresentation, TranscriptRow, UiState},
+    state::{TranscriptRow, UiState},
     style,
 };
 use ratatui::{
@@ -29,7 +30,7 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     let popup_rows = state.command_popup_rows_for_render();
     let modal = state.modal_presentation(MAX_VIEW_ROWS);
     let composer_height = composer_height(state);
-    let surface_height = surface_height(&popup_rows, modal.as_ref());
+    let surface_height = surface_height(&popup_rows);
     let queued_prompts = state.queued_prompt_lines(MAX_QUEUED_PROMPT_ROWS);
     let busy = state.busy_label(Instant::now());
     let areas = Layout::vertical([
@@ -57,8 +58,8 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
         );
     }
     render_composer(frame, areas[3], state);
-    render_surface(frame, areas[4], &popup_rows, modal.as_ref());
-    if let Some(modal) = modal.as_ref().filter(|modal| !modal.tabs.is_empty()) {
+    render_surface(frame, areas[4], &popup_rows);
+    if let Some(modal) = modal.as_ref() {
         super::model_popup::render(frame, area, state, modal);
     }
     render_footer(frame, areas[5], state);
@@ -77,20 +78,11 @@ fn composer_height(state: &UiState) -> u16 {
         .saturating_add(2)
 }
 
-fn surface_height(popup_rows: &[CommandPopupRow], modal: Option<&ModalPresentation>) -> u16 {
+fn surface_height(popup_rows: &[CommandPopupRow]) -> u16 {
     if !popup_rows.is_empty() {
         return POPUP_TOP_SPACE.saturating_add(u16::try_from(popup_rows.len()).unwrap_or(u16::MAX));
     }
-    let Some(modal) = modal.filter(|modal| modal.tabs.is_empty()) else {
-        return 0;
-    };
-    let row_count = if modal.operation.is_some() {
-        1
-    } else {
-        MAX_VIEW_ROWS
-    };
-    let back_hint = if modal.back_hint { 2 } else { 0 };
-    u16::try_from(2 + row_count + back_hint).unwrap_or(u16::MAX)
+    0
 }
 
 fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
@@ -219,12 +211,7 @@ fn composer_lines(state: &UiState) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_surface(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    popup_rows: &[CommandPopupRow],
-    modal: Option<&ModalPresentation>,
-) {
+fn render_surface(frame: &mut ratatui::Frame, area: Rect, popup_rows: &[CommandPopupRow]) {
     if !popup_rows.is_empty() {
         let popup_area = Rect::new(
             area.x,
@@ -237,37 +224,7 @@ fn render_surface(
             .map(|row| popup_line(row, popup_area.width))
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(Text::from(lines)), popup_area);
-        return;
     }
-    let Some(modal) = modal else {
-        return;
-    };
-    if !modal.tabs.is_empty() {
-        return;
-    }
-    let mut lines = vec![
-        Line::styled(format!("  {}", modal.title), style::muted()),
-        Line::raw(""),
-    ];
-    if let Some(operation) = &modal.operation {
-        lines.push(Line::from(vec![
-            Span::styled("  ⠋ ", style::accent()),
-            Span::styled(operation.clone(), style::muted()),
-        ]));
-    } else {
-        let label_width = modal_label_width(&modal.rows, area.width);
-        lines.extend(
-            modal
-                .rows
-                .iter()
-                .map(|row| list_line(row, area.width, label_width)),
-        );
-    }
-    if modal.back_hint {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled("  Esc back", style::muted()));
-    }
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn popup_line(row: &CommandPopupRow, width: u16) -> Line<'static> {
@@ -293,7 +250,7 @@ fn popup_line(row: &CommandPopupRow, width: u16) -> Line<'static> {
     )
 }
 
-fn list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'static> {
+pub(super) fn list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'static> {
     let selected = if row.selected {
         style::selected()
     } else {
@@ -307,14 +264,29 @@ fn list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'stat
     let marker = if row.selected { "›" } else { " " };
     let current = if row.current { "✓ " } else { "  " };
     let description = row.description.as_deref().unwrap_or_default();
+    let prefix = format!("{marker} {current}{}. ", row.number);
+    let available = usize::from(width).saturating_sub(text_width(&prefix));
+    let (label_budget, description_budget) = column_widths(
+        label_width,
+        text_width(description),
+        available,
+        !description.is_empty(),
+    );
+    let label = truncate_to_width(&row.label, label_budget);
+    let label_padding = label_budget.saturating_sub(text_width(&label));
     let mut spans = vec![
-        Span::styled(format!("{marker} {current}{}. ", row.number), selected),
-        Span::styled(format!("{:<label_width$}", row.label), selected),
+        Span::styled(prefix, selected),
+        Span::styled(format!("{label}{}", " ".repeat(label_padding)), selected),
     ];
-    if !description.is_empty() {
+    if !description.is_empty() && description_budget != 0 {
+        let description = truncate_to_width(description, description_budget);
         spans.push(Span::styled(
-            description.to_owned(),
-            description_style(description, muted, row.selected),
+            format!("  {description}"),
+            description_style(
+                row.description.as_deref().unwrap_or_default(),
+                muted,
+                row.selected,
+            ),
         ));
     }
     padded_line(spans, width, selected)
@@ -323,10 +295,31 @@ fn list_line(row: &ListRowDisplay, width: u16, label_width: usize) -> Line<'stat
 pub(super) fn modal_label_width(rows: &[ListRowDisplay], width: u16) -> usize {
     let maximum = rows
         .iter()
-        .map(|row| row.label.chars().count())
+        .map(|row| text_width(&row.label))
         .max()
         .unwrap_or(1);
     maximum.min(usize::from(width).saturating_sub(18).max(1))
+}
+
+fn column_widths(
+    label_width: usize,
+    description_width: usize,
+    available: usize,
+    has_description: bool,
+) -> (usize, usize) {
+    if !has_description {
+        return (label_width.min(available), 0);
+    }
+    let content = available.saturating_sub(2);
+    let mut label = label_width.min(content.div_ceil(2));
+    let mut description = description_width.min(content.saturating_sub(label));
+    let spare = content.saturating_sub(label + description);
+    let label_growth = label_width.saturating_sub(label).min(spare);
+    label += label_growth;
+    description += description_width
+        .saturating_sub(description)
+        .min(spare.saturating_sub(label_growth));
+    (label, description)
 }
 
 fn description_style(description: &str, muted: Style, selected: bool) -> Style {
@@ -397,4 +390,30 @@ fn render_cursor(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
         .saturating_add(row)
         .min(area.bottom().saturating_sub(2));
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_line_truncates_both_columns_without_removing_the_gap() {
+        let row = ListRowDisplay {
+            number: 1,
+            label: "Provider with a very long display name".to_owned(),
+            description: Some("authentication status with extra details".to_owned()),
+            selected: true,
+            current: false,
+        };
+
+        let line = list_line(&row, 32, text_width(&row.label));
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(line.width() <= 32);
+        assert!(rendered.contains("…  authentica…"), "{rendered:?}");
+    }
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-29
+
+### Changed
+
+- Moved the complete `/provider` workflow into the centered popup used by `/model`, including the
+  provider list, provider actions, authentication progress, device codes, and logout progress.
+
+### Fixed
+
+- Made `Esc` cancel a pending provider browser/device authentication wait, restore the provider
+  actions immediately, and terminate the blocked provider process so a later attempt starts clean.
+- Made provider rows allocate width adaptively and truncate arbitrary long names or statuses with
+  an ellipsis, keeping both columns readable and visually separated in narrow popups.
+
 ## 2026-07-27
 
 ### Changed

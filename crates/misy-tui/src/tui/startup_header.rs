@@ -1,13 +1,13 @@
 //! Immutable startup card rendered as the first item in the transcript flow.
 
-use super::style;
+use super::{display_width::truncate_to_width, style};
 use misy_core::ModelRef;
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
 use std::path::Path;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 const MAX_BOX_WIDTH: usize = 88;
 const DUAL_COLUMN_MIN_WIDTH: usize = 64;
@@ -146,7 +146,7 @@ enum Alignment {
 fn title_line(box_width: usize) -> Line<'static> {
     let title = format!(" Misy v{} ", env!("CARGO_PKG_VERSION"));
     let available = box_width - 2;
-    let title = truncate(&title, available.saturating_sub(1));
+    let title = truncate_to_width(&title, available.saturating_sub(1));
     let remaining = available.saturating_sub(1 + UnicodeWidthStr::width(title.as_str()));
     Line::from(vec![
         Span::styled(" ╭─", style::muted()),
@@ -190,7 +190,7 @@ fn cell_spans(
     alignment: Alignment,
     cell_style: Style,
 ) -> Vec<Span<'static>> {
-    let text = truncate(text, width);
+    let text = truncate_to_width(text, width);
     let text_width = UnicodeWidthStr::width(text.as_str());
     let padding = width.saturating_sub(text_width);
     let left_padding = match alignment {
@@ -203,28 +203,6 @@ fn cell_spans(
         Span::styled(text, cell_style),
         Span::raw(" ".repeat(right_padding)),
     ]
-}
-
-fn truncate(text: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= width {
-        return text.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let content_width = width.saturating_sub(1);
-    let mut rendered = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + character_width > content_width {
-            break;
-        }
-        rendered.push(character);
-        used += character_width;
-    }
-    rendered.push('…');
-    rendered
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
-//! Bounded model-picker overlay layout and rendering.
+//! Bounded centered-popup layout and rendering for provider and model pickers.
 
 use super::{
-    render::{modal_label_width, padded_line},
+    render::{list_line, modal_label_width, padded_line},
     state::{ModalPresentation, UiState, spinner_frame},
     style,
 };
@@ -42,7 +42,7 @@ pub(super) fn render(
     if modal.loading {
         render_loading(frame, layout.content);
     } else {
-        render_models(frame, layout.content, &modal);
+        render_content(frame, layout.content, &modal);
     }
 }
 
@@ -75,7 +75,7 @@ fn render_frame(frame: &mut ratatui::Frame, layout: &PopupLayout, modal: &ModalP
         layout.separator,
     );
     frame.render_widget(
-        Paragraph::new(model_help_line(layout.inner.width)),
+        Paragraph::new(help_line(modal, layout.inner.width)),
         layout.help,
     );
 }
@@ -210,14 +210,37 @@ fn render_loading(frame: &mut ratatui::Frame, area: Rect) {
     );
 }
 
-fn render_models(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentation) {
+fn render_content(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentation) {
+    if let Some(operation) = &modal.operation {
+        render_operation(frame, area, operation);
+        return;
+    }
     let label_width = modal_label_width(&modal.rows, area.width);
     let lines = modal
         .rows
         .iter()
-        .map(|row| model_list_line(row, area.width, label_width))
+        .map(|row| {
+            if modal.tabs.is_empty() {
+                list_line(row, area.width, label_width)
+            } else {
+                model_list_line(row, area.width, label_width)
+            }
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn render_operation(frame: &mut ratatui::Frame, area: Rect, operation: &str) {
+    let ticks = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() / 100);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} ", spinner_frame(ticks)), style::accent()),
+            Span::styled(operation.to_owned(), style::muted()),
+        ])),
+        area,
+    );
 }
 
 fn model_list_line(
@@ -251,6 +274,20 @@ fn model_help_line(width: u16) -> Line<'static> {
         "esc"
     } else {
         " ↑↓ select  ←→ section  enter apply  esc close"
+    };
+    Line::styled(hint, style::muted())
+}
+
+fn help_line(modal: &ModalPresentation, width: u16) -> Line<'static> {
+    if !modal.tabs.is_empty() {
+        return model_help_line(width);
+    }
+    let hint = if width < 42 {
+        "esc"
+    } else if modal.back_hint {
+        " ↑↓ select  enter apply  esc back"
+    } else {
+        " ↑↓ select  enter open  esc close"
     };
     Line::styled(hint, style::muted())
 }

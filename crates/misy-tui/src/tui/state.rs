@@ -67,6 +67,7 @@ pub(super) struct ModalPresentation {
 pub(super) enum ProviderOperationKind {
     Start,
     Complete,
+    CancelAuth,
     Logout,
     Models,
     SelectModel,

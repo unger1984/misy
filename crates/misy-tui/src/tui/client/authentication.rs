@@ -60,7 +60,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
         ));
         let core = self.core.clone();
         let sender = self.operation_sender.clone();
-        tokio::spawn(async move {
+        let task_provider = provider.clone();
+        let task = tokio::spawn(async move {
             let result = core
                 .complete_auth(&provider, session, json!({}))
                 .await
@@ -69,6 +70,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
             // A closed channel means the client is gone, so the result has nowhere to land.
             let _ = sender.send(ProviderOperationResult::Complete(provider, method, result));
         });
+        self.track_auth_task(
+            task_provider,
+            ProviderOperationKind::Complete,
+            task.abort_handle(),
+        );
         Ok(())
     }
 }

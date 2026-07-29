@@ -240,7 +240,7 @@ async fn unknown_auth_kind_reports_a_parse_error_without_panicking() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_settings_cannot_abandon_an_auth_start_with_escape() {
+async fn escape_cancels_an_auth_start_and_restores_provider_actions() {
     let (_temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "slow-start")]);
     let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
     client.handle_input("/provider").expect("providers");
@@ -248,10 +248,66 @@ async fn provider_settings_cannot_abandon_an_auth_start_with_escape() {
     client
         .handle_key(UiKey::Enter)
         .expect("start authorization");
-    client.handle_key(UiKey::Escape).expect("escape is ignored");
+    client.handle_key(UiKey::Escape).expect("cancel auth start");
     assert_eq!(client.state().mode(), UiMode::ProviderDetail);
-    assert_eq!(client.state().picker_labels(), ["Opening browser…"]);
-    client.handle_ctrl_c();
+    assert_eq!(
+        client.state().picker_labels(),
+        ["Cancelling authentication…"]
+    );
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Authorize"]
+    })
+    .await;
+    let lines = buffer_lines(&render_buffer(client.state(), 72, 18), 72);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("┌") && line.contains("┐"))
+    );
+    assert!(lines.iter().any(|line| line.contains("Fixture AI")));
+    assert!(!lines.iter().any(|line| line.contains("Opening browser…")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn escape_cancels_a_browser_auth_wait_and_restores_provider_actions() {
+    let (temporary, core) = core_with_providers(&[("fixture", "Fixture AI", "hanging-auth")]);
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+
+    start_first_provider_auth(&mut client).await;
+    let started = temporary.path().join("hanging-auth.complete-started");
+    wait_for_within(&mut client, Duration::from_secs(3), |_| started.exists()).await;
+    assert_eq!(client.state().picker_labels(), ["Waiting for browser…"]);
+
+    client
+        .handle_key(UiKey::Escape)
+        .expect("cancel authentication");
+
+    assert_eq!(client.state().mode(), UiMode::ProviderDetail);
+    assert_eq!(
+        client.state().picker_labels(),
+        ["Cancelling authentication…"]
+    );
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Authorize"]
+            && client.state().transcript().iter().any(|row| {
+                matches!(
+                    row,
+                    TranscriptRow::Info(message)
+                        if message == "authentication cancelled for Fixture AI"
+                )
+            })
+    })
+    .await;
+    assert_eq!(client.running_provider_count().await, 0);
+
+    client
+        .handle_key(UiKey::Enter)
+        .expect("retry authorization");
+    wait_for(&mut client, |client| {
+        client.state().picker_labels() == ["Log out"]
+    })
+    .await;
+    assert_eq!(client.browser().opened.len(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]

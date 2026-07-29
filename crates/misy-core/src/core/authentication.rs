@@ -211,6 +211,24 @@ impl MisyCore {
         Ok(self.sanitize_auth_response(result))
     }
 
+    /// Cancels an in-flight interactive authentication attempt for `provider`.
+    ///
+    /// Authentication requests have no protocol-level cancellation method, so cancellation
+    /// terminates the provider process. A later provider operation starts a clean replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the core is already shut down.
+    pub async fn cancel_authentication(&self, provider: &ProviderId) -> Result<(), CoreError> {
+        self.inner.state.ensure_running()?;
+        self.inner
+            .state
+            .host
+            .fail_provider(provider, "provider authentication cancelled".to_owned())
+            .await;
+        Ok(())
+    }
+
     /// Refreshes provider credentials and persists the provider's returned replacement.
     ///
     /// # Errors

@@ -4,7 +4,7 @@ mod support;
 
 use misy_core::{ModelId, ModelRef, ProviderId};
 use misy_tui::{
-    BrowserPlatform, TranscriptRow, UiKey, browser_command, validate_authorization_url,
+    BrowserPlatform, TranscriptRow, TuiClient, UiKey, browser_command, validate_authorization_url,
 };
 use ratatui::{
     Terminal,
@@ -146,33 +146,81 @@ async fn renderer_matches_composer_popup_and_footer_layout() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn renderer_numbers_and_styles_provider_rows_in_eight_row_viewport() {
+async fn provider_flow_stays_in_a_centered_popup() {
     let (_temporary, mut client, _) = test_client().await;
     authorize_first_provider(&mut client).await;
     client.handle_key(UiKey::Escape).expect("provider list");
-    let buffer = render_buffer(client.state(), 72, 18);
-    let lines = buffer_lines(&buffer, 72);
+    let buffer = render_buffer(client.state(), 160, 30);
+    let lines = buffer_lines(&buffer, 160);
     let title = lines
         .iter()
-        .position(|line| line.trim() == "Providers")
+        .position(|line| line.contains(" Providers"))
         .expect("provider title");
-    let composer = lines
-        .iter()
-        .position(|line| line.contains("> Ask anything"))
-        .expect("persistent composer");
+    let border = &lines[title.saturating_sub(1)];
+    let left = border
+        .chars()
+        .position(|character| character == '┌')
+        .expect("popup left border");
+    let right = border
+        .chars()
+        .position(|character| character == '┐')
+        .expect("popup right border");
+    let terminal_width = border.chars().count();
+    assert!(left > 0);
+    assert!(right + 1 < terminal_width);
+    assert!((left as isize - (terminal_width - right - 1) as isize).abs() <= 1);
     let row = lines
         .iter()
         .position(|line| line.contains("1.") && line.contains("Fixture AI"))
         .expect("numbered provider row");
-    let footer = lines
-        .iter()
-        .position(|line| line.starts_with("  ? for shortcuts"))
-        .expect("footer");
     assert_eq!(row, title + 2);
-    assert_eq!(footer, title + 10);
-    assert!(composer < title);
     assert!(lines[row].contains("✓ authenticated"));
+    assert!(lines.iter().any(|line| line.contains("enter open")));
     assert!(buffer.content().iter().any(|cell| cell.fg == Color::Green));
+
+    client.handle_key(UiKey::Enter).expect("provider settings");
+    let detail = buffer_lines(&render_buffer(client.state(), 160, 30), 160);
+    assert!(detail.iter().any(|line| line.contains("Fixture AI")));
+    assert!(detail.iter().any(|line| line.contains("Log out")));
+    assert!(detail.iter().any(|line| line.contains("esc back")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn narrow_provider_popup_separates_names_from_authentication_status() {
+    let (_temporary, core) = core_with_providers(&[
+        ("anthropic", "Anthropic", "anthropic"),
+        ("kimi", "Kimi", "kimi"),
+        ("openai", "OpenAI", "openai"),
+    ]);
+    for provider in ["kimi", "openai"] {
+        core.complete_auth(
+            &ProviderId::new(provider),
+            json!({"id": "fixture-session"}),
+            json!({"code": "opaque"}),
+        )
+        .await
+        .expect("authenticate provider");
+    }
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+    client.handle_input("/provider").expect("providers");
+
+    let lines = buffer_lines(&render_buffer(client.state(), 44, 12), 44);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Anthropic  not authenticated"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Kimi       ✓ authenticated"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("OpenAI     ✓ authenticated"))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

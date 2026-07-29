@@ -58,7 +58,10 @@ flowchart LR
 4. Every inference carries an explicit provider and model.
 5. Provider stream events become normalized `CoreEvent` values.
 6. Tool calls execute locally in Rust; results return to the same provider/model loop.
-7. Cancel and shutdown propagate through the core to provider processes.
+7. Submission cancellation, interactive-authentication cancellation, and shutdown propagate
+   through the core to provider processes. Because protocol v2 has no auth-cancellation method,
+   cancelling interactive authentication terminates that provider process and the next operation
+   starts a clean replacement.
 8. Direct-interaction submissions enter one core-owned FIFO queue. Exactly one submission mutates
    session history at a time; cancelling the active submission advances the next queued item,
    while cancelling all submissions prevents every pending item from starting.

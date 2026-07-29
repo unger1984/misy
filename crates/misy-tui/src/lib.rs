@@ -7,6 +7,7 @@
 mod tui;
 
 pub use tui::{
-    BrowserHandoff, BrowserPlatform, SessionStart, TranscriptRow, TuiClient, UiAction, UiKey,
-    UiMode, UiState, browser_command, map_input, map_key, render, run, validate_authorization_url,
+    BrowserHandoff, BrowserPlatform, HerdrReporter, SessionStart, TranscriptRow, TuiClient,
+    UiAction, UiKey, UiMode, UiState, browser_command, map_input, map_key, render, run,
+    run_with_herdr_reporter, validate_authorization_url,
 };

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-07-30
+
+### Added
+
+- Added optional, best-effort Herdr pane lifecycle reporting for interactive Misy sessions, with
+  semantic idle/working/blocked state, coalesced shell-free subprocess calls, and shutdown release.
+
 ## 2026-07-29
 
 ### Added

@@ -5,6 +5,7 @@ use super::{
     browser::SystemBrowser,
     client::TuiClient,
     clipboard::{Clipboard, ClipboardPaste, SystemClipboard, write_osc52_copy},
+    herdr_reporter::HerdrReporter,
     render::render_with_composer_area,
     screen_selection::ScreenSelection,
 };
@@ -56,12 +57,29 @@ pub async fn run(
     paths: &MisyPaths,
     session_start: SessionStart,
 ) -> Result<(), io::Error> {
+    run_with_herdr_reporter(core, paths, session_start, None).await
+}
+
+/// Starts the fullscreen client with an optional pane lifecycle reporter.
+///
+/// # Errors
+///
+/// Returns terminal setup, event-read, clipboard-transfer, or draw failures.
+pub async fn run_with_herdr_reporter(
+    core: MisyCore,
+    paths: &MisyPaths,
+    session_start: SessionStart,
+    reporter: Option<HerdrReporter>,
+) -> Result<(), io::Error> {
     let stdout = io::stdout();
     let mut guard = TerminalGuard::enter()?;
     let mut client = TuiClient::with_persistent_history(core, SystemBrowser, paths).await;
     client
         .apply_session_start(session_start)
         .map_err(io::Error::other)?;
+    if let Some(reporter) = &reporter {
+        reporter.observe(&client.core.snapshot());
+    }
     let result = (|| {
         let backend = CrosstermBackend::new(stdout.lock());
         let mut terminal = Terminal::new(backend)?;
@@ -90,11 +108,17 @@ pub async fn run(
                 }
             }
             client.pump_events();
+            if let Some(reporter) = &reporter {
+                reporter.observe(&client.core.snapshot());
+            }
         }
         Ok(())
     })();
     client.shutdown().await;
     guard.restore();
+    if let Some(reporter) = reporter {
+        reporter.shutdown().await;
+    }
     result
 }
 

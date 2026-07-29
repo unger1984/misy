@@ -13,6 +13,7 @@ mod composer_attachment;
 mod context_popup;
 mod context_view;
 mod display_width;
+mod herdr_reporter;
 mod history;
 mod keymap;
 mod list;
@@ -36,10 +37,11 @@ mod usage;
 
 pub use action::{UiAction, UiKey, UiMode, map_input, map_key};
 pub use browser::{BrowserHandoff, BrowserPlatform, browser_command, validate_authorization_url};
+pub use herdr_reporter::HerdrReporter;
 // These stable public names are intentionally prefixed with `Tui` because callers import them
 // through the crate facade as well as this compatibility module.
 #[allow(clippy::module_name_repetitions)]
 pub use client::TuiClient;
 pub use render::render;
 pub use state::{TranscriptRow, UiState};
-pub use terminal::{SessionStart, run};
+pub use terminal::{SessionStart, run, run_with_herdr_reporter};

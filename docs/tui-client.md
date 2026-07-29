@@ -220,6 +220,11 @@ model, authentication, session, and tool orchestration remain in the core.
   after cancellation.
 - Usage is a core operation, not a TUI-owned provider request: the TUI supplies no endpoint,
   headers, credentials, or provider-specific parsing.
+- When launched inside a Herdr pane with `HERDR_ENV=1` and nonempty `HERDR_PANE_ID`, the client
+  best-effort reports `misy` lifecycle state as source `misy:cli`. Pending questions map to
+  `blocked` ahead of active or queued submissions (`working`), otherwise `idle`. Reporting is a
+  shell-free, deadline-bounded client-runtime adapter; failures never affect the core or terminal
+  loop, rapid duplicate states are coalesced, and normal shutdown releases pane authority.
 
 ## Change Impact
 

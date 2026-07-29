@@ -4,7 +4,7 @@ mod cli;
 
 use cli::Arguments;
 use misy_core::{ClientCapabilities, CoreOptions, MisyCore};
-use misy_tui::run;
+use misy_tui::{HerdrReporter, run_with_herdr_reporter};
 use std::{error::Error, path::Path};
 
 #[tokio::main]
@@ -21,7 +21,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
         },
     )?;
-    run(core, &paths, arguments.session_start()).await?;
+    let reporter = HerdrReporter::from_environment();
+    run_with_herdr_reporter(core, &paths, arguments.session_start(), reporter).await?;
     Ok(())
 }
 

@@ -109,9 +109,10 @@ metadata containing an ordered level list and default level. Catalog results ide
 as `remote` or `bundled`; the core caches each provider atomically for fifteen minutes, preserves a
 stale catalog across transient refresh failures, and reports availability separately from age.
 Provider plugins keep explicit upstream pricing authoritative and may fill missing display prices
-from the shared, versioned models.dev-derived reference snapshot. Reference values use compact
-`$input/output` USD-per-million text; subscription catalogs may explicitly map their included models
-to `free`. The core continues to treat this text as opaque and never computes spend from it.
+from a provider-appropriate source. AnyModel uses its official public catalog because those values
+are route-specific final prices; its process caches that catalog for 24 hours and retains stale data
+across transient failures. Other provider reference values may use compact `$input/output`
+USD-per-million text. The core treats all pricing text as opaque and never computes spend from it.
 
 ## Optional Capabilities
 
@@ -281,11 +282,19 @@ fall back to the default on any other value.
 - `MISY_ANYMODEL_BASE_URL` — OpenAI-compatible API base URL (default
   `https://anymodel.org/v1`).
 - `MISY_ANYMODEL_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_URL` — official catalog URL used for optional model metadata
+  enrichment (default `https://anymodel.org/en/models`; empty disables enrichment).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_TTL_MS` — successful public-catalog cache lifetime (default
+  86400000).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_TIMEOUT_MS` — per-page public-catalog timeout (default 5000).
 
 AnyModel accepts an API key only through its protocol v2 prompt form. The core stores the returned
 opaque credential object, while the plugin validates it against the live `/models` catalog and
 sends raw upstream IDs such as `cx/gpt-5.6-sol`. Qualified Misy identities add the provider
 namespace, for example `anymodel/cx/gpt-5.6-sol`; that outer prefix is never sent upstream.
+The optional thinking suffix remains core-owned and colon-delimited, for example
+`anymodel/cx/gpt-5.6-sol:high`; the plugin sends `high` as `reasoning_effort` separately from the
+unchanged upstream model ID.
 
 ## Change Impact
 

@@ -25,13 +25,11 @@ const PRICES: ReadonlyArray<readonly [pattern: RegExp, price: Price]> = [
 /**
  * Returns a compact `$input/output` USD-per-million reference when upstream omits pricing.
  *
- * Subscription-backed Kimi and Gemini CLI routes are shown as free, matching OMP's catalog view.
  * Provider-supplied pricing always takes precedence at the call site.
  */
 export function referencePricing(modelSelector: string): string | undefined {
 	const selector = modelSelector.toLowerCase();
 	if (selector === "free" || selector.endsWith("/free")) return "free";
-	if (/^(?:gc|kmc)\//.test(selector)) return "free";
 	for (const [pattern, [input, output]] of PRICES) {
 		if (pattern.test(selector)) return `$${input}/${output}`;
 	}

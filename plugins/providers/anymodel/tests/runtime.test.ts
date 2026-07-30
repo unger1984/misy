@@ -13,7 +13,7 @@ test("declares the discoverable protocol v2 manifest without usage capability", 
 		display_name: "AnyModel",
 		kind: "provider",
 		protocol_version: 2,
-		capabilities: { image_input: { version: 1 } },
+		capabilities: { image_input: { version: 1 }, thinking: { version: 1 } },
 		auth_methods: [{ id: "api_key", display_name: "AnyModel API key" }],
 	});
 	expect(JSON.stringify(manifest)).not.toContain('"usage"');
@@ -56,7 +56,10 @@ test("serves auth, models, chat, and unsupported usage over NDJSON", async () =>
 		},
 	});
 	servers.push(api);
-	const child = startProvider({ MISY_ANYMODEL_BASE_URL: `http://127.0.0.1:${api.port}` });
+	const child = startProvider({
+		MISY_ANYMODEL_BASE_URL: `http://127.0.0.1:${api.port}`,
+		MISY_ANYMODEL_PUBLIC_CATALOG_URL: "",
+	});
 	write(
 		child,
 		'{"jsonrpc":"2.0","id":1,"method":"auth.start",' +

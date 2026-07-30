@@ -198,8 +198,8 @@ fn rows_and_tabs(
                 .unwrap_or_else(|| provider.as_str().to_owned());
             let label = model.display_name.clone();
             let context = compact_context(model.context_window);
-            let description = model.description.as_deref().unwrap_or("Unknown");
-            let pricing = model.pricing.as_deref().unwrap_or("Unknown");
+            let description = model.description.as_deref().unwrap_or_default();
+            let pricing = model.pricing.as_deref().unwrap_or_default();
             let thinking = model.thinking.as_ref().map_or_else(
                 || "unavailable".to_owned(),
                 |thinking| format!("{} levels: {}", thinking.levels.len(), thinking.default),
@@ -214,17 +214,12 @@ fn rows_and_tabs(
                 thinking
             );
             let row = if selected_model == Some(&model.model) {
-                ListRow::current_with_search(
-                    model.model,
-                    label,
-                    Some(description.to_owned()),
-                    search,
-                )
+                ListRow::current_with_search(model.model, label, model.description.clone(), search)
             } else {
                 ListRow::selectable_with_search(
                     model.model,
                     label,
-                    Some(description.to_owned()),
+                    model.description.clone(),
                     search,
                 )
             };
@@ -349,7 +344,7 @@ mod tests {
         let row = picker.visible_rows(1).remove(0);
         assert_eq!(row.label, "Alpha");
         assert_eq!(row.context.as_deref(), Some("128k"));
-        assert_eq!(row.pricing.as_deref(), Some("Unknown"));
+        assert_eq!(row.pricing.as_deref(), Some(""));
         assert_eq!(row.provider.as_deref(), Some("fixture"));
         assert_eq!(row.description.as_deref(), Some("Fast general model"));
     }

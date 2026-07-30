@@ -19,7 +19,7 @@ function fakeServer(handler: (request: Request) => Response | Promise<Response>)
 }
 
 function provider(baseUrl: string): AnyModelProvider {
-	return new AnyModelProvider({ baseUrl, requestTimeoutMs: 500 });
+	return new AnyModelProvider({ baseUrl, requestTimeoutMs: 500, publicCatalogUrl: undefined });
 }
 
 test("validates the key through the ordered catalog and preserves qualified IDs", async () => {
@@ -48,19 +48,70 @@ test("validates the key through the ordered catalog and preserves qualified IDs"
 			display_name: "Sol",
 			context_window: 200_000,
 			input_modalities: ["text"],
-			pricing: "$5/30",
+			thinking: {
+				default: "low",
+				levels: [
+					{ id: "low", description: "Faster, lighter reasoning" },
+					{ id: "medium", description: "Balanced reasoning" },
+					{ id: "high", description: "Deeper reasoning" },
+					{ id: "xhigh", description: "Very deep reasoning" },
+					{ id: "max", description: "Maximum reasoning effort" },
+				],
+			},
 		},
 		{
 			id: "cc/claude-opus-5",
 			display_name: "cc/claude-opus-5",
 			context_window: 0,
 			input_modalities: ["text", "image"],
+			thinking: {
+				default: "low",
+				levels: [
+					{ id: "low", description: "Faster, lighter reasoning" },
+					{ id: "high", description: "Deeper reasoning" },
+				],
+			},
 		},
 	]);
 	expect(instance.defaultModel(models)).toBe("cx/gpt-5.6-sol");
 });
 
-test("preserves provider facts ahead of reference metadata", async () => {
+test("enriches missing facts from the official AnyModel catalog", async () => {
+	const baseUrl = fakeServer((request) => {
+		if (new URL(request.url).pathname === "/catalog") {
+			const card = JSON.stringify({
+				id: "cx/gpt-5.6-sol",
+				name: "GPT-5.6 Sol",
+				tagline: "Official AnyModel description",
+				price: { label: "$$0.10" },
+				context: "1M",
+			});
+			return new Response(
+				`<script>self.__next_f.push(${JSON.stringify([1, `"card":${card}`])})</script>`,
+			);
+		}
+		return Response.json({ data: [{ id: "cx/gpt-5.6-sol" }] });
+	});
+	const instance = new AnyModelProvider({
+		baseUrl,
+		requestTimeoutMs: 500,
+		publicCatalogUrl: `${baseUrl}/catalog`,
+		publicCatalogTimeoutMs: 500,
+		publicCatalogTtlMs: 86_400_000,
+	});
+
+	const [model] = await instance.listModels(credentials());
+
+	expect(model).toMatchObject({
+		id: "cx/gpt-5.6-sol",
+		display_name: "GPT-5.6 Sol",
+		context_window: 1_000_000,
+		description: "Official AnyModel description",
+		pricing: "$0.10",
+	});
+});
+
+test("preserves optional facts returned by the authenticated catalog", async () => {
 	const baseUrl = fakeServer(() =>
 		Response.json({
 			data: [
@@ -81,6 +132,10 @@ test("preserves provider facts ahead of reference metadata", async () => {
 			input_modalities: ["text"],
 			description: "Frontier coding model",
 			pricing: "$0.10 / 1M tokens",
+			thinking: {
+				default: "low",
+				levels: expect.any(Array),
+			},
 		},
 	]);
 });
@@ -128,6 +183,7 @@ test("streams text and fragmented tools with the exact upstream model id", async
 	await provider(baseUrl).streamChat(
 		{
 			model_id: "cx/gpt-5.6-sol",
+			thinking: "high",
 			max_output_tokens: 12_345,
 			messages: [{ role: "user", content: "inspect", attachments: [] }],
 			tools: [{ name: "read_file", description: "Read", input_schema: { type: "object" } }],
@@ -138,7 +194,12 @@ test("streams text and fragmented tools with the exact upstream model id", async
 		undefined,
 	);
 
-	expect(body).toMatchObject({ model: "cx/gpt-5.6-sol", max_tokens: 12_345, stream: true });
+	expect(body).toMatchObject({
+		model: "cx/gpt-5.6-sol",
+		max_tokens: 12_345,
+		reasoning_effort: "high",
+		stream: true,
+	});
 	expect(notifications).toContainEqual({
 		method: "tool_call",
 		request_id: 7,

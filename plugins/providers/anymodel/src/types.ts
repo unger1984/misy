@@ -19,4 +19,8 @@ export type Model = {
 	input_modalities: ("text" | "image")[];
 	description?: string;
 	pricing?: string;
+	thinking?: {
+		default: string;
+		levels: { id: string; description: string }[];
+	};
 };

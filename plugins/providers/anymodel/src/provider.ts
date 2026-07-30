@@ -90,6 +90,7 @@ export class AnyModelProvider {
 							request.messages,
 							request.tools,
 							request.max_output_tokens,
+							request.thinking,
 						),
 					),
 				},

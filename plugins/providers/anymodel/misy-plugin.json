@@ -5,7 +5,7 @@
 	"kind": "provider",
 	"protocol_version": 2,
 	"description": "AnyModel OpenAI-compatible API",
-	"capabilities": { "image_input": { "version": 1 } },
+	"capabilities": { "image_input": { "version": 1 }, "thinking": { "version": 1 } },
 	"auth_methods": [{ "id": "api_key", "display_name": "AnyModel API key" }],
 	"author": "Misy",
 	"homepage": "https://github.com/cobalt/misy",

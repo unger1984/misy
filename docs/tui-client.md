@@ -80,7 +80,7 @@ model, authentication, session, and tool orchestration remain in the core.
   `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
 - `/model` shows provider tabs and one compact table row per model with aligned model, context,
   cost, provider, and description columns. Narrow layouts hide description and then cost before
-  compressing identity columns. Missing description or pricing values are visibly marked `Unknown`.
+  compressing identity columns. Missing description or pricing values leave their cells blank.
   Models with multiple reasoning levels open a second picker before the profile is persisted.
   `/thinking` opens that level picker directly for the selected model, while the footer always
   shows the effective level.

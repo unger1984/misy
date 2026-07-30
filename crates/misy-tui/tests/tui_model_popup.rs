@@ -99,10 +99,10 @@ async fn model_picker_opens_from_cached_models_before_the_refresh_arrives() {
     assert!(rendered.contains("Cost"));
     assert!(rendered.contains("Provider"));
     assert!(rendered.contains("Fixture AI"));
-    assert!(rendered.contains("Unknown"));
+    assert!(!rendered.contains("Unknown"));
     let wide = buffer_lines(&render_buffer(client.state(), 120, 20), 120).join("\n");
     assert!(wide.contains("Description"), "{wide}");
-    assert!(wide.contains("Fixture AI  Unknown"), "{wide}");
+    assert!(!wide.contains("Unknown"), "{wide}");
     client.handle_ctrl_c();
 }
 

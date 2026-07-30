@@ -1,6 +1,7 @@
 /** Authenticated AnyModel catalog retrieval and conservative response normalization. */
-import { endpointUrl, fetchWithTimeout, referencePricing } from "@misy/provider-sdk";
+import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
+import { type PublicModelMetadata, publicModelMetadata } from "./public-catalog";
 import { type ApiKeyCredentials, isRecord, type Model } from "./types";
 
 /** Fetches and normalizes the non-empty authenticated AnyModel model catalog. */
@@ -33,7 +34,8 @@ export async function listModelCatalog(
 	}
 	const models = parseModelCatalog(payload);
 	if (models.length === 0) throw new Error("AnyModel model catalog contained no valid models");
-	return models;
+	const metadata = await publicModelMetadata(config);
+	return models.map((model) => enrichModel(model, metadata.get(model.id)));
 }
 
 /** Parses an OpenAI-style catalog without trusting optional vendor metadata. */
@@ -46,7 +48,7 @@ function normalizeModel(entry: unknown): Model[] {
 	if (!isRecord(entry) || typeof entry["id"] !== "string" || entry["id"].trim().length === 0)
 		return [];
 	const id = entry["id"];
-	const pricing = textMetadata(entry, "pricing") ?? referencePricing(id);
+	const thinking = thinkingMetadata(entry, id);
 	return [
 		{
 			id,
@@ -56,9 +58,65 @@ function normalizeModel(entry: unknown): Model[] {
 			...(textMetadata(entry, "description") === undefined
 				? {}
 				: { description: textMetadata(entry, "description") }),
-			...(pricing === undefined ? {} : { pricing }),
+			...(textMetadata(entry, "pricing") === undefined
+				? {}
+				: { pricing: textMetadata(entry, "pricing") }),
+			...(thinking === undefined ? {} : { thinking }),
 		},
 	];
+}
+
+function enrichModel(model: Model, metadata: PublicModelMetadata | undefined): Model {
+	if (!metadata) return model;
+	return {
+		...model,
+		display_name: model.display_name === model.id ? metadata.displayName : model.display_name,
+		context_window: model.context_window || metadata.contextWindow || 0,
+		...(model.description || !metadata.description ? {} : { description: metadata.description }),
+		...(model.pricing ? {} : { pricing: metadata.pricing }),
+	};
+}
+
+function thinkingMetadata(entry: Record<string, unknown>, id: string): Model["thinking"] {
+	const requestedDefault = textMetadata(entry, "default_reasoning_level");
+	const advertised = stringArray(entry["supported_reasoning_levels"]);
+	const fallback = fallbackThinkingLevels(id);
+	const levels = [
+		...new Set([...(requestedDefault ? [requestedDefault] : []), ...advertised, ...fallback]),
+	];
+	if (levels.length === 0) return undefined;
+	const defaultLevel =
+		requestedDefault && levels.includes(requestedDefault) ? requestedDefault : levels[0];
+	return {
+		default: defaultLevel ?? "low",
+		levels: levels.map((level) => ({ id: level, description: thinkingDescription(level) })),
+	};
+}
+
+function fallbackThinkingLevels(id: string): string[] {
+	const normalized = id.toLowerCase();
+	if (/(?:image|imagen|flux|black-forest)/.test(normalized)) return [];
+	if (/gpt-5[.-]6/.test(normalized)) return ["low", "medium", "high", "xhigh", "max"];
+	if (/gpt-5/.test(normalized)) return ["low", "medium", "high", "xhigh"];
+	return /(?:claude|gemini|glm-5|qwen3|kimi|\bk[23])/.test(normalized) ? ["low", "high"] : [];
+}
+
+function thinkingDescription(level: string): string {
+	const descriptions: Record<string, string> = {
+		low: "Faster, lighter reasoning",
+		medium: "Balanced reasoning",
+		high: "Deeper reasoning",
+		xhigh: "Very deep reasoning",
+		max: "Maximum reasoning effort",
+	};
+	return descriptions[level] ?? `Reasoning effort: ${level}`;
+}
+
+function stringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter(
+		(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+	);
 }
 
 function textMetadata(entry: Record<string, unknown>, field: string): string | undefined {

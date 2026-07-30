@@ -97,6 +97,12 @@ dropped events, blocked input, leaked processes, or credential exposure are plau
 Session tests use an injected `MisyPaths` root and must cover lazy creation, private permissions,
 append/resume round trips, malformed tails, schema rejection, cwd filtering, model fallback, and
 the active-submission switch guard without reading the user's real session directory.
+Role tests use injected global/project agent directories and cover precedence, invalid-file
+tombstones, tool allowlists, and hot reload. Compaction tests assert checkpoint-before-swap,
+canonical transcript preservation, active-history resume, projected-request thresholds, one
+same-profile overflow retry, cancellability, and strict token reduction. Fallback tests distinguish
+retryable profile failures from refusal, cancellation, malformed payload, and post-output failure.
+Provider catalog tests distinguish remote, bundled, stale, authenticated, and runnable states.
 
 ## Sources of Truth
 

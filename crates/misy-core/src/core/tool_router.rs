@@ -14,13 +14,19 @@ pub(crate) fn dispatch<'a>(
     call: &'a ToolCall,
 ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
     Box::pin(async move {
+        if state
+            .allowed_tools()
+            .is_some_and(|tools| !tools.contains(&call.name))
+        {
+            return ToolResult::error(
+                &call.id,
+                format!("tool `{}` is not allowed for this agent role", call.name),
+            );
+        }
         if let Err(error) = core.dispatcher.validate_arguments(call) {
             return ToolResult::error(&call.id, error.to_string());
         }
         if agents::is_agent_tool(&call.name) {
-            if !state.permits_agent_tools() {
-                return ToolResult::error(&call.id, "agent tools are unavailable to child agents");
-            }
             return agents::dispatch_agent_tool(core, state, call).await;
         }
         match call.name.as_str() {

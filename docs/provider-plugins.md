@@ -104,6 +104,10 @@ notification carries the numeric `request_id` of its `chat.start`; cancellation 
 
 `models.list` returns `models` and may include a provider-local `default_model` ID. The core uses
 that declared default when it is present and falls back to the first model for older providers.
+Each model may also provide bounded `description`, opaque display-only `pricing`, and `thinking`
+metadata containing an ordered level list and default level. Catalog results identify their source
+as `remote` or `bundled`; the core caches each provider atomically for fifteen minutes, preserves a
+stale catalog across transient refresh failures, and reports availability separately from age.
 
 ## Optional Capabilities
 
@@ -196,6 +200,18 @@ non-negative numbers, and a populated `limit` is positive. Supported units are `
 `tokens`, `requests`, `usd`, `minutes`, `bytes`, and `unknown`; statuses are `ok`, `warning`,
 `exhausted`, and `unknown`. The core rejects unknown fields and malformed, duplicate, oversized,
 or unsafe reports.
+
+### Thinking capability version 1
+
+A provider declaring `capabilities.thinking.version` as `1` accepts the optional provider-owned
+`thinking` string on `chat.start`. The core validates it against the selected model's catalog and
+omits the field for providers without the capability. A `completed` notification may additionally
+include normalized non-negative `input_tokens` and `output_tokens`; these are diagnostic usage,
+not account-limit data.
+
+`chat.start` may include a positive `max_output_tokens`. Providers translate that core-owned
+budget to their remote protocol's output-token field; compaction requests use it to bound summary
+generation.
 
 Before calling the provider, the core verifies the manifest declaration, uses the snapshotted
 selected `ModelRef`, refreshes credentials when needed, injects opaque credentials, and enforces a

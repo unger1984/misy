@@ -100,14 +100,15 @@ flowchart LR
     draining. The model is not notified when a background command finishes: it must pull new output
     and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed
     once, while the terminal summary and client snapshot remain in the recent-task registry.
-14. A main conversation may spawn up to four process-local child-agent sessions. Each child owns
-    an ephemeral history, cancellation/request slots, inbox, model selection, and command owner;
-    only the main history is persisted. Children inherit a completed parent-history prefix and
-    cannot recursively spawn agents. Concurrent chats on one provider are routed by request ID.
+14. Agent concurrency is one root-inclusive tree limit, configurable from 1 through 64. Every
+    child owns ephemeral history, cancellation/request slots, an immutable role/profile/tool
+    snapshot, inbox, and command owner; only root history is persisted. Nested spawning is allowed
+    only when `spawn_agent` survives the parent and role allowlist intersection. Canonical paths
+    provide stable addressing, and stopping a parent cancels its descendants.
 15. Background agent results reserve one of eight lossless mailbox slots and are pulled by the
     model with `agent_wait`; `AgentFinished` independently informs clients. Child commands share
     the 64-process limit, are capped at 48 collectively and 16 per child, and are reaped before
-    terminal agent publication. Main plus four active child histories retain at most 100 MiB of
+    terminal agent publication. Root plus active child histories retain at most 100 MiB of
     image payloads; retained semantic transcripts omit image bytes and use a 1 MiB budget.
 16. Agent records belong to the current root-conversation generation. Session switching refuses
     live, mailbox, or retained agent state until a client explicitly confirms discard. Shutdown
@@ -125,6 +126,20 @@ flowchart LR
     caches and active scopes are agent-session-local. A validated tool batch that discovers a new
     nested scope is retried as a whole before any handler runs. Instruction contents and internal
     retry turns are never appended to conversation JSONL or client transcripts.
+19. Model selection is one atomic `ModelProfile`: provider/model plus optional provider-owned
+    thinking level. A reasoning-only change is persisted separately as `thinking_change`. Exact
+    profile chains are preflighted in order. Runtime fallback is allowed only for profile-specific,
+    capacity, network, or server failures before the first ordinary assistant text or tool-call
+    start; cancellation, policy denial, malformed common input, and refusals remain terminal.
+    Context overflow receives exactly one compaction and same-profile retry before fallback.
+20. Sessions keep an append-only canonical transcript and a derived provider-facing active
+    history. Manual, threshold, overflow, or model-downshift compaction persists a checkpoint
+    before replacing the active projection, preserves recent user turns, and resumes from the
+    latest valid checkpoint without deleting visible history. A downshift compacts with the old
+    profile before changing selection. Default reserve is 20% of the context window clamped to
+    8,000–50,000 tokens; the threshold is the lesser of the configured ratio and window minus
+    reserve, including the pending request. Summary output is half the reserve clamped to
+    2,000–16,000 tokens and never reintroduces built-in, role, or `AGENTS.md` instructions.
 
 ## Fixed Constraints
 

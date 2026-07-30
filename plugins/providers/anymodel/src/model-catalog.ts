@@ -54,8 +54,19 @@ function normalizeModel(entry: unknown): Model[] {
 			display_name: displayName(entry, id),
 			context_window: contextWindow(entry),
 			input_modalities: inputModalities(entry),
+			...(textMetadata(entry, "description") === undefined
+				? {}
+				: { description: textMetadata(entry, "description") }),
+			...(textMetadata(entry, "pricing") === undefined
+				? {}
+				: { pricing: textMetadata(entry, "pricing") }),
 		},
 	];
+}
+
+function textMetadata(entry: Record<string, unknown>, field: string): string | undefined {
+	const value = entry[field];
+	return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function displayName(entry: Record<string, unknown>, id: string): string {

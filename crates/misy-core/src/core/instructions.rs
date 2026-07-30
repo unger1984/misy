@@ -214,8 +214,28 @@ impl InstructionSession {
         self.submission_active = false;
     }
 
+    pub(crate) fn restart_submission(&mut self) {
+        self.finish_submission();
+        self.begin_submission();
+    }
+
     pub(crate) fn rendered(&self, child: bool) -> RenderedInstructions {
         self.render(child)
+    }
+
+    pub(crate) fn rendered_with_role(
+        &self,
+        child: bool,
+        role_instructions: Option<&str>,
+    ) -> RenderedInstructions {
+        let mut rendered = self.render(child);
+        if let Some(instructions) = role_instructions {
+            rendered.system_prompt = format!(
+                "{}\n\n[active child role]\n{instructions}",
+                rendered.system_prompt
+            );
+        }
+        rendered
     }
 
     pub(crate) fn report_sources(

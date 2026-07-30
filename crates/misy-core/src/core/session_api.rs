@@ -57,6 +57,12 @@ impl MisyCore {
             .todos
             .lock()
             .map_err(|_| SessionError::StatePoisoned)?;
+        let mut active_history = self
+            .inner
+            .state
+            .active_history
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?;
         let mut session = self
             .inner
             .state
@@ -70,6 +76,7 @@ impl MisyCore {
             .lock()
             .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?;
         history.clear();
+        active_history.clear();
         todos.clear();
         session.detach();
         instructions.replace(instruction_root);
@@ -117,6 +124,12 @@ impl MisyCore {
             .todos
             .lock()
             .map_err(|_| SessionError::StatePoisoned)?;
+        let mut active_history = self
+            .inner
+            .state
+            .active_history
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)?;
         let mut session = self
             .inner
             .state
@@ -130,6 +143,7 @@ impl MisyCore {
             .lock()
             .map_err(|_| CoreError::Runtime("instruction runtime is poisoned".to_owned()))?;
         *history = loaded.history.clone();
+        *active_history = loaded.active_history.clone();
         *todos = loaded.todos.clone();
         session.attach(&loaded);
         instructions.replace(instruction_root);
@@ -137,11 +151,15 @@ impl MisyCore {
         drop(instructions);
         drop(session);
         drop(history);
-        let warning = self.restore_saved_model(loaded.summary.model.as_ref());
+        let warning = self.restore_saved_profile(
+            loaded.summary.model.as_ref(),
+            loaded.summary.thinking.as_deref(),
+        );
         Ok(ResumeOutcome {
             session: loaded.summary,
             history_len: loaded.history.len(),
             history: loaded.history,
+            compactions: loaded.compactions,
             todos: loaded.todos,
             model_warning: warning,
         })
@@ -181,17 +199,50 @@ impl MisyCore {
         Ok(queue)
     }
 
-    fn restore_saved_model(&self, saved: Option<&ModelRef>) -> Option<String> {
+    fn restore_saved_profile(
+        &self,
+        saved: Option<&ModelRef>,
+        saved_thinking: Option<&str>,
+    ) -> Option<String> {
         let saved = saved?;
         let available = self.inner.state.model_cache.load();
-        if available.iter().any(|model| &model.model == saved) {
+        if let Some(info) = available.iter().find(|model| &model.model == saved) {
+            let capability = self
+                .inner
+                .state
+                .catalog
+                .get(&saved.provider)
+                .is_some_and(|package| package.manifest().supports_capability("thinking", 1));
+            let supported_saved = saved_thinking.filter(|selected| {
+                capability
+                    && info.thinking.as_ref().is_some_and(|thinking| {
+                        thinking.levels.iter().any(|level| level.id == *selected)
+                    })
+            });
+            let effective_thinking = supported_saved.map(ToOwned::to_owned).or_else(|| {
+                capability
+                    .then(|| {
+                        info.thinking
+                            .as_ref()
+                            .map(|thinking| thinking.default.clone())
+                    })
+                    .flatten()
+            });
             if let Ok(mut selected) = self.inner.state.selected_model.lock() {
                 *selected = Some(saved.clone());
+            }
+            if let Ok(mut selected) = self.inner.state.selected_thinking.lock() {
+                *selected = effective_thinking;
             }
             self.emit(&CoreEvent::ModelSelected {
                 model: saved.clone(),
             });
-            return None;
+            return (saved_thinking.is_some() && supported_saved.is_none()).then(|| {
+                format!(
+                    "saved thinking level `{}` is unavailable; using the provider default",
+                    saved_thinking.unwrap_or_default()
+                )
+            });
         }
         Some(format!(
             "saved model `{}/{}` is unavailable; keeping the current model",
@@ -242,7 +293,32 @@ impl CoreState {
             .session
             .lock()
             .map_err(|_| SessionError::StatePoisoned)
-            .and_then(|mut session| session.append_model(model));
+            .and_then(|mut session| {
+                let thinking = self
+                    .selected_thinking
+                    .lock()
+                    .ok()
+                    .and_then(|thinking| thinking.clone());
+                session.append_model(model, thinking)
+            });
+        if let Err(error) = result {
+            self.emit(&CoreEvent::SessionPersistenceFailed {
+                message: error.to_string(),
+            });
+        }
+    }
+
+    pub(super) fn persist_thinking_change(&self, thinking: Option<String>) {
+        let model = self
+            .selected_model
+            .lock()
+            .ok()
+            .and_then(|model| model.clone());
+        let result = self
+            .session
+            .lock()
+            .map_err(|_| SessionError::StatePoisoned)
+            .and_then(|mut session| session.append_thinking(thinking, model));
         if let Err(error) = result {
             self.emit(&CoreEvent::SessionPersistenceFailed {
                 message: error.to_string(),

@@ -11,7 +11,19 @@ export type Model = {
 	display_name: string;
 	context_window: number;
 	input_modalities: ("text" | "image")[];
+	description?: string;
+	thinking: {
+		default: string;
+		levels: { id: string; description: string }[];
+	};
 };
+
+let lastCatalogSource: "remote" | "bundled" = "bundled";
+
+/** Returns the source of the most recently resolved catalog. */
+export function catalogSource(): "remote" | "bundled" {
+	return lastCatalogSource;
+}
 
 const BUNDLED_MODELS: readonly Model[] = [
 	imageModel({ id: "claude-opus-4-8", display_name: "Claude Opus 4.8", context_window: 1_000_000 }),
@@ -45,8 +57,11 @@ export async function listModels(
 			config.requestTimeoutMs,
 		);
 		if (!response.ok) throw new Error(`Anthropic model listing failed (${response.status})`);
-		return parseModels(await response.json());
+		const models = parseModels(await response.json());
+		lastCatalogSource = "remote";
+		return models;
 	} catch {
+		lastCatalogSource = "bundled";
 		return bundledModels();
 	}
 }
@@ -85,11 +100,24 @@ function parseModel(value: Json): Model {
 		display_name: typeof displayName === "string" && displayName.length > 0 ? displayName : id,
 		context_window: contextWindow(id),
 		input_modalities: ["text", "image"],
+		description: `Anthropic ${typeof displayName === "string" ? displayName : id}`,
+		thinking: thinkingMetadata(),
 	};
 }
 
-function imageModel(model: Omit<Model, "input_modalities">): Model {
-	return { ...model, input_modalities: ["text", "image"] };
+function imageModel(model: Omit<Model, "input_modalities" | "thinking">): Model {
+	return { ...model, thinking: thinkingMetadata(), input_modalities: ["text", "image"] };
+}
+
+function thinkingMetadata(): Model["thinking"] {
+	return {
+		default: "medium",
+		levels: [
+			{ id: "low", description: "Faster, lighter extended thinking" },
+			{ id: "medium", description: "Balanced extended thinking" },
+			{ id: "high", description: "Deeper extended thinking" },
+		],
+	};
 }
 
 function contextWindow(id: string): number {

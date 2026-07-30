@@ -60,7 +60,8 @@ fn write_fixture_manifest(root: &Path, id: &str, fixture: &Path, target: &Path) 
   "description": "Core fixture",
   "capabilities": {{
     "usage": {{"version": 1}},
-    "image_input": {{"version": 1}}
+    "image_input": {{"version": 1}},
+    "thinking": {{"version": 1}}
   }},
   "author": "Misy",
   "homepage": "https://example.test/plugin",

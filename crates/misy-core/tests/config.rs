@@ -64,7 +64,10 @@ fn config_store_refuses_to_write_an_unsupported_format_version() {
     let unsupported = Config {
         version: 3,
         default_model: None,
+        default_thinking: None,
         keybindings: Default::default(),
+        agents: Default::default(),
+        compaction: Default::default(),
     };
 
     let error = store

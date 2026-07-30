@@ -1,7 +1,10 @@
 //! Cheap, in-memory state snapshots for headless-core clients.
 
 use super::{MisyCore, SubmissionId};
-use crate::{ActivitySummary, AgentSummary, ModelRef, ProviderId, QuestionRequest, TodoItem};
+use crate::{
+    ActivitySummary, AgentSummary, CompactionActivity, ModelRef, ProviderId, QuestionRequest,
+    TodoItem,
+};
 
 const MAX_TERMINAL_ACTIVITIES: usize = 20;
 
@@ -19,12 +22,16 @@ pub struct ProviderAuthState {
 /// A point-in-time projection of client-visible core state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreSnapshot {
+    /// Active context compaction, when provider-facing history is being summarized.
+    pub compaction: Option<CompactionActivity>,
     /// Active activities followed by the most recent terminal activities.
     pub activities: Vec<ActivitySummary>,
     /// Live child agents followed by retained terminal child agents.
     pub agents: Vec<AgentSummary>,
     /// Model selected for direct interaction, if any.
     pub selected_model: Option<ModelRef>,
+    /// Effective provider-owned reasoning level paired with the selected model.
+    pub selected_thinking: Option<String>,
     /// Submission currently occupying the FIFO session slot, if any.
     ///
     /// A terminal submission event is published only after this field no longer contains that
@@ -57,6 +64,16 @@ impl MisyCore {
             .selected_model
             .lock()
             .expect("selected model mutex must not be poisoned");
+        let compaction = state
+            .compaction
+            .lock()
+            .expect("compaction mutex must not be poisoned")
+            .as_ref()
+            .map(|(activity, _)| activity.clone());
+        let selected_thinking = state
+            .selected_thinking
+            .lock()
+            .expect("selected thinking mutex must not be poisoned");
         let submission_queue = state
             .submission_queue
             .lock()
@@ -92,9 +109,11 @@ impl MisyCore {
             terminal_count <= MAX_TERMINAL_ACTIVITIES
         });
         CoreSnapshot {
+            compaction,
             activities,
             agents,
             selected_model: selected_model.clone(),
+            selected_thinking: selected_thinking.clone(),
             active_submission,
             queued_submissions,
             providers: credential_states

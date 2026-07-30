@@ -1,7 +1,9 @@
 //! Process-local child-agent admission, addressing, inbox, and mailbox state.
 
 use super::{AgentId, AgentSummary, AgentTranscript, TranscriptBuffer};
-use crate::{ActivityId, ActivityStatus, CoreError, ModelRef, core::ActiveSubmission};
+use crate::{
+    ActivityId, ActivityStatus, AgentAttempt, CoreError, ModelProfile, core::ActiveSubmission,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
@@ -12,7 +14,6 @@ use std::{
 };
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 
-const MAX_LIVE_AGENTS: usize = 4;
 const MAX_MAILBOX_RESULTS: usize = 8;
 const MAX_RECENT_AGENTS: usize = 20;
 
@@ -57,6 +58,17 @@ pub(crate) struct AgentRegistry {
     inner: Arc<AgentRegistryInner>,
 }
 
+pub(crate) struct AgentRegistration {
+    pub(super) activity_id: ActivityId,
+    pub(super) title: String,
+    pub(super) profiles: Vec<ModelProfile>,
+    pub(super) parent: Option<AgentId>,
+    pub(super) task_name: String,
+    pub(super) role: String,
+    pub(super) task: String,
+    pub(super) run_in_background: bool,
+}
+
 #[derive(Debug)]
 struct AgentRegistryInner {
     records: Mutex<BTreeMap<AgentId, Arc<AgentRecord>>>,
@@ -71,13 +83,13 @@ struct AgentRegistryInner {
 }
 
 impl AgentRegistry {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(max_threads: usize) -> Self {
         Self {
             inner: Arc::new(AgentRegistryInner {
                 records: Mutex::new(BTreeMap::new()),
                 recent: Mutex::new(VecDeque::new()),
                 mailbox: Mutex::new(VecDeque::new()),
-                live_slots: Arc::new(Semaphore::new(MAX_LIVE_AGENTS)),
+                live_slots: Arc::new(Semaphore::new(max_threads.saturating_sub(1))),
                 mailbox_slots: Arc::new(Semaphore::new(MAX_MAILBOX_RESULTS)),
                 next_id: AtomicU64::new(1),
                 generation: AtomicU64::new(1),
@@ -89,12 +101,21 @@ impl AgentRegistry {
 
     pub(super) fn register(
         &self,
-        activity_id: ActivityId,
-        title: String,
-        model: ModelRef,
-        task: &str,
-        run_in_background: bool,
+        registration: AgentRegistration,
     ) -> Result<Arc<AgentRecord>, CoreError> {
+        let AgentRegistration {
+            activity_id,
+            title,
+            profiles,
+            parent,
+            task_name,
+            role,
+            task,
+            run_in_background,
+        } = registration;
+        let profile = profiles.first().cloned().ok_or_else(|| {
+            CoreError::Runtime("agent profile chain must not be empty".to_owned())
+        })?;
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(CoreError::Shutdown);
         }
@@ -110,6 +131,34 @@ impl AgentRegistry {
         } else {
             None
         };
+        if task_name.is_empty()
+            || !task_name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(CoreError::InvalidAgentTaskName(
+                "task_name must match ^[a-z0-9_]+$".to_owned(),
+            ));
+        }
+        let mut records = self
+            .inner
+            .records
+            .lock()
+            .expect("agent records mutex must not be poisoned");
+        if records.values().any(|record| {
+            let summary = record.summary();
+            record.generation == self.current_generation()
+                && summary.parent == parent
+                && summary.task_name == task_name
+        }) {
+            return Err(CoreError::InvalidAgentTaskName(format!(
+                "task_name `{task_name}` is already used by a sibling"
+            )));
+        }
+        let parent_path = parent
+            .and_then(|id| records.get(&id).map(|record| record.summary().path))
+            .unwrap_or_else(|| "/root".to_owned());
+        let path = format!("{parent_path}/{task_name}");
         let id = AgentId::new(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         let generation = self.current_generation();
         let record = Arc::new(AgentRecord {
@@ -117,16 +166,28 @@ impl AgentRegistry {
             state: Mutex::new(AgentRecordState {
                 summary: AgentSummary {
                     id,
+                    parent,
+                    path,
+                    task_name,
+                    role,
                     activity_id,
                     title,
-                    model,
+                    model: profile.model.clone(),
+                    thinking: profile.thinking.clone(),
+                    attempts: vec![AgentAttempt {
+                        profile,
+                        status: "trying".to_owned(),
+                        reason: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                    }],
                     status: ActivityStatus::Running,
                     run_in_background,
                     started_at_ms: now_millis(),
                     finished_at_ms: None,
                     terminal_message: None,
                 },
-                transcript: TranscriptBuffer::assignment(task, 0),
+                transcript: TranscriptBuffer::assignment(&task, 0),
                 inbox: VecDeque::new(),
                 inbox_open: true,
                 final_result: None,
@@ -137,11 +198,7 @@ impl AgentRegistry {
             }),
             terminal_changed: Notify::new(),
         });
-        self.inner
-            .records
-            .lock()
-            .expect("agent records mutex must not be poisoned")
-            .insert(id, Arc::clone(&record));
+        records.insert(id, Arc::clone(&record));
         Ok(record)
     }
 
@@ -412,7 +469,7 @@ impl AgentRegistry {
 
 impl Default for AgentRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(4)
     }
 }
 

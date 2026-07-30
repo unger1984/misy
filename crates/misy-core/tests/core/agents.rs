@@ -28,6 +28,94 @@ async fn prepare_agent_core(name: &str) -> (tempfile::TempDir, MisyCore, PathBuf
     fixture
 }
 
+async fn wait_for_agent_finish(core: &MisyCore, events: &mut UnboundedReceiver<CoreEvent>) {
+    loop {
+        if core
+            .snapshot()
+            .agents
+            .first()
+            .is_some_and(|agent| agent.status.is_terminal())
+        {
+            return;
+        }
+        if matches!(receive_event(events).await, CoreEvent::AgentFinished { .. }) {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn child_fallback_retries_only_a_safe_retryable_failure() {
+    let (_temporary, core, _) = prepare_agent_core("fallback-retryable").await;
+    let mut events = core.subscribe_lossless();
+    let submission = core
+        .submit(Message::user("spawn-fallback-retryable"))
+        .await
+        .expect("submit fallback request");
+    receive_until(&mut events, submission, |_| false).await;
+
+    let agent = core.snapshot().agents[0].clone();
+    assert_eq!(agent.status, ActivityStatus::Completed);
+    assert_eq!(agent.attempts.len(), 2);
+    assert_eq!(agent.attempts[0].status, "failed");
+    assert_eq!(agent.attempts[1].status, "completed");
+    assert_eq!(
+        agent.terminal_message.as_deref(),
+        Some("fallback-recovered")
+    );
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn exhausted_fallback_reports_each_bounded_profile_failure() {
+    let (_temporary, core, _) = prepare_agent_core("fallback-exhausted").await;
+    let mut events = core.subscribe_lossless();
+    let submission = core
+        .submit(Message::user("spawn-fallback-exhausted"))
+        .await
+        .expect("submit exhausted fallback request");
+    receive_until(&mut events, submission, |_| false).await;
+    wait_for_agent_finish(&core, &mut events).await;
+
+    let agent = core.snapshot().agents[0].clone();
+    assert_eq!(agent.status, ActivityStatus::Failed);
+    assert_eq!(agent.attempts.len(), 2);
+    let result = agent.terminal_message.expect("terminal failure");
+    assert!(
+        result.contains("fixture/fixture-model: rate limit exceeded"),
+        "terminal result: {result}"
+    );
+    assert!(
+        result.contains("fixture/fixture-model-b: server unavailable"),
+        "terminal result: {result}"
+    );
+    assert!(result.len() <= 2_048);
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn refusal_and_post_output_failure_do_not_cross_the_fallback_boundary() {
+    for (name, prompt) in [
+        ("fallback-refusal", "spawn-fallback-refusal"),
+        ("fallback-after-output", "spawn-fallback-after-output"),
+        ("fallback-after-tool", "spawn-fallback-after-tool"),
+    ] {
+        let (_temporary, core, _) = prepare_agent_core(name).await;
+        let mut events = core.subscribe_lossless();
+        let submission = core
+            .submit(Message::user(prompt))
+            .await
+            .expect("submit terminal fallback request");
+        receive_until(&mut events, submission, |_| false).await;
+        wait_for_agent_finish(&core, &mut events).await;
+
+        let agent = core.snapshot().agents[0].clone();
+        assert_eq!(agent.status, ActivityStatus::Failed);
+        assert_eq!(agent.attempts.len(), 1);
+        core.shutdown().await.expect("shutdown");
+    }
+}
+
 #[tokio::test]
 async fn synchronous_agent_returns_inline_without_mutating_parent_with_its_assignment() {
     let (_temporary, core, _) = prepare_agent_core("spawn-sync").await;

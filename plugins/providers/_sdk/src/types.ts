@@ -64,6 +64,10 @@ export type ChatMessage = Record<string, Json> & {
 /** A validated `chat.start` request handed to the provider adapter. */
 export type ChatRequest<TCredentials extends ProviderCredentials = OAuthCredentials> = {
 	model_id: string;
+	/** Optional provider-owned thinking level, negotiated through capability `thinking` v1. */
+	thinking?: string;
+	/** Optional core-owned output ceiling used by maintenance turns such as compaction. */
+	max_output_tokens?: number;
 	messages: readonly ChatMessage[];
 	tools: readonly ToolDefinition[];
 	credentials: TCredentials;

@@ -14,6 +14,11 @@ impl UiState {
         if self.snapshot.active_submission != snapshot.active_submission {
             self.capture_turn_transition(snapshot.active_submission, now);
         }
+        if self.snapshot.compaction.is_none() && snapshot.compaction.is_some() {
+            self.compaction_started_at = Some(now);
+        } else if snapshot.compaction.is_none() {
+            self.compaction_started_at = None;
+        }
         let activities = snapshot.activities.clone();
         let agents = snapshot.agents.clone();
         self.snapshot = snapshot;

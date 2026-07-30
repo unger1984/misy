@@ -44,6 +44,10 @@ pub const IMAGE_INPUT_CAPABILITY: &str = "image_input";
 
 /// Image-input capability contract revision supported by this host.
 pub const IMAGE_INPUT_CAPABILITY_VERSION: u32 = 1;
+/// Optional provider-owned reasoning control capability identifier.
+pub const THINKING_CAPABILITY: &str = "thinking";
+/// Thinking capability contract revision supported by this host.
+pub const THINKING_CAPABILITY_VERSION: u32 = 1;
 /// Maximum encoded size of one newline-delimited provider protocol frame.
 pub(crate) const MAX_PROTOCOL_FRAME_BYTES: usize = 32 * 1024 * 1024;
 

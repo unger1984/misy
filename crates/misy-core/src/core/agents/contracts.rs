@@ -1,8 +1,8 @@
 //! Public projections for independent child-agent sessions.
 
 use crate::{
-    ActivityId, ActivityKind, ActivityStatus, ActivitySummary, InstructionSourceSummary, ModelRef,
-    ToolCall, ToolResult,
+    ActivityId, ActivityKind, ActivityStatus, ActivitySummary, InstructionSourceSummary,
+    ModelProfile, ModelRef, ToolCall, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -35,12 +35,28 @@ impl fmt::Display for AgentId {
 pub struct AgentSummary {
     /// Stable process-local child identifier.
     pub id: AgentId,
+    /// Parent agent, or `None` for a direct child of root.
+    pub parent: Option<AgentId>,
+    /// Stable root-qualified task path.
+    #[serde(default)]
+    pub path: String,
+    /// Stable sibling-unique task segment.
+    #[serde(default)]
+    pub task_name: String,
+    /// Applied immutable role snapshot name.
+    #[serde(default)]
+    pub role: String,
     /// Shared activity identifier used by generic client actions.
     pub activity_id: ActivityId,
     /// Presentation label derived from the assignment or explicit description.
     pub title: String,
     /// Provider-scoped model used by the child.
     pub model: ModelRef,
+    /// Effective provider-owned reasoning level.
+    pub thinking: Option<String>,
+    /// Ordered profile attempts retained for snapshot recovery.
+    #[serde(default)]
+    pub attempts: Vec<AgentAttempt>,
     /// Current child lifecycle state.
     pub status: ActivityStatus,
     /// Whether the spawning tool call returned before the child completed.
@@ -51,6 +67,21 @@ pub struct AgentSummary {
     pub finished_at_ms: Option<u64>,
     /// Bounded terminal result or failure description.
     pub terminal_message: Option<String>,
+}
+
+/// One observable model-profile attempt made by a child turn.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAttempt {
+    /// Candidate profile.
+    pub profile: ModelProfile,
+    /// Stable lifecycle state: `trying`, `failed`, `switching`, or `completed`.
+    pub status: String,
+    /// Bounded redacted reason when the attempt failed.
+    pub reason: Option<String>,
+    /// Optional provider-reported input tokens.
+    pub input_tokens: Option<u64>,
+    /// Optional provider-reported output tokens.
+    pub output_tokens: Option<u64>,
 }
 
 impl AgentSummary {

@@ -131,6 +131,12 @@ function parseModel(value: unknown): CatalogEntry | undefined {
 				? ["text", "image"]
 				: ["text"],
 		protocol: modelProtocol(value["protocol"]),
+		...(typeof value["description"] === "string" && value["description"].trim()
+			? { description: value["description"] }
+			: {}),
+		...(typeof value["pricing"] === "string" && value["pricing"].trim()
+			? { pricing: value["pricing"] }
+			: {}),
 	};
 }
 

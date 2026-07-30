@@ -3,7 +3,7 @@
 use super::registry::{AgentRecord, InboxDecision, now_millis};
 use crate::{
     ActivityStatus, AgentSummary, AgentTranscript, CoreError, HistoryEntry,
-    InstructionSourceSummary, MessageRole, core::ActiveSubmission,
+    InstructionSourceSummary, MessageRole, ModelProfile, core::ActiveSubmission,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -112,6 +112,90 @@ impl AgentRecord {
             .set_instruction_sources(sources);
     }
 
+    pub(super) fn switch_attempt(&self, reason: &str, next: &ModelProfile) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("agent record mutex must not be poisoned");
+        if let Some(current) = state
+            .summary
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.status == "trying")
+        {
+            current.status = "failed".to_owned();
+            current.reason = Some(bounded_reason(reason));
+        }
+        state.summary.attempts.push(crate::AgentAttempt {
+            profile: next.clone(),
+            status: "trying".to_owned(),
+            reason: None,
+            input_tokens: None,
+            output_tokens: None,
+        });
+        state.summary.model = next.model.clone();
+        state.summary.thinking = next.thinking.clone();
+    }
+
+    pub(super) fn fail_attempt(&self, reason: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("agent record mutex must not be poisoned");
+        if let Some(current) = state
+            .summary
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.status == "trying")
+        {
+            current.status = "failed".to_owned();
+            current.reason = Some(bounded_reason(reason));
+        }
+    }
+
+    pub(super) fn exhausted_profiles(&self) -> String {
+        let state = self
+            .state
+            .lock()
+            .expect("agent record mutex must not be poisoned");
+        let mut message = String::from("all model profiles failed");
+        for attempt in &state.summary.attempts {
+            let Some(reason) = attempt.reason.as_deref() else {
+                continue;
+            };
+            message.push_str("; ");
+            message.push_str(&attempt.profile.selector());
+            message.push_str(": ");
+            message.push_str(reason);
+            if message.chars().count() >= 2_048 {
+                return message.chars().take(2_045).collect::<String>() + "...";
+            }
+        }
+        message
+    }
+
+    pub(super) fn complete_attempt(
+        &self,
+        completed: bool,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("agent record mutex must not be poisoned");
+        if let Some(current) = state
+            .summary
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.status == "trying")
+        {
+            current.status = if completed { "completed" } else { "failed" }.to_owned();
+            current.input_tokens = input_tokens;
+            current.output_tokens = output_tokens;
+        }
+    }
+
     pub(super) fn finish(&self, status: ActivityStatus, result: &str) -> bool {
         let mut state = self
             .state
@@ -160,4 +244,11 @@ impl AgentRecord {
             .expect("agent record mutex must not be poisoned")
             .mailbox_pending
     }
+}
+
+fn bounded_reason(reason: &str) -> String {
+    crate::providers::sanitize_remote_message(reason)
+        .chars()
+        .take(512)
+        .collect()
 }

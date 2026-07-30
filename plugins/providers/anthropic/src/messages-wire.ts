@@ -19,6 +19,8 @@ export function createMessagesRequest(
 	model: string,
 	messages: readonly Record<string, unknown>[],
 	tools: readonly ToolDefinition[],
+	thinking?: string,
+	maxOutputTokens?: number,
 ): Record<string, Json> {
 	const system = messages
 		.filter((message) => message["role"] === "system")
@@ -27,12 +29,21 @@ export function createMessagesRequest(
 		.join("\n\n");
 	return {
 		model,
-		max_tokens: 64_000,
+		max_tokens: maxOutputTokens ?? 64_000,
 		stream: true,
+		...(thinking === undefined
+			? {}
+			: { thinking: { type: "enabled", budget_tokens: thinkingBudget(thinking) } }),
 		...(system.length > 0 ? { system } : {}),
 		messages: messages.filter((message) => message["role"] !== "system").map(messageBody),
 		tools: tools.map(toolBody),
 	};
+}
+
+function thinkingBudget(level: string): number {
+	const budget = { low: 4_096, medium: 16_384, high: 32_768 }[level];
+	if (budget === undefined) throw new Error(`Unsupported Anthropic thinking level: ${level}`);
+	return budget;
 }
 
 /** Converts Anthropic SSE events into Misy notifications and completion metadata. */

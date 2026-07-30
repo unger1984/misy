@@ -9,7 +9,8 @@ pub(super) fn requires_refresh(event: &CoreEvent) -> bool {
     // here so its refresh decision is made explicitly, not silently default
     // to `false` and leave a stale projection behind.
     match event {
-        CoreEvent::ActivityChanged { .. }
+        CoreEvent::CompactionChanged { .. }
+        | CoreEvent::ActivityChanged { .. }
         | CoreEvent::ActivityFinished { .. }
         | CoreEvent::AgentFinished { .. }
         | CoreEvent::AuthenticationChanged { .. }
@@ -42,7 +43,8 @@ pub(super) fn affects_provider_choices(event: &CoreEvent) -> bool {
     // must fail compilation so its effect on the picker is decided here.
     match event {
         CoreEvent::AuthenticationChanged { .. } => true,
-        CoreEvent::ActivityChanged { .. }
+        CoreEvent::CompactionChanged { .. }
+        | CoreEvent::ActivityChanged { .. }
         | CoreEvent::ActivityFinished { .. }
         | CoreEvent::AgentFinished { .. }
         | CoreEvent::ProviderDiscovered { .. }

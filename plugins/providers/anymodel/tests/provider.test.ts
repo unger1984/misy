@@ -102,6 +102,7 @@ test("streams text and fragmented tools with the exact upstream model id", async
 	await provider(baseUrl).streamChat(
 		{
 			model_id: "cx/gpt-5.6-sol",
+			max_output_tokens: 12_345,
 			messages: [{ role: "user", content: "inspect", attachments: [] }],
 			tools: [{ name: "read_file", description: "Read", input_schema: { type: "object" } }],
 			credentials: credentials(),
@@ -111,7 +112,7 @@ test("streams text and fragmented tools with the exact upstream model id", async
 		undefined,
 	);
 
-	expect(body).toMatchObject({ model: "cx/gpt-5.6-sol", stream: true });
+	expect(body).toMatchObject({ model: "cx/gpt-5.6-sol", max_tokens: 12_345, stream: true });
 	expect(notifications).toContainEqual({
 		method: "tool_call",
 		request_id: 7,

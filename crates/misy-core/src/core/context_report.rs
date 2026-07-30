@@ -31,7 +31,7 @@ impl MisyCore {
             .as_ref()
             .is_some_and(|model| core.model_supports(model, InputModality::Image));
         let history = core
-            .history
+            .active_history
             .lock()
             .expect("history mutex must not be poisoned")
             .clone();
@@ -48,19 +48,26 @@ impl MisyCore {
         let system_tokens = estimate_tokens(&rendered.system_prompt);
         let misy_tokens = estimate_tokens(BUILTIN_INSTRUCTIONS);
         let agent_tokens = system_tokens.saturating_sub(misy_tokens);
-        let tools = core.dispatcher.definitions_for_client(
+        let roles = core.discover_roles();
+        let role_catalog = super::roles::parent_catalog_description(&roles);
+        let mut tools = core.dispatcher.definitions_for_client(
             supports_images,
             core.client_capabilities.question_request == Some(1),
         );
-        let tool_tokens = encoded_tokens(&tools);
-        let serialized = history
-            .iter()
-            .map(|entry| super::turn::serialize_history_entry(entry, supports_images))
-            .collect::<Vec<_>>();
-        let message_tokens = encoded_tokens(&serialized);
+        if let Some(spawn) = tools.iter_mut().find(|tool| tool.name == "spawn_agent")
+            && !role_catalog.is_empty()
+        {
+            spawn.description.push_str(" Effective roles: ");
+            spawn.description.push_str(&role_catalog);
+        }
+        let custom_agent_tokens = estimate_tokens(&role_catalog);
+        let tool_tokens = encoded_tokens(&tools).saturating_sub(custom_agent_tokens);
+        let (compaction_tokens, message_tokens) = history_tokens(&history, supports_images);
         let estimated_tokens = misy_tokens
             .saturating_add(agent_tokens)
             .saturating_add(tool_tokens)
+            .saturating_add(custom_agent_tokens)
+            .saturating_add(compaction_tokens)
             .saturating_add(message_tokens);
         let context_window = model_info.as_ref().map_or(0, |model| model.context_window);
         let free_tokens = usize::try_from(context_window)
@@ -70,7 +77,9 @@ impl MisyCore {
         let mut categories = vec![
             usage(ContextCategory::MisyPrompt, misy_tokens),
             usage(ContextCategory::AgentsMd, agent_tokens),
+            usage(ContextCategory::CustomAgents, custom_agent_tokens),
             usage(ContextCategory::ToolDefinitions, tool_tokens),
+            usage(ContextCategory::CompactionSummary, compaction_tokens),
             usage(ContextCategory::Messages, message_tokens),
         ];
         if context_window > 0 {
@@ -87,8 +96,45 @@ impl MisyCore {
             image_count,
             image_bytes,
             warnings,
+            roles: roles.into_values().map(|role| role.summary).collect(),
+            auto_compaction_threshold: compaction_threshold(core, context_window),
+            compaction_reserve_tokens: compaction_reserve(core, context_window),
         }
     }
+}
+
+fn history_tokens(history: &[HistoryEntry], supports_images: bool) -> (usize, usize) {
+    let summary = history.first().filter(|entry| {
+        entry
+            .message
+            .content
+            .starts_with("Previous context was compacted.")
+    });
+    let messages = if summary.is_some() {
+        &history[1..]
+    } else {
+        history
+    };
+    let serialized = messages
+        .iter()
+        .map(|entry| super::turn::serialize_history_entry(entry, supports_images))
+        .collect::<Vec<_>>();
+    (
+        summary.map_or(0, encoded_tokens),
+        encoded_tokens(&serialized),
+    )
+}
+
+fn compaction_threshold(core: &super::CoreState, window: u32) -> Option<usize> {
+    (window > 0 && core.compaction_config.auto).then_some(
+        super::compaction::metrics::compaction_threshold(&core.compaction_config, window),
+    )
+}
+
+fn compaction_reserve(core: &super::CoreState, window: u32) -> Option<usize> {
+    (window > 0 && core.compaction_config.auto).then_some(
+        super::compaction::metrics::reserve_tokens(&core.compaction_config, window),
+    )
 }
 
 fn usage(category: ContextCategory, estimated_tokens: usize) -> ContextCategoryUsage {

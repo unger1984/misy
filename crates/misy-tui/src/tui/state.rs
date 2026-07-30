@@ -33,8 +33,8 @@ use super::{
     startup_header::StartupHeader,
 };
 use misy_core::{
-    ActivityOutput, AgentTranscript, CoreSnapshot, ModelRef, ProviderAuthMethod,
-    ProviderDisplayName, ProviderId, SubmissionId,
+    ActivityOutput, AgentTranscript, CoreSnapshot, ModelInfo, ModelProfile, ModelRef,
+    ProviderAuthMethod, ProviderDisplayName, ProviderId, SubmissionId,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -67,6 +67,7 @@ pub(super) enum ActiveView {
     },
     AuthPrompt(AuthPromptView),
     Models(ModelPicker),
+    Thinking(ListView<ModelProfile>),
     Activities(ActivityPicker),
     Sessions(SessionPicker),
     AgentDiscard(ListView<bool>),
@@ -121,6 +122,7 @@ pub struct UiState {
     response_submission: Option<SubmissionId>,
     cancelled_submissions: BTreeSet<u64>,
     submission_started_at: Option<Instant>,
+    compaction_started_at: Option<Instant>,
     turn_had_tool_activity: bool,
     terminal_turn: Option<turns::TerminalTurn>,
     response_started: bool,
@@ -136,6 +138,7 @@ pub struct UiState {
     pub(super) activity_preview: Option<ActivityOutput>,
     pub(super) agent_preview: Option<AgentTranscript>,
     session_id: Option<String>,
+    thinking_only: bool,
 }
 
 impl Default for UiState {
@@ -150,16 +153,19 @@ impl Default for UiState {
                 activities: Vec::new(),
                 agents: Vec::new(),
                 selected_model: None,
+                selected_thinking: None,
                 active_submission: None,
                 queued_submissions: Vec::new(),
                 providers: Vec::new(),
                 todos: Vec::new(),
                 pending_questions: Vec::new(),
+                compaction: None,
             },
             prompt_text: BTreeMap::new(),
             response_submission: None,
             cancelled_submissions: BTreeSet::new(),
             submission_started_at: None,
+            compaction_started_at: None,
             turn_had_tool_activity: false,
             terminal_turn: None,
             response_started: false,
@@ -175,6 +181,7 @@ impl Default for UiState {
             activity_preview: None,
             agent_preview: None,
             session_id: None,
+            thinking_only: false,
         }
     }
 }
@@ -206,6 +213,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { .. }) => UiMode::ProviderDetail,
             Some(ActiveView::AuthPrompt(_)) => UiMode::AuthPrompt,
             Some(ActiveView::Models(_)) => UiMode::ModelList,
+            Some(ActiveView::Thinking(_)) => UiMode::ThinkingList,
             Some(ActiveView::Activities(_)) => UiMode::ActivityList,
             Some(ActiveView::Sessions(_)) => UiMode::SessionList,
             Some(ActiveView::AgentDiscard(_)) => UiMode::Confirmation,
@@ -253,6 +261,7 @@ impl UiState {
                 })
                 .collect(),
             Some(ActiveView::Models(view)) => view.labels(),
+            Some(ActiveView::Thinking(view)) => view.labels(),
             Some(ActiveView::Activities(view)) => view
                 .visible_rows(usize::MAX)
                 .into_iter()
@@ -339,6 +348,8 @@ impl UiState {
             | UiAction::ResumeSession(_)
             | UiAction::ShowUsage
             | UiAction::ShowContext
+            | UiAction::ShowThinking
+            | UiAction::Compact(_)
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
         }
@@ -367,6 +378,7 @@ impl UiState {
                     .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
             Some(ActiveView::Models(view)) => Some(model_picker_presentation(view, visible_rows)),
+            Some(ActiveView::Thinking(view)) => Some(list_presentation(view, visible_rows, None)),
             Some(ActiveView::Activities(view)) => Some(activities::activity_presentation(
                 view,
                 self.activity_preview.as_ref(),
@@ -442,7 +454,10 @@ impl UiState {
             .get(&model.provider)
             .map(ProviderDisplayName::as_str)
             .unwrap_or(model.provider.as_str());
-        let status = format!("{provider} · {}", model.model.as_str());
+        let status = self.snapshot.selected_thinking.as_ref().map_or_else(
+            || format!("{provider} · {}", model.model.as_str()),
+            |thinking| format!("{provider} · {} · {thinking}", model.model.as_str()),
+        );
         self.session_id.as_ref().map_or(status.clone(), |id| {
             let short_id: String = id.chars().take(8).collect();
             format!("{status} · session {short_id}")
@@ -455,6 +470,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.insert_filter(text),
             Some(ActiveView::AuthPrompt(view)) => view.form.insert(text),
             Some(ActiveView::Models(view)) => view.insert_filter(text),
+            Some(ActiveView::Thinking(view)) => view.insert_filter(text),
             Some(ActiveView::Activities(view)) => view.insert_filter(text),
             Some(ActiveView::Sessions(view)) => view.insert_filter(text),
             Some(ActiveView::AgentDiscard(_)) => {}
@@ -471,6 +487,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.backspace_filter(),
             Some(ActiveView::AuthPrompt(view)) => view.form.backspace(),
             Some(ActiveView::Models(view)) => view.backspace_filter(),
+            Some(ActiveView::Thinking(view)) => view.backspace_filter(),
             Some(ActiveView::Activities(view)) => view.backspace_filter(),
             Some(ActiveView::Sessions(view)) => view.backspace_filter(),
             Some(ActiveView::AgentDiscard(_)) => {}
@@ -507,12 +524,68 @@ impl UiState {
         }
     }
 
+    pub(super) fn selected_profile_choice(&self) -> Option<ModelProfile> {
+        match &self.view {
+            Some(ActiveView::Thinking(view)) => view.selected_value().cloned(),
+            _ => None,
+        }
+    }
+
+    pub(super) fn thinking_selection_is_reasoning_only(&self) -> bool {
+        self.thinking_only
+    }
+
+    pub(super) fn open_thinking(&mut self, model: &ModelInfo, selected: Option<&str>) {
+        self.thinking_only = false;
+        self.open_thinking_picker(model, selected);
+    }
+
+    pub(super) fn open_thinking_only(&mut self, model: &ModelInfo, selected: Option<&str>) {
+        self.thinking_only = true;
+        self.open_thinking_picker(model, selected);
+    }
+
+    fn open_thinking_picker(&mut self, model: &ModelInfo, selected: Option<&str>) {
+        let rows = model
+            .thinking
+            .as_ref()
+            .map(|thinking| {
+                thinking
+                    .levels
+                    .iter()
+                    .map(|level| {
+                        let profile =
+                            ModelProfile::new(model.model.clone(), Some(level.id.clone()));
+                        if selected == Some(level.id.as_str()) {
+                            super::list::ListRow::current(
+                                profile,
+                                level.id.clone(),
+                                Some(level.description.clone()),
+                            )
+                        } else {
+                            super::list::ListRow::selectable(
+                                profile,
+                                level.id.clone(),
+                                Some(level.description.clone()),
+                            )
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.view = Some(ActiveView::Thinking(ListView::new(
+            "Select reasoning level",
+            rows,
+        )));
+    }
+
     pub(super) fn select_picker_number(&mut self, one_based: usize) -> bool {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.select_number(one_based),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.select_number(one_based),
             Some(ActiveView::AuthPrompt(_)) => false,
             Some(ActiveView::Models(view)) => view.select_number(one_based),
+            Some(ActiveView::Thinking(view)) => view.select_number(one_based),
             Some(ActiveView::Activities(view)) => view.select_number(one_based),
             Some(ActiveView::Sessions(view)) => view.select_number(one_based),
             Some(ActiveView::AgentDiscard(view)) => view.select_number(one_based),
@@ -529,6 +602,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_up(),
             Some(ActiveView::AuthPrompt(view)) => view.form.previous(),
             Some(ActiveView::Models(view)) => view.move_up(),
+            Some(ActiveView::Thinking(view)) => view.move_up(),
             Some(ActiveView::Activities(view)) => view.move_up(),
             Some(ActiveView::Sessions(view)) => view.move_up(),
             Some(ActiveView::AgentDiscard(view)) => view.move_up(),
@@ -545,6 +619,7 @@ impl UiState {
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_down(),
             Some(ActiveView::AuthPrompt(view)) => view.form.next(),
             Some(ActiveView::Models(view)) => view.move_down(),
+            Some(ActiveView::Thinking(view)) => view.move_down(),
             Some(ActiveView::Activities(view)) => view.move_down(),
             Some(ActiveView::Sessions(view)) => view.move_down(),
             Some(ActiveView::AgentDiscard(view)) => view.move_down(),
@@ -596,6 +671,7 @@ impl UiState {
             Some(
                 ActiveView::Providers(_)
                 | ActiveView::Models(_)
+                | ActiveView::Thinking(_)
                 | ActiveView::Sessions(_)
                 | ActiveView::AgentDiscard(_),
             ) => {

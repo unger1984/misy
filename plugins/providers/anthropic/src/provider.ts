@@ -3,7 +3,7 @@ import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import { OAuthClient, refreshIfNeeded } from "./auth";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
 import { createMessagesRequest, notifyMessageEvents } from "./messages-wire";
-import { defaultModel, listModels, type Model } from "./model-catalog";
+import { catalogSource, defaultModel, listModels, type Model } from "./model-catalog";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
 import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
 
@@ -58,10 +58,16 @@ export class AnthropicProvider {
 	}
 
 	/** Lists dynamically available models, falling back to the package catalog when unavailable. */
-	async listModels(credentials: Credentials): Promise<{ models: Model[]; default_model?: string }> {
+	async listModels(credentials: Credentials): Promise<{
+		models: Model[];
+		default_model?: string;
+		source: "remote" | "bundled";
+	}> {
 		const models = await listModels(this.config, credentials);
 		const selected = defaultModel(models);
-		return selected === undefined ? { models } : { models, default_model: selected };
+		return selected === undefined
+			? { models, source: catalogSource() }
+			: { models, default_model: selected, source: catalogSource() };
 	}
 
 	/** Returns normalized Claude subscription limits plus credentials rotated by a silent refresh. */
@@ -131,7 +137,13 @@ export class AnthropicProvider {
 					"x-app": "cli",
 				},
 				body: JSON.stringify(
-					createMessagesRequest(request.model_id, request.messages, request.tools),
+					createMessagesRequest(
+						request.model_id,
+						request.messages,
+						request.tools,
+						request.thinking,
+						request.max_output_tokens,
+					),
 				),
 			},
 			this.config.requestTimeoutMs,

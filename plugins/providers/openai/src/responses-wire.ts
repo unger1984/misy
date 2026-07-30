@@ -15,6 +15,8 @@ export function createResponsesRequest(
 	model: string,
 	messages: readonly Record<string, unknown>[],
 	tools: readonly ToolDefinition[],
+	thinking?: string,
+	maxOutputTokens?: number,
 ): Record<string, Json> {
 	const instructions = messages
 		.filter((message) => message["role"] === "system")
@@ -29,7 +31,8 @@ export function createResponsesRequest(
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 		include: ["reasoning.encrypted_content"],
-		...reasoningOptions(model),
+		...reasoningOptions(model, thinking),
+		...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
 		text: { verbosity: "medium" },
 		input,
 		tools: tools.map((tool) => ({
@@ -41,10 +44,10 @@ export function createResponsesRequest(
 	};
 }
 
-function reasoningOptions(model: string): Record<string, Json> {
+function reasoningOptions(model: string, thinking?: string): Record<string, Json> {
 	if (!supportsReasoning(model)) return {};
 	return {
-		reasoning: { effort: "medium", summary: "auto" },
+		reasoning: { effort: thinking ?? "medium", summary: "auto" },
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 	};
 }
@@ -75,7 +78,18 @@ export async function notifyResponseEvents(
 				if (event === "response.output_item.done") notifyToolCall(data, requestId, notify);
 				if (event === "response.completed") {
 					metadata = data;
-					notify("completed", { request_id: requestId, metadata });
+					const response = record(data["response"]);
+					const usage = record(response["usage"]);
+					notify("completed", {
+						request_id: requestId,
+						metadata,
+						...(typeof usage["input_tokens"] === "number"
+							? { input_tokens: usage["input_tokens"] }
+							: {}),
+						...(typeof usage["output_tokens"] === "number"
+							? { output_tokens: usage["output_tokens"] }
+							: {}),
+					});
 				}
 				if (event === "response.failed" || event === "error")
 					throw new Error(responseErrorMessage(data));

@@ -25,6 +25,10 @@ pub enum UiAction {
     ShowUsage,
     /// Open the core-owned context usage report.
     ShowContext,
+    /// Open reasoning choices for the selected model.
+    ShowThinking,
+    /// Compact root context with an optional user focus.
+    Compact(Option<String>),
     /// Select a model.
     SelectModel(ModelRef),
     /// Submit a user prompt.
@@ -104,6 +108,8 @@ pub enum UiMode {
     AuthPrompt,
     /// Model selection view.
     ModelList,
+    /// Reasoning-level selection for the current model.
+    ThinkingList,
     /// Shared tasks and agents picker.
     ActivityList,
     /// Saved conversation-session picker.
@@ -170,6 +176,8 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         "/model" => Ok(UiAction::ShowModels),
         "/tasks" => Ok(UiAction::ShowActivities),
         "/context" => Ok(UiAction::ShowContext),
+        "/thinking" => Ok(UiAction::ShowThinking),
+        "/compact" => Ok(UiAction::Compact(None)),
         "/new" | "/clear" => Ok(UiAction::NewSession),
         "/resume" => Ok(UiAction::ShowSessions),
         "/status" | "/usage" => Ok(UiAction::ShowUsage),
@@ -185,6 +193,15 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/context ") => {
             Err("use `/context` without arguments".to_owned())
+        }
+        command if command.starts_with("/thinking ") => {
+            Err("use `/thinking` without arguments".to_owned())
+        }
+        command if command.starts_with("/compact ") => {
+            let focus = command.strip_prefix("/compact ").unwrap_or_default().trim();
+            Ok(UiAction::Compact(
+                (!focus.is_empty()).then(|| focus.to_owned()),
+            ))
         }
         command if command.starts_with("/new ") => Err("use `/new` without arguments".to_owned()),
         command if command.starts_with("/clear ") => {

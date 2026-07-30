@@ -48,7 +48,7 @@ async fn model_picker_shows_partial_results_and_skips_unconfigured_provider() {
     })
     .await;
     let labels = client.state().picker_labels();
-    assert!(labels.iter().any(|label| label == "fixture-model"));
+    assert!(labels.iter().any(|label| label == "fixture-model  128k"));
     assert!(
         labels
             .iter()
@@ -76,7 +76,7 @@ async fn model_picker_opens_from_cached_models_before_the_refresh_arrives() {
 
     assert_eq!(
         client.state().picker_labels(),
-        ["fixture-model", "fixture-model-b"]
+        ["fixture-model  128k", "fixture-model-b  64k"]
     );
     assert_eq!(
         client.state().picker_tabs(),
@@ -107,7 +107,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
     assert_eq!(client.state().picker_labels().len(), 4);
     client.insert_text("fixture-model-b");
     client.handle_key(UiKey::Right).expect("first provider tab");
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b  64k"]);
     assert_eq!(
         client.state().picker_tabs()[1],
         ("First AI".to_owned(), true)
@@ -115,7 +115,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
     client
         .handle_key(UiKey::Right)
         .expect("second provider tab");
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b  64k"]);
     client.handle_key(UiKey::Left).expect("first provider tab");
     assert_eq!(
         client.state().picker_tabs()[1],
@@ -127,7 +127,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
         client.state().picker_tabs()[1],
         ("First AI".to_owned(), true)
     );
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["fixture-model-b  64k"]);
     client
         .handle_key(UiKey::Enter)
         .expect("confirm refreshed selection");
@@ -208,12 +208,13 @@ async fn context_command_opens_a_scrollable_content_specific_popup() {
     assert!(lines.iter().any(|line| line.contains("Context usage")));
     assert!(lines.iter().any(|line| line.contains("Estimated")));
     assert!(lines.iter().any(|line| line.contains("AGENTS.md")));
+    client.handle_key(UiKey::End).expect("context end");
+    let end_lines = buffer_lines(&render_buffer(client.state(), 82, 24), 82);
     assert!(
-        lines
+        end_lines
             .iter()
             .any(|line| line.contains("token estimate unavailable"))
     );
-    client.handle_key(UiKey::End).expect("context end");
     client.handle_key(UiKey::PageUp).expect("context page up");
     client.handle_key(UiKey::Escape).expect("close context");
     assert_eq!(client.state().mode(), UiMode::Input);

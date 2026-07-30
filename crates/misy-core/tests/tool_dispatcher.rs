@@ -49,6 +49,7 @@ fn dispatcher_declares_every_registered_tool() {
             "custom_echo",
             "exec_command",
             "list_directory",
+            "model_search",
             "read_file",
             "spawn_agent",
             "task_list",

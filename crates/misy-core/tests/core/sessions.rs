@@ -432,3 +432,162 @@ async fn initial_storage_failure_emits_once_and_does_not_fail_the_turn() {
     ));
     core.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn overflow_compacts_once_then_retries_the_same_profile() {
+    let (temporary, core, _) = test_core("overflow-compaction");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "session-one").await;
+    complete_submission(&core, "session-two").await;
+    let mut events = core.subscribe_lossless();
+    let submission = core
+        .submit(Message::user("overflow-retry"))
+        .await
+        .expect("submit overflow request");
+    let received = receive_until(&mut events, submission, |_| false).await;
+
+    assert!(received.iter().any(|event| {
+        matches!(event, CoreEvent::TextDelta { delta, .. } if delta == "overflow-recovered")
+    }));
+    let completed = received
+        .iter()
+        .filter_map(|event| match event {
+            CoreEvent::CompactionChanged { compaction } if compaction.status == "completed" => {
+                compaction.checkpoint.as_ref()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].trigger, "overflow");
+    let file = fs::read_to_string(only_session_file(&temporary)).expect("session contents");
+    assert_eq!(file.matches("\"type\":\"compaction\"").count(), 1);
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn downshift_compacts_with_the_old_profile_before_selecting_the_new_model() {
+    let (_temporary, core, _) = test_core("model-downshift");
+    core.select_model(fixture_model())
+        .await
+        .expect("select large model");
+    complete_submission(&core, &format!("session-downshift {}", "x".repeat(220_000))).await;
+    complete_submission(&core, "session-two").await;
+    complete_submission(&core, "session-three").await;
+    let report = core.context_report();
+    assert!(
+        report.estimated_tokens > 51_200,
+        "context report: {report:?}"
+    );
+    let history = core.history().await;
+    let history_tokens = serde_json::to_string(&history)
+        .expect("encode history")
+        .chars()
+        .count()
+        .div_ceil(4);
+    assert!(history_tokens > 51_200, "history tokens: {history_tokens}");
+    assert_eq!(core.snapshot().selected_model, Some(fixture_model()));
+    let mut events = core.subscribe_lossless();
+    let smaller = ModelRef::new(ProviderId::new("fixture"), ModelId::new("fixture-model-b"));
+
+    core.select_model(smaller.clone())
+        .await
+        .expect("select smaller model");
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    let completed = emitted.iter().find_map(|event| match event {
+        CoreEvent::CompactionChanged { compaction } if compaction.status == "completed" => {
+            compaction.checkpoint.clone()
+        }
+        _ => None,
+    });
+    let checkpoint = completed.unwrap_or_else(|| panic!("completed downshift event: {emitted:?}"));
+    assert_eq!(checkpoint.trigger, "model_downshift");
+    assert_eq!(checkpoint.profile.model, fixture_model());
+    assert_eq!(core.snapshot().selected_model, Some(smaller));
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn compaction_is_cancellable_and_replays_a_persisted_service_checkpoint() {
+    let (_temporary, core, _) = test_core("compaction-cancel");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "session-one").await;
+    complete_submission(&core, "session-two").await;
+    complete_submission(&core, "session-three").await;
+    let mut events = core.subscribe_lossless();
+    let compacting_core = core.clone();
+    let task = tokio::spawn(async move { compacting_core.compact(None).await });
+    loop {
+        let event = receive_event(&mut events).await;
+        if matches!(
+            event,
+            CoreEvent::CompactionChanged { ref compaction }
+                if compaction.status == "compacting" && compaction.cancellable
+        ) {
+            break;
+        }
+    }
+    assert_eq!(
+        core.snapshot()
+            .compaction
+            .as_ref()
+            .map(|item| item.status.as_str()),
+        Some("compacting")
+    );
+    assert!(core.cancel_compaction().await);
+    assert!(task.await.expect("compaction task").is_err());
+    assert!(core.snapshot().compaction.is_none());
+    core.shutdown().await.expect("shutdown");
+
+    let (_temporary, core, _) = test_core("compaction-replay");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "session-one").await;
+    complete_submission(&core, "session-two").await;
+    complete_submission(&core, "session-three").await;
+    let checkpoint = core.compact(None).await.expect("compact history");
+    let id = core.current_session_id().expect("session id");
+    core.new_session().expect("detach session");
+    let resumed = core.resume_session(&id).expect("resume compacted session");
+    assert_eq!(resumed.compactions, vec![checkpoint]);
+    assert!(
+        resumed
+            .history
+            .iter()
+            .any(|entry| entry.message.content == "session-one")
+    );
+    core.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn thinking_only_and_atomic_profile_changes_use_distinct_session_records() {
+    let (temporary, core, _) = test_core("thinking-persistence");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    complete_submission(&core, "session-one").await;
+    core.select_thinking(Some("low".to_owned()))
+        .await
+        .expect("select thinking");
+    let second = ModelRef::new(ProviderId::new("fixture"), ModelId::new("fixture-model-b"));
+    core.select_profile(misy_core::ModelProfile::new(
+        second,
+        Some("medium".to_owned()),
+    ))
+    .await
+    .expect("select atomic profile");
+
+    let contents = fs::read_to_string(only_session_file(&temporary)).expect("session contents");
+    assert_eq!(contents.matches("\"type\":\"thinking_change\"").count(), 1);
+    assert!(contents.contains(
+        "\"type\":\"model_change\",\"model\":{\"provider\":\"fixture\",\"model\":\
+         \"fixture-model-b\"},\"thinking\":\"medium\""
+    ));
+    core.shutdown().await.expect("shutdown");
+}

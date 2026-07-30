@@ -64,6 +64,27 @@ fn cached_nested_source_does_not_change_between_submissions() {
 }
 
 #[test]
+fn restart_finishes_then_begins_with_no_duplicate_active_scope() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("frontend")).expect("frontend");
+    fs::write(temp.path().join("frontend/AGENTS.md"), "front rules").expect("nested rules");
+    let mut session = fixture_session(&temp);
+    let target = resolve_target(session.root.workspace_cwd(), "frontend/file.rs").expect("target");
+
+    session.begin_submission();
+    assert!(session.discover(std::slice::from_ref(&target)).activated);
+    session.restart_submission();
+
+    assert!(
+        !session
+            .rendered(false)
+            .system_prompt
+            .contains("front rules")
+    );
+    assert!(session.discover(&[target]).activated);
+}
+
+#[test]
 fn blocked_nested_source_is_stable_for_one_owner() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join("frontend")).expect("frontend");

@@ -91,15 +91,23 @@ impl MisyCore {
         } else {
             validation?;
         }
+        // Holding the worker slot through enqueue and spawn linearizes worker ownership with
+        // shutdown admission closure without keeping the queue lock across an await.
+        let mut worker = self
+            .inner
+            .state
+            .submission_worker
+            .lock()
+            .expect("submission worker mutex must not be poisoned");
         let (id, start_worker) =
             self.inner
                 .state
                 .enqueue_submission(message, attachments, model)?;
         if start_worker {
             let state = Arc::clone(&self.inner.state);
-            self.inner.runtime.handle.spawn(async move {
+            *worker = Some(self.inner.runtime.handle.spawn(async move {
                 state.drain_submission_queue().await;
-            });
+            }));
         }
         Ok(id)
     }
@@ -201,6 +209,21 @@ impl CoreState {
         };
         self.cancel_active_submission(active).await;
         true
+    }
+
+    pub(super) async fn finish_submission_worker(&self, timeout: std::time::Duration) {
+        let worker = self
+            .submission_worker
+            .lock()
+            .expect("submission worker mutex must not be poisoned")
+            .take();
+        let Some(mut worker) = worker else {
+            return;
+        };
+        if tokio::time::timeout(timeout, &mut worker).await.is_err() {
+            worker.abort();
+            let _ = worker.await;
+        }
     }
 
     async fn cancel_active_submission(&self, active: Arc<ActiveSubmission>) {

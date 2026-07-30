@@ -24,6 +24,7 @@ fn registry_exposes_the_builtin_tool_definitions() {
             "agent_wait",
             "exec_command",
             "list_directory",
+            "model_search",
             "read_file",
             "spawn_agent",
             "task_list",

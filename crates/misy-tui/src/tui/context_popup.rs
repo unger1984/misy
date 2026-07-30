@@ -1,7 +1,9 @@
 //! Specialized `/context` report rendering inside the shared popup shell.
 
 use super::{context_view::ContextView, popup, style};
-use misy_core::{ContextCategory, ContextCategoryUsage, ContextReport, InstructionSourceStatus};
+use misy_core::{
+    AgentRoleStatus, ContextCategory, ContextCategoryUsage, ContextReport, InstructionSourceStatus,
+};
 use ratatui::{
     layout::Rect,
     text::{Line, Span, Text},
@@ -55,6 +57,15 @@ fn report_lines(report: &ContextReport, width: u16) -> Vec<Line<'static>> {
         format!("{} text tokens ({percent}% used)", report.estimated_tokens)
     };
     lines.push(pair("Estimated", &estimated));
+    if let Some(threshold) = report.auto_compaction_threshold {
+        lines.push(pair(
+            "Auto compact",
+            &format!(
+                "{threshold} tokens · reserve {}",
+                report.compaction_reserve_tokens.unwrap_or_default()
+            ),
+        ));
+    }
     if report.context_window > 0 && report.estimated_tokens >= report.context_window as usize {
         lines.push(Line::styled(
             "Warning: estimated usage is at or above the advertised context window",
@@ -112,7 +123,27 @@ fn report_lines(report: &ContextReport, width: u16) -> Vec<Line<'static>> {
             ));
         }
     }
+    append_role_lines(&mut lines, report);
     lines
+}
+
+fn append_role_lines(lines: &mut Vec<Line<'static>>, report: &ContextReport) {
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Agent roles", style::accent()));
+    for role in &report.roles {
+        let (marker, role_style) = match role.status {
+            AgentRoleStatus::Available => ("●", style::success()),
+            AgentRoleStatus::Invalid => ("×", style::error()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {marker} "), role_style),
+            Span::raw(role.name.clone()),
+            Span::styled(format!("  {:?}", role.source), style::muted()),
+        ]));
+        if let Some(warning) = &role.warning {
+            lines.push(Line::styled(format!("    {warning}"), style::error()));
+        }
+    }
 }
 
 fn usage_bar(report: &ContextReport, width: u16) -> Line<'static> {
@@ -181,7 +212,9 @@ fn category_line(usage: &ContextCategoryUsage) -> Line<'static> {
     let label = match usage.category {
         ContextCategory::MisyPrompt => "Misy prompt",
         ContextCategory::AgentsMd => "AGENTS.md",
+        ContextCategory::CustomAgents => "Custom agents",
         ContextCategory::ToolDefinitions => "Tool schemas",
+        ContextCategory::CompactionSummary => "Compaction",
         ContextCategory::Messages => "Messages",
         ContextCategory::FreeSpace => "Free space",
     };
@@ -195,7 +228,9 @@ fn category_style(category: ContextCategory) -> ratatui::style::Style {
     match category {
         ContextCategory::MisyPrompt => style::accent(),
         ContextCategory::AgentsMd => style::success(),
+        ContextCategory::CustomAgents => style::accent(),
         ContextCategory::ToolDefinitions => style::warning(),
+        ContextCategory::CompactionSummary => style::warning(),
         ContextCategory::Messages => style::error(),
         ContextCategory::FreeSpace => style::muted(),
     }
@@ -236,6 +271,9 @@ mod tests {
             image_count: 0,
             image_bytes: 0,
             warnings: Vec::new(),
+            roles: Vec::new(),
+            auto_compaction_threshold: None,
+            compaction_reserve_tokens: None,
         };
         let cells = allocate_cells(&report, 24);
         assert_eq!(cells.iter().map(|(_, count)| *count).sum::<usize>(), 24);

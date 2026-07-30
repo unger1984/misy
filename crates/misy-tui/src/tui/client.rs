@@ -7,6 +7,7 @@ mod questions;
 mod sessions;
 mod snapshot;
 mod submission;
+mod view_keys;
 
 use super::{
     action::{UiAction, UiKey, UiMode},
@@ -18,9 +19,9 @@ use super::{
     state::{ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
-    ActivityId, ActivityOutput, AgentId, AgentTranscript, AvailableModels, CoreError, CoreEvent,
-    MisyCore, MisyPaths, ModelRef, ProviderDisplayName, ProviderId, ProviderManifest, SubmissionId,
-    UsageReport,
+    ActivityId, ActivityOutput, AgentId, AgentTranscript, AvailableModels, CompactionCheckpoint,
+    CoreError, CoreEvent, MisyCore, MisyPaths, ModelRef, ProviderDisplayName, ProviderId,
+    ProviderManifest, SubmissionId, UsageReport,
 };
 use serde_json::Value;
 use snapshot::provider_choices;
@@ -80,6 +81,7 @@ pub(super) enum ProviderOperationResult {
     Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
     Usage(ModelRef, Result<UsageReport, String>),
+    Compact(Result<CompactionCheckpoint, String>),
     // `SubmissionAccepted` maps the transcript; this result gates draft clearing and history.
     Submit(SubmissionRequest, Result<SubmissionId, String>),
     ActivityOutput(ActivityId, Option<ActivityOutput>),
@@ -310,6 +312,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         if key == UiKey::Escape {
             self.refresh_core_projection();
+            if self.state.compaction_is_cancellable() {
+                let core = self.core.clone();
+                tokio::spawn(async move {
+                    core.cancel_compaction().await;
+                });
+                return Ok(());
+            }
             if let Some(submission) = self.state.interruptible_submission() {
                 self.handle_escape(submission);
                 return Ok(());
@@ -369,85 +378,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
         received
     }
 
-    fn handle_view_key(&mut self, key: UiKey) -> Result<(), TuiError> {
-        if self.state.mode() == UiMode::Question {
-            return self.handle_question_key(key);
-        }
-        if self.state.mode() == UiMode::Context {
-            match key {
-                UiKey::Up => self.state.reduce(&UiAction::PickerUp),
-                UiKey::Down => self.state.reduce(&UiAction::PickerDown),
-                UiKey::PageUp => self.state.scroll_context_page(false),
-                UiKey::PageDown => self.state.scroll_context_page(true),
-                UiKey::Home => self.state.scroll_context_edge(false),
-                UiKey::End => self.state.scroll_context_edge(true),
-                UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
-                _ => {}
-            }
-            return Ok(());
-        }
-        if self.state.mode() == UiMode::AuthPrompt {
-            match key {
-                UiKey::Escape => {
-                    if let Some(provider) = self.state.cancel_auth_prompt() {
-                        self.cancel_authentication(provider, None);
-                    }
-                }
-                UiKey::Enter => {
-                    if let Some(submission) = self.state.finish_auth_prompt_field() {
-                        self.complete_prompt_auth(submission);
-                    }
-                }
-                _ => self.state.auth_prompt_key(key),
-            }
-            return Ok(());
-        }
-        if self.state.mode() == UiMode::ActivityDetail {
-            match key {
-                UiKey::Up => self.state.scroll_activity_log_up(false),
-                UiKey::Down => self.state.scroll_activity_log_down(false),
-                UiKey::PageUp => self.state.scroll_activity_log_up(true),
-                UiKey::PageDown => self.state.scroll_activity_log_down(true),
-                UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
-                UiKey::StopActivity => self.stop_selected_activity(),
-                _ => {}
-            }
-            return Ok(());
-        }
-        match key {
-            UiKey::Up => self.state.reduce(&UiAction::PickerUp),
-            UiKey::Down => self.state.reduce(&UiAction::PickerDown),
-            UiKey::Left => self.state.reduce(&UiAction::PickerTabLeft),
-            UiKey::Right => self.state.reduce(&UiAction::PickerTabRight),
-            UiKey::Backspace => self.state.backspace_filter(),
-            UiKey::Escape => {
-                if self.cancel_active_authentication() {
-                    return Ok(());
-                }
-                if matches!(
-                    self.state.provider_operation,
-                    Some((
-                        _,
-                        ProviderOperationKind::CancelAuth
-                            | ProviderOperationKind::Logout
-                            | ProviderOperationKind::SelectModel
-                    ))
-                ) {
-                    return Ok(());
-                }
-                self.state.reduce(&UiAction::PickerBack);
-            }
-            UiKey::Enter => return self.confirm_view(),
-            UiKey::SelectIndex(index) => {
-                if self.state.select_picker_number(index) {
-                    return self.confirm_view();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn handle_composer_key(&mut self, key: UiKey) -> Result<(), TuiError> {
         match key {
             UiKey::Left => self.state.composer.move_left(),
@@ -486,6 +416,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::ResumeSession(id) => self.resume_session(&id)?,
             UiAction::ShowUsage => self.show_usage()?,
             UiAction::ShowContext => self.state.open_context(self.core.context_report()),
+            UiAction::ShowThinking => self.show_thinking(),
+            UiAction::Compact(focus) => self.start_compaction(focus),
             UiAction::SubmitPrompt(prompt) => self.submit_prompt(prompt),
             UiAction::SelectModel(model) => self.select_model(model),
             UiAction::StartAuth(provider) => {
@@ -598,7 +530,35 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiMode::AuthPrompt => {}
             UiMode::ModelList => {
                 if let Some(model) = self.state.selected_model_choice() {
-                    self.select_model(model);
+                    let metadata = self
+                        .cached_models
+                        .models
+                        .iter()
+                        .find(|candidate| candidate.model == model)
+                        .cloned();
+                    if let Some(metadata) = metadata.filter(|metadata| {
+                        metadata
+                            .thinking
+                            .as_ref()
+                            .is_some_and(|thinking| thinking.levels.len() > 1)
+                    }) {
+                        let selected = metadata
+                            .thinking
+                            .as_ref()
+                            .map(|thinking| thinking.default.as_str());
+                        self.state.open_thinking(&metadata, selected);
+                    } else {
+                        self.select_model(model);
+                    }
+                }
+            }
+            UiMode::ThinkingList => {
+                if let Some(profile) = self.state.selected_profile_choice() {
+                    if self.state.thinking_selection_is_reasoning_only() {
+                        self.select_thinking(profile);
+                    } else {
+                        self.select_profile(profile);
+                    }
                 }
             }
             UiMode::ActivityList => match self.state.selected_activity_choice() {

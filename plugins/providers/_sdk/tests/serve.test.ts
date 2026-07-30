@@ -192,7 +192,10 @@ test("rejects malformed auth.start, auth.complete, and chat.start params", async
 			'{"jsonrpc":"2.0","id":4,"method":"chat.start","params":{"model_id":"fast","messages":[7],' +
 			'"tools":[],"credentials":{"access_token":"t","type":"oauth"}}}\n' +
 			'{"jsonrpc":"2.0","id":5,"method":"chat.start","params":{"model_id":"fast","messages":[],' +
-			'"tools":[{"name":"x"}],"credentials":{"access_token":"t","type":"oauth"}}}\n',
+			'"tools":[{"name":"x"}],"credentials":{"access_token":"t","type":"oauth"}}}\n' +
+			'{"jsonrpc":"2.0","id":6,"method":"chat.start","params":{"model_id":"fast",' +
+			'"messages":[],"tools":[],"max_output_tokens":0,' +
+			'"credentials":{"access_token":"t","type":"oauth"}}}\n',
 	);
 	const messages = new Map(replies.map((reply) => [reply.id, reply.error?.message] as const));
 	expect(messages.get(1)).toBe("auth.start method must be a string when provided");
@@ -200,6 +203,9 @@ test("rejects malformed auth.start, auth.complete, and chat.start params", async
 	expect(messages.get(3)).toBe("chat.start requires a non-empty model_id");
 	expect(messages.get(4)).toBe("chat.start requires messages to be an array of objects");
 	expect(messages.get(5)).toBe("chat.start tools require string name and description");
+	expect(messages.get(6)).toBe(
+		"chat.start max_output_tokens must be a positive integer when provided",
+	);
 });
 
 test("accepts image attachments and rejects malformed message and tool images", async () => {

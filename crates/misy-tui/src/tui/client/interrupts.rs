@@ -11,6 +11,14 @@ impl<B: BrowserHandoff> TuiClient<B> {
     /// terminal loop observes the state and leaves on its next iteration.
     pub fn handle_ctrl_c(&mut self) {
         self.refresh_core_projection();
+        if self.state.compaction_is_cancellable() {
+            let core = self.core.clone();
+            tokio::spawn(async move {
+                core.cancel_compaction().await;
+            });
+            self.state.clear_quit_shortcut();
+            return;
+        }
         if let Some(submission) = self.state.interruptible_submission() {
             let core = self.core.clone();
             tokio::spawn(async move {

@@ -25,7 +25,9 @@ serve({
 	listModels: async (credentials) => {
 		const models = await provider.listModels(requireOauthCredentials(credentials, "OpenAI"));
 		const defaultModel = preferredDefaultModel(models, DEFAULT_MODEL_ID);
-		return defaultModel === undefined ? { models } : { models, default_model: defaultModel };
+		return defaultModel === undefined
+			? { models, source: provider.catalogSource() }
+			: { models, default_model: defaultModel, source: provider.catalogSource() };
 	},
 	usage: (credentials) => provider.usage(credentials),
 	chat: (request, requestId, notify, signal) =>

@@ -212,8 +212,23 @@ function chatRequest<TCredentials extends ProviderCredentials>(
 	}
 	const tools = params["tools"];
 	if (!Array.isArray(tools)) throw new Error("chat.start requires tools to be an array");
+	const thinking = params["thinking"];
+	if (thinking !== undefined && (typeof thinking !== "string" || thinking.length === 0)) {
+		throw new Error("chat.start thinking must be a non-empty string when provided");
+	}
+	const maxOutputTokens = params["max_output_tokens"];
+	if (
+		maxOutputTokens !== undefined &&
+		(typeof maxOutputTokens !== "number" ||
+			!Number.isSafeInteger(maxOutputTokens) ||
+			maxOutputTokens <= 0)
+	) {
+		throw new Error("chat.start max_output_tokens must be a positive integer when provided");
+	}
 	return {
 		model_id: modelId,
+		...(typeof thinking === "string" ? { thinking } : {}),
+		...(typeof maxOutputTokens === "number" ? { max_output_tokens: maxOutputTokens } : {}),
 		messages: messages.map(message),
 		tools: tools.map(toolDefinition),
 		credentials,

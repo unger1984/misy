@@ -16,6 +16,11 @@
 
 ### Added
 
+- Added layered hot-reloaded agent roles, exact model search, provider-owned thinking selection,
+  nested canonical agent trees, and visible ordered model attempts.
+- Added append-only manual and automatic context compaction with resumable active-history
+  checkpoints and separate `/context` accounting.
+
 - Added the core-owned `SetTodoList` tool with full-snapshot updates, root-session persistence,
   resume support, child-agent isolation, and semantic TUI transcript rendering.
 - Added the capability-gated `AskUserQuestion` tool with single- and multi-select prompts, custom
@@ -45,6 +50,11 @@
   process-group termination, and a fullscreen TUI activity log viewer.
 
 ### Changed
+
+- Expanded provider catalogs with source freshness, descriptions, pricing text, reasoning levels,
+  completed-token usage, stale-cache retention, and compact context-window presentation.
+- Changed the agent limit to a configurable root-inclusive tree budget and made role/parent tool
+  intersections authoritative for nested spawning.
 
 - Moved child role guidance and all `AGENTS.md` contents into an ephemeral request system prefix;
   session JSONL and visible transcripts retain neither instruction contents nor internal scope

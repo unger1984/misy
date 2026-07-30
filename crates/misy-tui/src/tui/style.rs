@@ -54,3 +54,10 @@ pub(super) fn selected_success() -> Style {
 pub(super) fn error() -> Style {
     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
 }
+
+/// Returns the style used for bounded or truncated context.
+pub(super) fn warning() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
+}

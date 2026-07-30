@@ -238,10 +238,11 @@ async fn renderer_shows_and_removes_the_single_line_busy_indicator() {
     })
     .await;
     let busy = buffer_lines(&render_buffer(client.state(), 72, 14), 72);
-    assert!(
-        busy.iter()
-            .any(|line| line.contains("Thinking…") && line.contains("esc to interrupt"))
-    );
+    let busy_line = busy
+        .iter()
+        .find(|line| line.contains("Thinking…") && line.contains("esc to interrupt"))
+        .expect("busy indicator");
+    assert!(busy_line.starts_with("  "), "{busy_line:?}");
     client.handle_key(UiKey::Escape).expect("interrupt work");
     wait_for(&mut client, |client| {
         client.state().active_submission().is_none()
@@ -512,7 +513,9 @@ async fn escape_cancels_the_core_head_when_tui_events_are_stale() {
     client
         .handle_input("stale-head-second")
         .expect("queued blocking prompt");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Keep TUI events stale while allowing the subprocess-backed core to advance to its second
+    // submission even when the full test binary is contending for process startup time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     client
         .handle_key(UiKey::Escape)
         .expect("cancel actual core head");
@@ -599,8 +602,17 @@ async fn bounded_event_pump_keeps_ctrl_c_responsive() {
         .handle_input("continuous-stream")
         .expect("continuous stream");
     client.pump_events();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(client.pump_events(), 256);
+    let backlog_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if client.pump_events() == 256 {
+            break;
+        }
+        assert!(
+            Instant::now() < backlog_deadline,
+            "continuous stream did not fill one bounded event batch"
+        );
+    }
     let started = Instant::now();
     client.handle_ctrl_c();
     assert!(!client.state().should_exit());

@@ -6,6 +6,9 @@ mod manifest;
 mod protocol;
 mod redaction;
 
+#[cfg(feature = "test-support")]
+pub use host::PendingProviderChat;
+pub(crate) use host::ProviderStreamReceiver;
 pub use host::{PendingProviderRequest, ProviderDeadlines, ProviderHost};
 pub use manifest::{
     ProviderAuthMethod, ProviderCapability, ProviderCatalog, ProviderDiscoveryError,
@@ -15,5 +18,7 @@ pub(crate) use protocol::MAX_PROTOCOL_FRAME_BYTES;
 pub use protocol::{
     CHAT_CANCEL_REQUEST_ID_FIELD, IMAGE_INPUT_CAPABILITY, IMAGE_INPUT_CAPABILITY_VERSION,
     PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION, PROVIDER_STREAM_EVENTS, ProviderError,
-    ProviderEvent, ProviderRequestId, USAGE_CAPABILITY, USAGE_CAPABILITY_VERSION, USAGE_METHOD,
+    ProviderEvent, ProviderRequestId, THINKING_CAPABILITY, THINKING_CAPABILITY_VERSION,
+    USAGE_CAPABILITY, USAGE_CAPABILITY_VERSION, USAGE_METHOD,
 };
+pub(crate) use redaction::sanitize_remote_message;

@@ -22,6 +22,23 @@ Read this document before implementation, verification, or changes to the test s
 
 ## Required Checks
 
+Required checks are selected by impact; this is not a command list to run after every change.
+Run a check only when the change modifies an input, generated artifact, or behavior that the check
+can validate. Start with focused tests, then widen to the affected package or workspace boundary.
+
+- Rust source, Rust tests, Cargo manifests, or shared Rust contracts: run `cargo fmt` and Clippy,
+  plus focused tests for the changed behavior. Run the full Rust workspace only for shared-crate,
+  workspace-configuration, or cross-crate changes.
+- A provider package: run that package's typecheck, tests, and Biome check. Run other providers
+  only when a shared SDK or wire contract they consume changed.
+- Documentation-only changes: do not run Rust or TypeScript suites unless the documentation
+  contains compiled examples, drives generated output, or changes an executable contract covered
+  by those suites. `git diff --check` remains relevant because it validates the changed text.
+- Mixed changes: combine only the checks required by the affected areas. A later documentation or
+  changelog edit does not invalidate already completed code checks.
+
+Canonical commands, when their area is affected:
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -29,18 +46,27 @@ cargo test
 cd plugins/providers/openai
 bun test
 bunx tsc --noEmit
+bunx biome check .
 cd ../anthropic
 bun test
 bunx tsc --noEmit
+bunx biome check .
 cd ../kimi
 bun test
 bunx tsc --noEmit
+bunx biome check .
+cd ../anymodel
+bun test
+bunx tsc --noEmit
+bunx biome check .
 cd ../_sdk
 bun test
 bunx tsc --noEmit
+bunx biome check .
 ```
 
-One rule is not covered by the tools above and needs its own check.
+One source-code rule is not covered by the tools above and needs its own check when Rust or
+TypeScript source changed.
 
 `rustfmt` leaves macro bodies alone and Biome does not wrap single-line comments, so the 100-column
 limit from [Code Style](code-style.md#file-and-function-size) can be broken while `cargo fmt
@@ -57,8 +83,9 @@ find plugins/providers -path '*/node_modules' -prune -o -name '*.ts' -print \
 1. Rust unit tests live beside the implementation in `crates/misy-core/src/` and
    `crates/misy-tui/src/`.
 2. Rust integration and end-to-end tests live in `crates/misy-core/tests/` for core, provider-host,
-   configuration, credential, domain, and tool flows, and in `crates/misy-tui/tests/` for terminal
-   client flows. They use fake provider processes from `crates/misy-core/tests/fixtures/`.
+   configuration, credential, session, domain, and tool flows, and in `crates/misy-tui/tests/` for
+   terminal client flows. They use fake provider processes from
+   `crates/misy-core/tests/fixtures/`.
    Integration tests reach core internals (`ProviderHost`, `ProviderCatalog`, `CredentialStore`,
    tool types, deadline-tuning constructors) through the crate's `test-support` feature, enabled
    by a self dev-dependency in `crates/misy-core/Cargo.toml`; production clients never see them.
@@ -67,6 +94,15 @@ find plugins/providers -path '*/node_modules' -prune -o -name '*.ts' -print \
 
 Prefer observable behavior over implementation details. Add concurrency/lifecycle tests where
 dropped events, blocked input, leaked processes, or credential exposure are plausible.
+Session tests use an injected `MisyPaths` root and must cover lazy creation, private permissions,
+append/resume round trips, malformed tails, schema rejection, cwd filtering, model fallback, and
+the active-submission switch guard without reading the user's real session directory.
+Role tests use injected global/project agent directories and cover precedence, invalid-file
+tombstones, tool allowlists, and hot reload. Compaction tests assert checkpoint-before-swap,
+canonical transcript preservation, active-history resume, projected-request thresholds, one
+same-profile overflow retry, cancellability, and strict token reduction. Fallback tests distinguish
+retryable profile failures from refusal, cancellation, malformed payload, and post-output failure.
+Provider catalog tests distinguish remote, bundled, stale, authenticated, and runnable states.
 
 ## Sources of Truth
 
@@ -76,5 +112,6 @@ dropped events, blocked input, leaked processes, or credential exposure are plau
 - [`plugins/providers/openai/package.json`](../plugins/providers/openai/package.json)
 - [`plugins/providers/anthropic/package.json`](../plugins/providers/anthropic/package.json)
 - [`plugins/providers/kimi/package.json`](../plugins/providers/kimi/package.json)
+- [`plugins/providers/anymodel/package.json`](../plugins/providers/anymodel/package.json)
 - [`plugins/providers/_sdk/package.json`](../plugins/providers/_sdk/package.json)
 - [Architecture](architecture.md)

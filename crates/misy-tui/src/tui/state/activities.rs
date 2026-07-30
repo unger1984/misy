@@ -5,7 +5,10 @@ use crate::tui::{
     activity_picker::{ActivityChoice, ActivityPicker},
     list::ListRowDisplay,
 };
-use misy_core::{ActivityId, ActivityKind, ActivityOutput, ActivityOutputStream, ActivityStatus};
+use misy_core::{
+    ActivityId, ActivityKind, ActivityOutput, ActivityOutputStream, ActivityStatus, AgentId,
+    AgentTranscript, AgentTranscriptEntryKind,
+};
 
 const PREVIEW_LINES: usize = 6;
 const PAGE_SCROLL_LINES: usize = 10;
@@ -14,9 +17,26 @@ const PAGE_SCROLL_LINES: usize = 10;
 pub(in crate::tui) struct ActivityLogView {
     pub(super) picker: ActivityPicker,
     pub(super) id: ActivityId,
+    pub(super) agent_id: Option<AgentId>,
     pub(super) output: Option<ActivityOutput>,
+    transcript: Option<AgentTranscriptView>,
     from_tail: usize,
     follow_tail: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentTranscriptView {
+    title: String,
+    labels: Vec<String>,
+}
+
+impl From<&AgentTranscript> for AgentTranscriptView {
+    fn from(transcript: &AgentTranscript) -> Self {
+        Self {
+            title: transcript.agent.title.clone(),
+            labels: agent_transcript_labels(transcript),
+        }
+    }
 }
 
 impl ActivityLogView {
@@ -24,7 +44,9 @@ impl ActivityLogView {
         Self {
             picker,
             id,
+            agent_id: None,
             output,
+            transcript: None,
             from_tail: 0,
             follow_tail: true,
         }
@@ -43,11 +65,13 @@ impl ActivityLogView {
     }
 
     fn visible_lines(&self, rows: usize) -> Vec<String> {
-        let labels = self
-            .output
-            .as_ref()
-            .map(output_labels)
-            .unwrap_or_else(|| vec!["Loading output…".to_owned()]);
+        let labels = if let Some(transcript) = &self.transcript {
+            transcript.labels.clone()
+        } else if let Some(output) = &self.output {
+            output_labels(output)
+        } else {
+            vec!["Loading output…".to_owned()]
+        };
         let maximum_top = labels.len().saturating_sub(rows);
         let top = if self.follow_tail {
             maximum_top
@@ -64,6 +88,7 @@ impl UiState {
         self.activity_preview = None;
         self.view = Some(ActiveView::Activities(ActivityPicker::new(
             self.snapshot.activities.clone(),
+            self.snapshot.agents.clone(),
         )));
     }
 
@@ -108,9 +133,23 @@ impl UiState {
             .activity_preview
             .take()
             .filter(|output| output.activity.id == id);
-        self.view = Some(ActiveView::ActivityLog(ActivityLogView::new(
+        self.view = Some(ActiveView::ActivityLog(Box::new(ActivityLogView::new(
             picker, id, output,
-        )));
+        ))));
+    }
+
+    pub(in crate::tui) fn open_agent_detail(&mut self, id: ActivityId, agent_id: AgentId) {
+        let Some(ActiveView::Activities(picker)) = self.view.take() else {
+            return;
+        };
+        let transcript = self
+            .agent_preview
+            .take()
+            .filter(|transcript| transcript.agent.id == agent_id);
+        let mut view = ActivityLogView::new(picker, id, None);
+        view.agent_id = Some(agent_id);
+        view.transcript = transcript.as_ref().map(AgentTranscriptView::from);
+        self.view = Some(ActiveView::ActivityLog(Box::new(view)));
     }
 
     pub(in crate::tui) fn activity_detail_id(&self) -> Option<ActivityId> {
@@ -124,9 +163,20 @@ impl UiState {
         match &self.view {
             Some(ActiveView::Activities(picker)) => match picker.selected() {
                 Some(ActivityChoice::Activity(id)) => Some(id),
-                Some(ActivityChoice::Main) | None => None,
+                Some(ActivityChoice::Agent(_, _)) | Some(ActivityChoice::Main) | None => None,
             },
-            Some(ActiveView::ActivityLog(view)) => Some(view.id),
+            Some(ActiveView::ActivityLog(view)) if view.agent_id.is_none() => Some(view.id),
+            _ => None,
+        }
+    }
+
+    pub(in crate::tui) fn agent_transcript_target(&self) -> Option<AgentId> {
+        match &self.view {
+            Some(ActiveView::Activities(picker)) => match picker.selected() {
+                Some(ActivityChoice::Agent(_, id)) => Some(id),
+                _ => None,
+            },
+            Some(ActiveView::ActivityLog(view)) => view.agent_id,
             _ => None,
         }
     }
@@ -145,10 +195,28 @@ impl UiState {
         }
     }
 
+    pub(in crate::tui) fn set_agent_transcript(&mut self, transcript: AgentTranscript) {
+        match &mut self.view {
+            Some(ActiveView::Activities(picker))
+                if matches!(
+                    picker.selected(),
+                    Some(ActivityChoice::Agent(_, id)) if id == transcript.agent.id
+                ) =>
+            {
+                self.agent_preview = Some(transcript);
+            }
+            Some(ActiveView::ActivityLog(view)) if view.agent_id == Some(transcript.agent.id) => {
+                view.transcript = Some(AgentTranscriptView::from(&transcript));
+            }
+            _ => {}
+        }
+    }
+
     pub(in crate::tui) fn selected_activity_to_stop(&self) -> Option<ActivityId> {
         let id = match &self.view {
             Some(ActiveView::Activities(picker)) => match picker.selected() {
                 Some(ActivityChoice::Activity(id)) => id,
+                Some(ActivityChoice::Agent(id, _)) => id,
                 Some(ActivityChoice::Main) | None => return None,
             },
             Some(ActiveView::ActivityLog(view)) => view.id,
@@ -165,12 +233,23 @@ impl UiState {
 pub(super) fn activity_presentation(
     picker: &ActivityPicker,
     preview: Option<&ActivityOutput>,
+    agent_preview: Option<&AgentTranscript>,
     visible_rows: usize,
     stop_hint: &str,
 ) -> ModalPresentation {
     let preview = preview
         .filter(|output| picker.selected() == Some(ActivityChoice::Activity(output.activity.id)));
-    let preview_rows = preview.map_or(0, |_| PREVIEW_LINES.saturating_add(1));
+    let agent_preview = agent_preview.filter(|transcript| {
+        matches!(
+            picker.selected(),
+            Some(ActivityChoice::Agent(_, id)) if id == transcript.agent.id
+        )
+    });
+    let preview_rows = if preview.is_some() || agent_preview.is_some() {
+        PREVIEW_LINES.saturating_add(1)
+    } else {
+        0
+    };
     let list_rows = visible_rows.saturating_sub(preview_rows).max(1);
     let mut rows = picker.visible_rows(list_rows);
     if let Some(output) = preview {
@@ -186,10 +265,24 @@ pub(super) fn activity_presentation(
             .take(PREVIEW_LINES)
             .collect::<Vec<_>>();
         rows.extend(tail.into_iter().rev().map(information_row));
+    } else if let Some(transcript) = agent_preview {
+        rows.push(information_row(format!(
+            "Preview · {} · {}",
+            transcript.agent.id,
+            status_label(transcript.agent.status)
+        )));
+        let labels = agent_transcript_labels(transcript);
+        let tail = labels
+            .into_iter()
+            .rev()
+            .take(PREVIEW_LINES)
+            .collect::<Vec<_>>();
+        rows.extend(tail.into_iter().rev().map(information_row));
     }
     ModalPresentation {
         title: "Activities".to_owned(),
         rows,
+        filter: None,
         operation: None,
         back_hint: false,
         tabs: picker.tabs(),
@@ -204,6 +297,9 @@ fn information_row(label: String) -> ListRowDisplay {
     ListRowDisplay {
         number: 0,
         label,
+        context: None,
+        pricing: None,
+        provider: None,
         description: None,
         selected: false,
         current: false,
@@ -258,6 +354,35 @@ pub(in crate::tui) fn output_content_labels(output: &ActivityOutput) -> Vec<Stri
     labels
 }
 
+fn agent_transcript_labels(transcript: &AgentTranscript) -> Vec<String> {
+    let mut labels = Vec::new();
+    for entry in &transcript.entries {
+        let prefix = match entry.kind {
+            AgentTranscriptEntryKind::Assignment => "assignment",
+            AgentTranscriptEntryKind::UserMessage => "message",
+            AgentTranscriptEntryKind::Assistant => "assistant",
+            AgentTranscriptEntryKind::ToolCall => "tool call",
+            AgentTranscriptEntryKind::ToolResult => "tool result",
+            AgentTranscriptEntryKind::Terminal => "terminal",
+        };
+        let attachment = if entry.attachment_count == 0 {
+            String::new()
+        } else {
+            format!(" [{} attachment(s)]", entry.attachment_count)
+        };
+        let content = if entry.content.is_empty() {
+            attachment.trim_start().to_owned()
+        } else {
+            format!("{}{attachment}", entry.content)
+        };
+        labels.extend(content.lines().map(|line| format!("{prefix}: {line}")));
+    }
+    if transcript.truncated {
+        labels.insert(0, "… older transcript entries omitted …".to_owned());
+    }
+    labels
+}
+
 impl UiState {
     pub(in crate::tui) fn scroll_activity_log_up(&mut self, page: bool) {
         if let Some(ActiveView::ActivityLog(view)) = &mut self.view {
@@ -283,10 +408,22 @@ impl UiState {
             return None;
         };
         let title = view
-            .output
+            .transcript
             .as_ref()
-            .map(|output| output.activity.title.as_str())
-            .unwrap_or("Task output");
-        Some(format!("{} — {title}", view.id))
+            .map(|transcript| transcript.title.as_str())
+            .or_else(|| {
+                view.output
+                    .as_ref()
+                    .map(|output| output.activity.title.as_str())
+            })
+            .unwrap_or(if view.agent_id.is_some() {
+                "Agent transcript"
+            } else {
+                "Task output"
+            });
+        let id = view
+            .agent_id
+            .map_or_else(|| view.id.to_string(), |id| id.to_string());
+        Some(format!("{id} — {title}"))
     }
 }

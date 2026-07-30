@@ -2,6 +2,10 @@
 
 use super::{
     action::UiMode,
+    bottom_surface::{
+        minimum_question_height, question_height, question_rows, render_question_surface,
+        render_todos, todo_height,
+    },
     composer::CommandPopupRow,
     display_width::{text_width, truncate_to_width},
     list::ListRowDisplay,
@@ -20,7 +24,7 @@ use std::time::Instant;
 const MAX_VIEW_ROWS: usize = 8;
 const MAX_QUEUED_PROMPT_ROWS: usize = 3;
 const POPUP_TOP_SPACE: u16 = 1;
-const TRANSCRIPT_INSET: u16 = 2;
+const CONTENT_INSET: u16 = 2;
 
 /// Renders the complete fullscreen client.
 pub fn render(frame: &mut ratatui::Frame, state: &UiState) {
@@ -33,16 +37,36 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
         render_activity_log(frame, area, state);
         return area;
     }
-    let popup_rows = state.command_popup_rows_for_render();
+    let question_active = state.question_presentation(1).is_some();
+    let popup_rows = if question_active {
+        Vec::new()
+    } else {
+        state.command_popup_rows_for_render()
+    };
     let modal = state.modal_presentation(MAX_VIEW_ROWS);
-    let composer_height = composer_height(state);
+    let composer_height = if question_active {
+        0
+    } else {
+        composer_height(state)
+    };
     let surface_height = surface_height(&popup_rows);
     let queued_prompts = state.queued_prompt_lines(MAX_QUEUED_PROMPT_ROWS);
     let busy = state.busy_label(Instant::now());
+    let reserved_height = u16::try_from(queued_prompts.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(u16::from(busy.is_some()))
+        .saturating_add(surface_height)
+        .saturating_add(u16::from(state.activity_bar_visible()))
+        .saturating_add(1);
+    let bottom_budget = area.height.saturating_sub(reserved_height);
+    let (todo_height, question_height, composer_height) =
+        bottom_heights(state, bottom_budget, composer_height, question_active);
     let areas = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(u16::try_from(queued_prompts.len()).unwrap_or(u16::MAX)),
         Constraint::Length(u16::from(busy.is_some())),
+        Constraint::Length(todo_height),
+        Constraint::Length(question_height),
         Constraint::Length(composer_height),
         Constraint::Length(surface_height),
         Constraint::Length(u16::from(state.activity_bar_visible())),
@@ -61,20 +85,56 @@ pub(super) fn render_with_composer_area(frame: &mut ratatui::Frame, state: &UiSt
     if let Some(label) = busy {
         frame.render_widget(
             Paragraph::new(Line::styled(label, style::accent())),
-            areas[2],
+            inset_content_area(areas[2]),
         );
     }
-    render_composer(frame, areas[3], state);
-    render_surface(frame, areas[4], &popup_rows);
+    render_todos(frame, inset_content_area(areas[3]), state);
+    if let Some(probe) = state.question_presentation(1) {
+        let visible_rows = question_rows(areas[4], probe.tabs.len() > 1);
+        if let Some(question) = state.question_presentation(visible_rows) {
+            render_question_surface(frame, areas[4], &question);
+        }
+    }
+    render_composer(frame, areas[5], state);
+    render_surface(frame, areas[6], &popup_rows);
     if state.activity_bar_visible() {
-        render_activity_bar(frame, areas[5], state);
+        render_activity_bar(frame, areas[7], state);
     }
     if let Some(modal) = modal.as_ref() {
         super::model_popup::render(frame, area, state, modal);
     }
-    render_footer(frame, areas[6], state);
-    render_cursor(frame, areas[3], state);
-    areas[3]
+    if let Some(view) = state.context_view() {
+        super::context_popup::render(frame, area, view);
+    }
+    render_footer(frame, areas[8], state);
+    render_cursor(frame, areas[5], state);
+    areas[5]
+}
+
+fn bottom_heights(
+    state: &UiState,
+    budget: u16,
+    composer_desired: u16,
+    question_active: bool,
+) -> (u16, u16, u16) {
+    let todo_desired = todo_height(state, budget);
+    if !question_active {
+        let composer = composer_desired.min(budget);
+        let todos = todo_desired.min(budget.saturating_sub(composer));
+        return (todos, 0, composer);
+    }
+
+    let question_minimum = minimum_question_height(state).min(budget);
+    let remaining_after_minimum = budget.saturating_sub(question_minimum);
+    let todos = todo_desired.min(remaining_after_minimum);
+    let remaining = remaining_after_minimum.saturating_sub(todos);
+    let question_desired = question_height(state, budget);
+    let question = question_minimum.saturating_add(
+        question_desired
+            .saturating_sub(question_minimum)
+            .min(remaining),
+    );
+    (todos, question, 0)
 }
 
 fn render_activity_log(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
@@ -129,7 +189,7 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
         return;
     }
     let mut lines = state.startup_header.lines(area.width);
-    let transcript_width = area.width.saturating_sub(TRANSCRIPT_INSET);
+    let transcript_width = area.width.saturating_sub(CONTENT_INSET);
     lines.extend(
         transcript_lines(
             state.transcript(),
@@ -148,8 +208,18 @@ fn render_transcript(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
 
 fn inset_transcript_line(mut line: Line<'static>) -> Line<'static> {
     line.spans
-        .insert(0, Span::raw(" ".repeat(usize::from(TRANSCRIPT_INSET))));
+        .insert(0, Span::raw(" ".repeat(usize::from(CONTENT_INSET))));
     line
+}
+
+fn inset_content_area(area: Rect) -> Rect {
+    let inset = CONTENT_INSET.min(area.width);
+    Rect::new(
+        area.x.saturating_add(inset),
+        area.y,
+        area.width.saturating_sub(inset),
+        area.height,
+    )
 }
 
 fn render_composer(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
@@ -387,39 +457,4 @@ fn render_cursor(frame: &mut ratatui::Frame, area: Rect, state: &UiState) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn list_line_truncates_both_columns_without_removing_the_gap() {
-        let row = ListRowDisplay {
-            number: 1,
-            label: "Provider with a very long display name".to_owned(),
-            description: Some("authentication status with extra details".to_owned()),
-            selected: true,
-            current: false,
-        };
-
-        let line = list_line(&row, 32, text_width(&row.label));
-        let rendered = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-
-        assert!(line.width() <= 32);
-        assert!(rendered.contains("…  authentica…"), "{rendered:?}");
-    }
-
-    #[test]
-    fn transcript_content_has_a_two_column_inset() {
-        let line = inset_transcript_line(Line::raw("● Read file"));
-        let rendered = line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-
-        assert_eq!(rendered, "  ● Read file");
-    }
-}
+mod tests;

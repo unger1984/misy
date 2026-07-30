@@ -1,10 +1,11 @@
 //! Domain-contract integration tests.
 
 use misy_core::{
-    InputModality, Message, ModelId, ModelInfo, ModelRef, ProviderId, ToolCall, ToolDefinition,
-    ToolResult,
+    InputModality, Message, ModelId, ModelInfo, ModelProfile, ModelRef, ProviderId, ToolCall,
+    ToolDefinition, ToolResult,
 };
 use serde_json::json;
+use std::str::FromStr;
 
 #[test]
 fn normalized_domain_types_round_trip_through_json() {
@@ -45,4 +46,22 @@ fn legacy_model_json_defaults_to_text_only() {
     .expect("deserialize legacy model info");
 
     assert_eq!(model.input_modalities, vec![InputModality::Text]);
+}
+
+#[test]
+fn selector_preserves_model_colons_without_a_catalog() {
+    let profile = ModelProfile::from_str("anymodel/cx/gpt%3Ahigh:low")
+        .expect("selector with an escaped model colon");
+
+    assert_eq!(profile.model.provider.as_str(), "anymodel");
+    assert_eq!(profile.model.model.as_str(), "cx/gpt:high");
+    assert_eq!(profile.thinking.as_deref(), Some("low"));
+    assert_eq!(profile.selector(), "anymodel/cx/gpt%3Ahigh:low");
+}
+
+#[test]
+fn selector_rejects_empty_thinking_and_unrecognized_escapes() {
+    assert!(ModelProfile::from_str("openai/gpt:").is_err());
+    assert!(ModelProfile::from_str("openai/gpt%2F4").is_err());
+    assert!(ModelProfile::from_str("openai/gpt:High").is_err());
 }

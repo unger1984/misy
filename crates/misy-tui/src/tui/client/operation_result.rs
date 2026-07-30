@@ -8,12 +8,53 @@ use super::{BrowserHandoff, ProviderOperationResult, SubmissionRequest, TuiClien
 use crate::tui::composer_attachment::ComposerDraft;
 use crate::tui::state::ProviderOperationKind;
 use misy_core::{
-    AvailableModels, CoreError, Message, MisyCore, ModelRef, ProviderId, SubmissionId, UsageReport,
+    AvailableModels, CoreError, Message, MisyCore, ModelProfile, ModelRef, ProviderId,
+    SubmissionId, UsageReport,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 impl<B: BrowserHandoff> TuiClient<B> {
+    pub(super) fn start_compaction(&mut self, focus: Option<String>) {
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let result = core
+                .compact(focus.as_deref())
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::Compact(result));
+        });
+    }
+
+    pub(super) fn show_thinking(&mut self) {
+        let snapshot = self.core.snapshot();
+        let Some(selected) = snapshot.selected_model else {
+            self.state.add_error(CoreError::NoModelSelected);
+            return;
+        };
+        let Some(model) = self
+            .cached_models
+            .models
+            .iter()
+            .find(|model| model.model == selected)
+        else {
+            self.state
+                .add_error("reasoning metadata is unavailable; refresh /model first");
+            return;
+        };
+        if model
+            .thinking
+            .as_ref()
+            .is_none_or(|thinking| thinking.levels.is_empty())
+        {
+            self.state
+                .add_error("the selected model does not expose reasoning levels");
+            return;
+        }
+        self.state
+            .open_thinking_only(model, snapshot.selected_thinking.as_deref());
+    }
     pub(super) fn show_usage(&mut self) -> Result<(), TuiError> {
         let Some(model) = self.core.snapshot().selected_model else {
             self.state.add_error(CoreError::NoModelSelected);
@@ -107,6 +148,46 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
     }
 
+    pub(super) fn select_profile(&mut self, profile: ModelProfile) {
+        self.state.set_provider_operation(
+            profile.model.provider.clone(),
+            ProviderOperationKind::SelectModel,
+            None,
+        );
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        let provider = profile.model.provider.clone();
+        let model = profile.model.clone();
+        tokio::spawn(async move {
+            let result = core
+                .select_profile(profile)
+                .await
+                .map(|()| model)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::SelectModel(provider, result));
+        });
+    }
+
+    pub(super) fn select_thinking(&mut self, profile: ModelProfile) {
+        self.state.set_provider_operation(
+            profile.model.provider.clone(),
+            ProviderOperationKind::SelectModel,
+            None,
+        );
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        let provider = profile.model.provider.clone();
+        let model = profile.model;
+        tokio::spawn(async move {
+            let result = core
+                .select_thinking(profile.thinking)
+                .await
+                .map(|()| model)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::SelectModel(provider, result));
+        });
+    }
+
     pub(super) fn apply_operation_result(&mut self, result: ProviderOperationResult) {
         match result {
             ProviderOperationResult::Models(generation, result) => {
@@ -115,8 +196,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Start(provider, method, result) => {
                 self.apply_start_result(provider, method, result);
             }
-            ProviderOperationResult::Complete(provider, _method, result) => {
-                self.apply_complete_result(&provider, result);
+            ProviderOperationResult::Complete(provider, _method, kind, result) => {
+                self.apply_complete_result(&provider, kind, result);
             }
             ProviderOperationResult::CancelAuth(provider, result) => {
                 self.apply_cancel_auth_result(&provider, result);
@@ -130,6 +211,10 @@ impl<B: BrowserHandoff> TuiClient<B> {
             ProviderOperationResult::Usage(model, result) => {
                 self.apply_usage_result(&model, result);
             }
+            ProviderOperationResult::Compact(result) => match result {
+                Ok(_) => self.refresh_core_projection(),
+                Err(error) => self.state.add_error(error),
+            },
             ProviderOperationResult::Submit(request, result) => {
                 self.apply_submit_result(request, result);
             }
@@ -139,6 +224,27 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.state.set_activity_output(output);
                 }
             }
+            ProviderOperationResult::AgentTranscript(_id, transcript) => {
+                self.activity_output_pending = false;
+                match transcript {
+                    Ok(transcript) => self.state.set_agent_transcript(transcript),
+                    Err(error) => self.state.add_error(error),
+                }
+            }
+            ProviderOperationResult::DiscardAgents(result) => match result {
+                Ok(()) => {
+                    let pending = self.pending_session_switch.take();
+                    let outcome = match pending {
+                        Some(super::PendingSessionSwitch::New) => self.start_new_session(),
+                        Some(super::PendingSessionSwitch::Resume(id)) => self.resume_session(&id),
+                        None => Ok(()),
+                    };
+                    if let Err(error) = outcome {
+                        self.state.add_error(error);
+                    }
+                }
+                Err(error) => self.state.add_error(error),
+            },
         }
     }
 
@@ -184,14 +290,16 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
     }
 
-    fn apply_complete_result(&mut self, provider: &ProviderId, result: Result<(), String>) {
-        if !self
-            .state
-            .finish_provider_operation(provider, ProviderOperationKind::Complete)
-        {
+    fn apply_complete_result(
+        &mut self,
+        provider: &ProviderId,
+        kind: ProviderOperationKind,
+        result: Result<(), String>,
+    ) {
+        if !self.state.finish_provider_operation(provider, kind) {
             return;
         }
-        self.finish_auth_task(provider, ProviderOperationKind::Complete);
+        self.finish_auth_task(provider, kind);
         match result {
             Ok(()) => self.refresh_provider_choices(),
             Err(error) => self.state.add_error(error),

@@ -5,6 +5,7 @@ use super::{
     browser::SystemBrowser,
     client::TuiClient,
     clipboard::{Clipboard, ClipboardPaste, SystemClipboard, write_osc52_copy},
+    herdr_reporter::HerdrReporter,
     render::render_with_composer_area,
     screen_selection::ScreenSelection,
 };
@@ -32,15 +33,53 @@ use std::{io, io::Write, time::Duration};
 const ENABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS: &str = "\u{1b}[>4m";
 
+/// Conversation selection requested by command-line arguments before the terminal opens.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum SessionStart {
+    /// Start with an empty in-memory conversation.
+    #[default]
+    Fresh,
+    /// Resume the newest saved session for the current directory.
+    ResumeLatest,
+    /// Resume a saved session by id or unambiguous prefix.
+    ResumeId(String),
+    /// Open the saved-session picker immediately.
+    ResumePicker,
+}
+
 /// Starts the fullscreen interactive client and restores the prior terminal screen on exit.
 ///
 /// # Errors
 ///
 /// Returns terminal setup, event-read, clipboard-transfer, or draw failures.
-pub async fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
+pub async fn run(
+    core: MisyCore,
+    paths: &MisyPaths,
+    session_start: SessionStart,
+) -> Result<(), io::Error> {
+    run_with_herdr_reporter(core, paths, session_start, None).await
+}
+
+/// Starts the fullscreen client with an optional pane lifecycle reporter.
+///
+/// # Errors
+///
+/// Returns terminal setup, event-read, clipboard-transfer, or draw failures.
+pub async fn run_with_herdr_reporter(
+    core: MisyCore,
+    paths: &MisyPaths,
+    session_start: SessionStart,
+    reporter: Option<HerdrReporter>,
+) -> Result<(), io::Error> {
     let stdout = io::stdout();
     let mut guard = TerminalGuard::enter()?;
     let mut client = TuiClient::with_persistent_history(core, SystemBrowser, paths).await;
+    client
+        .apply_session_start(session_start)
+        .map_err(io::Error::other)?;
+    if let Some(reporter) = &reporter {
+        reporter.observe(&client.core.snapshot());
+    }
     let result = (|| {
         let backend = CrosstermBackend::new(stdout.lock());
         let mut terminal = Terminal::new(backend)?;
@@ -69,11 +108,17 @@ pub async fn run(core: MisyCore, paths: &MisyPaths) -> Result<(), io::Error> {
                 }
             }
             client.pump_events();
+            if let Some(reporter) = &reporter {
+                reporter.observe(&client.core.snapshot());
+            }
         }
         Ok(())
     })();
     client.shutdown().await;
     guard.restore();
+    if let Some(reporter) = reporter {
+        reporter.shutdown().await;
+    }
     result
 }
 
@@ -116,7 +161,8 @@ fn route_mouse(
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             selection.begin(position);
-            *composer_click_started = composer_area.contains(position);
+            *composer_click_started = client.state().mode() == super::action::UiMode::Input
+                && composer_area.contains(position);
             None
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -165,12 +211,13 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         && !key.modifiers.contains(KeyModifiers::ALT)
         && !key.modifiers.contains(KeyModifiers::SUPER)
     {
-        if client.state().mode() != super::action::UiMode::Input
-            && let Some(index) = character.to_digit(10)
-            && index != 0
-        {
+        if let Some(index) = number_shortcut(
+            client.state().mode(),
+            client.state().question_editing(),
+            character,
+        ) {
             // `handle_key` already records failures into the UI state, so this is a duplicate.
-            let _ = client.handle_key(UiKey::SelectIndex(index as usize));
+            let _ = client.handle_key(UiKey::SelectIndex(index));
             return;
         }
         let mut encoded = [0; 4];
@@ -181,6 +228,24 @@ fn route_key(client: &mut TuiClient<SystemBrowser>, clipboard: &mut impl Clipboa
         // `handle_key` already records failures into the UI state, so this is a duplicate.
         let _ = client.handle_key(normalized);
     }
+}
+
+fn number_shortcut(
+    mode: super::action::UiMode,
+    question_editing: bool,
+    character: char,
+) -> Option<usize> {
+    if matches!(
+        mode,
+        super::action::UiMode::Input | super::action::UiMode::AuthPrompt
+    ) || question_editing
+    {
+        return None;
+    }
+    character
+        .to_digit(10)
+        .filter(|index| *index != 0)
+        .map(|index| index as usize)
 }
 
 fn is_explicit_paste_key(key: KeyEvent) -> bool {
@@ -446,6 +511,16 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE
         )));
+    }
+
+    #[test]
+    fn prompt_auth_digits_are_text_instead_of_list_shortcuts() {
+        assert_eq!(number_shortcut(crate::UiMode::AuthPrompt, false, '7'), None);
+        assert_eq!(number_shortcut(crate::UiMode::Question, true, '7'), None);
+        assert_eq!(
+            number_shortcut(crate::UiMode::ProviderList, false, '7'),
+            Some(7)
+        );
     }
 
     #[test]

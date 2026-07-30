@@ -92,7 +92,7 @@ fn call_block(
     };
     let mut lines = vec![Line::from(vec![
         ratatui::text::Span::styled(format!("{marker} "), marker_style),
-        ratatui::text::Span::raw(friendly_header(name, arguments, width)),
+        ratatui::text::Span::raw(tool_header(name, arguments, result, width)),
     ])];
     let Some(TranscriptRow::ToolResult {
         is_error, content, ..
@@ -100,9 +100,31 @@ fn call_block(
     else {
         return lines;
     };
-    let output = tool_output(name, *is_error, content.as_deref());
+    let output = tool_output(name, arguments, *is_error, content.as_deref());
     lines.extend(bounded_output(&output, width, expanded, expand_hint));
     lines
+}
+
+fn tool_header(
+    name: &str,
+    arguments: Option<&str>,
+    result: Option<&TranscriptRow>,
+    width: u16,
+) -> String {
+    if matches!(
+        result,
+        Some(TranscriptRow::ToolResult {
+            is_error: false,
+            ..
+        })
+    ) {
+        match name {
+            "SetTodoList" => return "Used TodoList".to_owned(),
+            "AskUserQuestion" => return "Used AskUserQuestion".to_owned(),
+            _ => {}
+        }
+    }
+    friendly_header(name, arguments, width)
 }
 
 fn orphan_result_block(
@@ -191,6 +213,16 @@ fn friendly_header(name: &str, arguments: Option<&str>, width: u16) -> String {
             format!("Poll task {}", value("task_id").unwrap_or("?"))
         }
         "write_stdin" => format!("Send input {}", value("task_id").unwrap_or("?")),
+        "SetTodoList"
+            if parsed
+                .as_ref()
+                .and_then(|value| value.get("todos"))
+                .is_none() =>
+        {
+            "Read todo list".to_owned()
+        }
+        "SetTodoList" => "Update todo list".to_owned(),
+        "AskUserQuestion" => "Ask user".to_owned(),
         _ => {
             let arguments = arguments.unwrap_or_default();
             let budget = usize::from(width).saturating_sub(name.len() + 10);
@@ -202,7 +234,24 @@ fn friendly_header(name: &str, arguments: Option<&str>, width: u16) -> String {
     }
 }
 
-fn tool_output(name: &str, is_error: bool, content: Option<&str>) -> Vec<OutputLine> {
+fn tool_output(
+    name: &str,
+    arguments: Option<&str>,
+    is_error: bool,
+    content: Option<&str>,
+) -> Vec<OutputLine> {
+    if !is_error {
+        if name == "SetTodoList"
+            && let Some(output) = todo_output(arguments, content)
+        {
+            return output;
+        }
+        if name == "AskUserQuestion"
+            && let Some(output) = question_output(arguments, content)
+        {
+            return output;
+        }
+    }
     if name == "exec_command"
         && let Some(message) = background_start(content)
     {
@@ -212,6 +261,55 @@ fn tool_output(name: &str, is_error: bool, content: Option<&str>) -> Vec<OutputL
         }];
     }
     content_output(content, is_error)
+}
+
+fn todo_output(arguments: Option<&str>, content: Option<&str>) -> Option<Vec<OutputLine>> {
+    let arguments: Value = serde_json::from_str(arguments?).ok()?;
+    let Some(todos) = arguments.get("todos") else {
+        return Some(content_output(content, false));
+    };
+    if todos.is_null() {
+        return Some(content_output(content, false));
+    }
+    let todos = todos.as_array()?;
+    if todos.is_empty() {
+        return Some(vec![muted_output("Todo list cleared")]);
+    }
+    todos
+        .iter()
+        .map(|todo| {
+            Some(muted_output(format!(
+                "- [{}] {}",
+                todo.get("status")?.as_str()?,
+                todo.get("title")?.as_str()?
+            )))
+        })
+        .collect()
+}
+
+fn question_output(arguments: Option<&str>, content: Option<&str>) -> Option<Vec<OutputLine>> {
+    let arguments: Value = serde_json::from_str(arguments?).ok()?;
+    let questions = arguments.get("questions")?.as_array()?;
+    let result: Value = serde_json::from_str(content?).ok()?;
+    let answers = result.get("answers")?.as_object()?;
+    if answers.is_empty() {
+        return Some(vec![muted_output("Question dismissed")]);
+    }
+    questions
+        .iter()
+        .map(|question| {
+            let text = question.get("question")?.as_str()?;
+            let answer = answers.get(text)?.as_str()?;
+            Some(muted_output(format!("{text}: {answer}")))
+        })
+        .collect()
+}
+
+fn muted_output(text: impl Into<String>) -> OutputLine {
+    OutputLine {
+        text: text.into(),
+        style: style::muted(),
+    }
 }
 
 fn background_start(content: Option<&str>) -> Option<String> {

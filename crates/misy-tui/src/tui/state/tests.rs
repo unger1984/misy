@@ -3,6 +3,7 @@ use crate::tui::action::UiAction;
 use misy_core::{
     ActivityOutput, ActivitySummary, CoreEvent, ProviderAuthMethod, ProviderDisplayName, ProviderId,
 };
+use std::time::{Duration, Instant};
 
 fn activity(id: u64, kind: &str, status: &str, title: &str) -> ActivitySummary {
     serde_json::from_value(serde_json::json!({
@@ -28,6 +29,70 @@ fn provider_choice(id: &str, display_name: &str, authenticated: bool) -> Provide
             display_name: "Browser OAuth".to_owned(),
         }],
     }
+}
+
+fn question_request(id: u64, text: &str) -> misy_core::QuestionRequest {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "tool_call_id": format!("call-{id}"),
+        "source": {"Submission": id},
+        "questions": [{
+            "question": text,
+            "header": "",
+            "options": [
+                {"label": "A", "description": ""},
+                {"label": "B", "description": ""}
+            ],
+            "multi_select": false
+        }]
+    }))
+    .expect("question fixture")
+}
+
+#[test]
+fn question_snapshot_recovers_requests_in_fifo_order_without_a_modal() {
+    let mut state = UiState::default();
+    state.composer.insert_str("saved draft");
+    let first = question_request(1, "First question");
+    let second = question_request(2, "Second question");
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![first, second.clone()];
+    state.apply_snapshot(snapshot);
+    assert_eq!(state.mode(), crate::tui::UiMode::Question);
+    assert!(state.modal_presentation(8).is_none());
+    assert_eq!(
+        state
+            .question_presentation(8)
+            .expect("question surface")
+            .title,
+        "First question"
+    );
+    assert_eq!(state.composer_input(), "saved draft");
+
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![second];
+    state.apply_snapshot(snapshot);
+    assert_eq!(
+        state
+            .question_presentation(8)
+            .expect("question surface")
+            .title,
+        "Second question"
+    );
+}
+
+#[test]
+fn pending_question_hides_the_generation_busy_label() {
+    let mut state = UiState::default();
+    let now = Instant::now();
+    state.submission_started_at = Some(now - Duration::from_secs(3));
+    assert!(state.busy_label(now).is_some());
+
+    let mut snapshot = state.snapshot.clone();
+    snapshot.pending_questions = vec![question_request(1, "Choose")];
+    state.apply_snapshot(snapshot);
+
+    assert!(state.busy_label(now).is_none());
 }
 
 fn refreshed_choices() -> Vec<ProviderChoice> {
@@ -346,4 +411,30 @@ fn terminal_activity_event_adds_one_complete_transcript_item() {
         state.transcript(),
         [super::TranscriptRow::ActivityFinished(output)]
     );
+}
+
+#[test]
+fn background_agent_finished_event_adds_compact_notice() {
+    let mut state = UiState::default();
+    let agent = serde_json::from_value(serde_json::json!({
+        "id": 4,
+        "activity_id": 9,
+        "title": "Check cleanup",
+        "model": {"provider": "fixture", "model": "model-a"},
+        "status": "completed",
+        "run_in_background": true,
+        "started_at_ms": 1,
+        "finished_at_ms": 2,
+        "terminal_message": "clean"
+    }))
+    .expect("deserialize agent summary");
+    state.apply_core_event(CoreEvent::AgentFinished {
+        agent,
+        result: "clean".to_owned(),
+    });
+    assert!(matches!(
+        state.transcript(),
+        [super::TranscriptRow::Info(message)]
+            if message == "agent-4 · Check cleanup · Completed · clean"
+    ));
 }

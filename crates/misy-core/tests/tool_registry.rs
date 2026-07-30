@@ -15,15 +15,54 @@ fn registry_exposes_the_builtin_tool_definitions() {
     assert_eq!(
         names,
         [
+            "AskUserQuestion",
+            "SetTodoList",
+            "agent_list",
+            "agent_message",
+            "agent_output",
+            "agent_stop",
+            "agent_wait",
             "exec_command",
             "list_directory",
+            "model_search",
             "read_file",
+            "spawn_agent",
             "task_list",
             "task_stop",
             "view_image",
             "write_file",
             "write_stdin"
         ]
+    );
+}
+
+#[test]
+fn kimi_tool_schemas_reject_unknown_fields_and_invalid_shapes() {
+    let registry = ToolRegistry::new();
+    assert!(
+        registry
+            .validate_arguments(
+                "SetTodoList",
+                &json!({"todos": [{"title": "Work", "status": "pending"}]})
+            )
+            .is_ok()
+    );
+    assert!(
+        registry
+            .validate_arguments("SetTodoList", &json!({"todos": [], "merge": true}))
+            .is_err()
+    );
+    assert!(
+        registry
+            .validate_arguments(
+                "AskUserQuestion",
+                &json!({"questions": [{
+                    "question": "Choose",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                    "unexpected": true
+                }]})
+            )
+            .is_err()
     );
 }
 

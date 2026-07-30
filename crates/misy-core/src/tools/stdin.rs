@@ -4,7 +4,7 @@ use super::{
     activity::{ActivityManager, InteractionError, output::DEFAULT_MAX_OUTPUT_TOKENS},
     command,
 };
-use crate::{ToolCall, ToolResult};
+use crate::{ToolCall, ToolResult, activity::ActivityOwner};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ const MAX_POLL_YIELD_MS: u64 = 300_000;
 
 pub(super) async fn execute(
     call: &ToolCall,
+    owner: ActivityOwner,
     activities: &ActivityManager,
     cancellation: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> ToolResult {
@@ -41,7 +42,7 @@ pub(super) async fn execute(
             usize::try_from(tokens).unwrap_or(usize::MAX)
         });
     match activities
-        .interact(id, chars, wait, max_output_tokens, cancellation)
+        .interact_for_owner(owner, id, chars, wait, max_output_tokens, cancellation)
         .await
     {
         Ok(output) => command::result(call, &output),

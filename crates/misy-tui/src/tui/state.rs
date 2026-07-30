@@ -1,30 +1,41 @@
 //! Deterministic state rendered by the terminal client.
 
 mod activities;
+mod context;
 mod events;
+mod input;
+mod models;
+mod providers;
+mod questions;
+mod sessions;
+mod spinner;
 #[cfg(test)]
 mod tests;
 mod transcript;
 mod turns;
 
 pub(super) use activities::output_content_labels;
+pub(super) use spinner::spinner_frame;
 pub use transcript::TranscriptRow;
 
 use super::{
     action::{UiAction, UiMode},
     activity_picker::ActivityPicker,
+    auth_prompt::AuthPromptView,
     composer::Composer,
-    list::{ListRow, ListView},
+    context_view::ContextView,
+    list::ListView,
     model_picker::ModelPicker,
     presentation::{
-        list_presentation, model_picker_presentation, operation_label, provider_action_rows,
-        provider_settings,
+        list_presentation, model_picker_presentation, operation_label, provider_settings,
     },
+    question_dialog::QuestionDialog,
+    session_picker::SessionPicker,
     startup_header::StartupHeader,
 };
 use misy_core::{
-    ActivityOutput, CoreSnapshot, ModelRef, ProviderAuthMethod, ProviderDisplayName, ProviderId,
-    SubmissionId,
+    ActivityOutput, AgentTranscript, CoreSnapshot, ModelProfile, ModelRef, ProviderAuthMethod,
+    ProviderDisplayName, ProviderId, SubmissionId,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -55,9 +66,15 @@ pub(super) enum ActiveView {
         credential_method: Option<String>,
         actions: ListView<ProviderAction>,
     },
+    AuthPrompt(AuthPromptView),
     Models(ModelPicker),
+    Thinking(ListView<ModelProfile>),
     Activities(ActivityPicker),
-    ActivityLog(activities::ActivityLogView),
+    Sessions(SessionPicker),
+    AgentDiscard(ListView<bool>),
+    ActivityLog(Box<activities::ActivityLogView>),
+    Question(QuestionDialog),
+    Context(ContextView),
 }
 
 /// Bottom-pane data derived from one active modal view.
@@ -65,6 +82,7 @@ pub(super) enum ActiveView {
 pub(super) struct ModalPresentation {
     pub(super) title: String,
     pub(super) rows: Vec<super::list::ListRowDisplay>,
+    pub(super) filter: Option<String>,
     pub(super) operation: Option<String>,
     pub(super) back_hint: bool,
     pub(super) tabs: Vec<(String, bool)>,
@@ -76,6 +94,7 @@ pub(super) struct ModalPresentation {
 pub(super) enum ProviderOperationKind {
     Start,
     Complete,
+    PromptComplete,
     CancelAuth,
     Logout,
     Models,
@@ -105,6 +124,7 @@ pub struct UiState {
     response_submission: Option<SubmissionId>,
     cancelled_submissions: BTreeSet<u64>,
     submission_started_at: Option<Instant>,
+    compaction_started_at: Option<Instant>,
     turn_had_tool_activity: bool,
     terminal_turn: Option<turns::TerminalTurn>,
     response_started: bool,
@@ -118,6 +138,10 @@ pub struct UiState {
     pub(super) transcript_expand_hint: String,
     tool_output_expanded: bool,
     pub(super) activity_preview: Option<ActivityOutput>,
+    pub(super) agent_preview: Option<AgentTranscript>,
+    session_id: Option<String>,
+    thinking_only: bool,
+    model_picker_before_thinking: Option<ModelPicker>,
 }
 
 impl Default for UiState {
@@ -130,15 +154,21 @@ impl Default for UiState {
             provider_names: BTreeMap::new(),
             snapshot: CoreSnapshot {
                 activities: Vec::new(),
+                agents: Vec::new(),
                 selected_model: None,
+                selected_thinking: None,
                 active_submission: None,
                 queued_submissions: Vec::new(),
                 providers: Vec::new(),
+                todos: Vec::new(),
+                pending_questions: Vec::new(),
+                compaction: None,
             },
             prompt_text: BTreeMap::new(),
             response_submission: None,
             cancelled_submissions: BTreeSet::new(),
             submission_started_at: None,
+            compaction_started_at: None,
             turn_had_tool_activity: false,
             terminal_turn: None,
             response_started: false,
@@ -152,6 +182,10 @@ impl Default for UiState {
             transcript_expand_hint: "Ctrl+O".to_owned(),
             tool_output_expanded: false,
             activity_preview: None,
+            agent_preview: None,
+            session_id: None,
+            thinking_only: false,
+            model_picker_before_thinking: None,
         }
     }
 }
@@ -181,9 +215,15 @@ impl UiState {
             None => UiMode::Input,
             Some(ActiveView::Providers(_)) => UiMode::ProviderList,
             Some(ActiveView::ProviderSettings { .. }) => UiMode::ProviderDetail,
+            Some(ActiveView::AuthPrompt(_)) => UiMode::AuthPrompt,
             Some(ActiveView::Models(_)) => UiMode::ModelList,
+            Some(ActiveView::Thinking(_)) => UiMode::ThinkingList,
             Some(ActiveView::Activities(_)) => UiMode::ActivityList,
+            Some(ActiveView::Sessions(_)) => UiMode::SessionList,
+            Some(ActiveView::AgentDiscard(_)) => UiMode::Confirmation,
             Some(ActiveView::ActivityLog(_)) => UiMode::ActivityDetail,
+            Some(ActiveView::Question(_)) => UiMode::Question,
+            Some(ActiveView::Context(_)) => UiMode::Context,
         }
     }
 
@@ -215,17 +255,36 @@ impl UiState {
                     actions.labels()
                 }
             }
+            Some(ActiveView::AuthPrompt(view)) => view
+                .form
+                .rows()
+                .into_iter()
+                .map(|row| {
+                    let value = row.description.unwrap_or_default();
+                    format!("{}: {value}", row.label)
+                })
+                .collect(),
             Some(ActiveView::Models(view)) => view.labels(),
+            Some(ActiveView::Thinking(view)) => view.labels(),
             Some(ActiveView::Activities(view)) => view
                 .visible_rows(usize::MAX)
                 .into_iter()
                 .map(|row| row.label)
                 .collect(),
+            Some(ActiveView::Sessions(view)) => view.labels(),
+            Some(ActiveView::AgentDiscard(view)) => view.labels(),
             Some(ActiveView::ActivityLog(view)) => view
                 .output
                 .as_ref()
                 .map(activities::output_labels)
                 .unwrap_or_else(|| vec!["Loading output…".to_owned()]),
+            Some(ActiveView::Question(view)) => view
+                .inline_presentation(usize::MAX)
+                .rows
+                .into_iter()
+                .map(|row| row.label)
+                .collect(),
+            Some(ActiveView::Context(_)) => Vec::new(),
         }
     }
 
@@ -288,29 +347,15 @@ impl UiState {
             | UiAction::StartAuth(_)
             | UiAction::ShowModels
             | UiAction::ShowActivities
+            | UiAction::ShowSessions
+            | UiAction::NewSession
+            | UiAction::ResumeSession(_)
             | UiAction::ShowUsage
+            | UiAction::ShowContext
+            | UiAction::ShowThinking
+            | UiAction::Compact(_)
             | UiAction::SelectModel(_)
             | UiAction::SubmitPrompt(_) => {}
-        }
-    }
-
-    pub(super) fn apply_snapshot(&mut self, snapshot: CoreSnapshot) {
-        self.apply_snapshot_at(snapshot, Instant::now());
-    }
-
-    fn apply_snapshot_at(&mut self, snapshot: CoreSnapshot, now: Instant) {
-        if self.snapshot.active_submission != snapshot.active_submission {
-            self.capture_turn_transition(snapshot.active_submission, now);
-        }
-        let activities = snapshot.activities.clone();
-        self.snapshot = snapshot;
-        if !self.activity_bar_visible() {
-            self.activity_bar_focused = false;
-        }
-        match &mut self.view {
-            Some(ActiveView::Activities(picker)) => picker.refresh(activities),
-            Some(ActiveView::ActivityLog(view)) => view.picker.refresh(activities),
-            _ => {}
         }
     }
 
@@ -322,100 +367,8 @@ impl UiState {
         self.startup_header = StartupHeader::new(model, directory);
     }
 
-    pub(super) fn open_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.replace_providers(providers);
-        self.view = Some(ActiveView::Providers(self.provider_list()));
-    }
-
-    pub(super) fn refresh_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.replace_providers(providers);
-        match &self.view {
-            Some(ActiveView::ProviderSettings { provider, .. }) => {
-                let Some(choice) = self.providers.get(provider).cloned() else {
-                    return;
-                };
-                let rows = provider_action_rows(&choice);
-                // Rows are swapped into the live views instead of rebuilding
-                // them so a background refresh keeps the user's filter and
-                // highlight (review finding #10).
-                if let Some(ActiveView::ProviderSettings {
-                    display_name,
-                    credential_method,
-                    actions,
-                    ..
-                }) = &mut self.view
-                {
-                    *display_name = choice.display_name;
-                    *credential_method = choice.credential_method;
-                    actions.replace_rows(rows);
-                }
-            }
-            Some(ActiveView::Providers(_)) => {
-                let rows = self.provider_rows();
-                if let Some(ActiveView::Providers(view)) = &mut self.view {
-                    view.replace_rows(rows);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn replace_providers(&mut self, providers: Vec<ProviderChoice>) {
-        self.providers = providers
-            .into_iter()
-            .map(|provider| (provider.id.clone(), provider))
-            .collect();
-    }
-
-    pub(super) fn open_provider_settings(&mut self, provider: &ProviderId) {
-        let Some(choice) = self.providers.get(provider).cloned() else {
-            return;
-        };
-        self.view = Some(provider_settings(choice));
-    }
-
-    pub(super) fn finish_provider_operation(
-        &mut self,
-        provider: &ProviderId,
-        kind: ProviderOperationKind,
-    ) -> bool {
-        let scope = OperationScope::Provider(provider.clone());
-        if self.provider_operation.as_ref() == Some(&(scope, kind)) {
-            self.provider_operation = None;
-            self.provider_device_code = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn set_provider_operation(
-        &mut self,
-        provider: ProviderId,
-        kind: ProviderOperationKind,
-        device_code: Option<String>,
-    ) {
-        self.provider_operation = Some((OperationScope::Provider(provider), kind));
-        self.provider_device_code = device_code;
-    }
-
-    pub(super) fn set_model_catalog_operation(&mut self) {
-        self.provider_operation =
-            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models));
-        self.provider_device_code = None;
-    }
-
-    pub(super) fn finish_model_catalog_operation(&mut self) -> bool {
-        if matches!(
-            self.provider_operation,
-            Some((OperationScope::ModelCatalog, ProviderOperationKind::Models))
-        ) {
-            self.provider_operation = None;
-            self.provider_device_code = None;
-            true
-        } else {
-            false
-        }
+    pub(super) fn set_startup_notice(&mut self, notice: Option<String>) {
+        self.startup_header.set_notice(notice);
     }
 
     pub(super) fn modal_presentation(&self, visible_rows: usize) -> Option<ModalPresentation> {
@@ -429,13 +382,37 @@ impl UiState {
                     .map(|(_, kind)| operation_label(*kind, self.provider_device_code.as_deref())),
             )),
             Some(ActiveView::Models(view)) => Some(model_picker_presentation(view, visible_rows)),
+            Some(ActiveView::Thinking(view)) => Some(list_presentation(view, visible_rows, None)),
             Some(ActiveView::Activities(view)) => Some(activities::activity_presentation(
                 view,
                 self.activity_preview.as_ref(),
+                self.agent_preview.as_ref(),
                 visible_rows,
                 &self.activity_stop_hint,
             )),
+            Some(ActiveView::Sessions(view)) => Some(ModalPresentation {
+                title: "Resume session".to_owned(),
+                rows: view.visible_rows(visible_rows),
+                filter: None,
+                operation: None,
+                back_hint: false,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: None,
+            }),
+            Some(ActiveView::AgentDiscard(view)) => Some(ModalPresentation {
+                title: "Discard agent state?".to_owned(),
+                rows: view.visible_rows(visible_rows),
+                filter: None,
+                operation: None,
+                back_hint: false,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: Some("enter choose  esc keep agent state".to_owned()),
+            }),
             Some(ActiveView::ActivityLog(_)) => None,
+            Some(ActiveView::Question(_)) => None,
+            Some(ActiveView::Context(_)) => None,
             Some(ActiveView::ProviderSettings {
                 display_name,
                 credential_method,
@@ -449,6 +426,7 @@ impl UiState {
                 Some(ModalPresentation {
                     title: format!("{display_name} — {status}"),
                     rows: actions.visible_rows(visible_rows),
+                    filter: None,
                     operation: self.provider_operation.as_ref().map(|(_, kind)| {
                         operation_label(*kind, self.provider_device_code.as_deref())
                     }),
@@ -458,6 +436,16 @@ impl UiState {
                     help_hint: None,
                 })
             }
+            Some(ActiveView::AuthPrompt(view)) => Some(ModalPresentation {
+                title: format!("{} — authentication", view.display_name),
+                rows: view.form.rows(),
+                filter: None,
+                operation: None,
+                back_hint: true,
+                tabs: Vec::new(),
+                loading: false,
+                help_hint: Some("type value  enter validate  tab next  esc cancel".to_owned()),
+            }),
         }
     }
 
@@ -474,52 +462,29 @@ impl UiState {
             .get(&model.provider)
             .map(ProviderDisplayName::as_str)
             .unwrap_or(model.provider.as_str());
-        format!("{provider} · {}", model.model.as_str())
-    }
-
-    pub(super) fn composer_cursor_position(&self) -> (u16, u16) {
-        self.composer.cursor_position()
-    }
-
-    pub(super) fn composer_line_count(&self) -> usize {
-        self.composer.text().split('\n').count()
-    }
-
-    pub(super) fn command_popup_rows_for_render(&self) -> Vec<super::composer::CommandPopupRow> {
-        if self.view.is_some() {
-            return Vec::new();
-        }
-        self.composer.popup_rows_for_render()
-    }
-
-    fn provider_list(&self) -> ListView<ProviderId> {
-        ListView::new("Providers", self.provider_rows())
-    }
-
-    fn provider_rows(&self) -> Vec<ListRow<ProviderId>> {
-        self.providers
-            .values()
-            .map(|provider| {
-                ListRow::selectable(
-                    provider.id.clone(),
-                    provider.display_name.clone(),
-                    Some(if provider.authenticated {
-                        "✓ authenticated".to_owned()
-                    } else {
-                        "not authenticated".to_owned()
-                    }),
-                )
-            })
-            .collect()
+        let status = self.snapshot.selected_thinking.as_ref().map_or_else(
+            || format!("{provider} · {}", model.model.as_str()),
+            |thinking| format!("{provider} · {} · {thinking}", model.model.as_str()),
+        );
+        self.session_id.as_ref().map_or(status.clone(), |id| {
+            let short_id: String = id.chars().take(8).collect();
+            format!("{status} · session {short_id}")
+        })
     }
 
     pub(super) fn insert_filter(&mut self, text: &str) {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.insert_filter(text),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.insert_filter(text),
+            Some(ActiveView::AuthPrompt(view)) => view.form.insert(text),
             Some(ActiveView::Models(view)) => view.insert_filter(text),
+            Some(ActiveView::Thinking(view)) => view.insert_filter(text),
             Some(ActiveView::Activities(view)) => view.insert_filter(text),
+            Some(ActiveView::Sessions(view)) => view.insert_filter(text),
+            Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
+            Some(ActiveView::Question(view)) => view.insert_text(text),
+            Some(ActiveView::Context(_)) => {}
             None => {}
         }
     }
@@ -528,9 +493,15 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.backspace_filter(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.backspace_filter(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.backspace(),
             Some(ActiveView::Models(view)) => view.backspace_filter(),
+            Some(ActiveView::Thinking(view)) => view.backspace_filter(),
             Some(ActiveView::Activities(view)) => view.backspace_filter(),
+            Some(ActiveView::Sessions(view)) => view.backspace_filter(),
+            Some(ActiveView::AgentDiscard(_)) => {}
             Some(ActiveView::ActivityLog(_)) => {}
+            Some(ActiveView::Question(view)) => view.backspace(),
+            Some(ActiveView::Context(_)) => {}
             None => {}
         }
     }
@@ -554,20 +525,19 @@ impl UiState {
         }
     }
 
-    pub(super) fn selected_model_choice(&self) -> Option<ModelRef> {
-        match &self.view {
-            Some(ActiveView::Models(view)) => view.selected_value().cloned(),
-            _ => None,
-        }
-    }
-
     pub(super) fn select_picker_number(&mut self, one_based: usize) -> bool {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.select_number(one_based),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.select_number(one_based),
+            Some(ActiveView::AuthPrompt(_)) => false,
             Some(ActiveView::Models(view)) => view.select_number(one_based),
+            Some(ActiveView::Thinking(view)) => view.select_number(one_based),
             Some(ActiveView::Activities(view)) => view.select_number(one_based),
+            Some(ActiveView::Sessions(view)) => view.select_number(one_based),
+            Some(ActiveView::AgentDiscard(view)) => view.select_number(one_based),
             Some(ActiveView::ActivityLog(_)) => false,
+            Some(ActiveView::Question(view)) => view.select_number(one_based),
+            Some(ActiveView::Context(_)) => false,
             None => false,
         }
     }
@@ -576,9 +546,15 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.move_up(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_up(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.previous(),
             Some(ActiveView::Models(view)) => view.move_up(),
+            Some(ActiveView::Thinking(view)) => view.move_up(),
             Some(ActiveView::Activities(view)) => view.move_up(),
+            Some(ActiveView::Sessions(view)) => view.move_up(),
+            Some(ActiveView::AgentDiscard(view)) => view.move_up(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_up(1),
+            Some(ActiveView::Question(view)) => view.move_up(),
+            Some(ActiveView::Context(view)) => view.up(1),
             None => {}
         }
     }
@@ -587,9 +563,15 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.move_down(),
             Some(ActiveView::ProviderSettings { actions, .. }) => actions.move_down(),
+            Some(ActiveView::AuthPrompt(view)) => view.form.next(),
             Some(ActiveView::Models(view)) => view.move_down(),
+            Some(ActiveView::Thinking(view)) => view.move_down(),
             Some(ActiveView::Activities(view)) => view.move_down(),
+            Some(ActiveView::Sessions(view)) => view.move_down(),
+            Some(ActiveView::AgentDiscard(view)) => view.move_down(),
             Some(ActiveView::ActivityLog(view)) => view.scroll_down(1),
+            Some(ActiveView::Question(view)) => view.move_down(),
+            Some(ActiveView::Context(view)) => view.down(1),
             None => {}
         }
     }
@@ -598,6 +580,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Models(picker)) => picker.tab_left(),
             Some(ActiveView::Activities(picker)) => picker.tab_left(),
+            Some(ActiveView::Question(view)) => view.tab_left(),
             _ => {}
         }
     }
@@ -606,6 +589,7 @@ impl UiState {
         match &mut self.view {
             Some(ActiveView::Models(picker)) => picker.tab_right(),
             Some(ActiveView::Activities(picker)) => picker.tab_right(),
+            Some(ActiveView::Question(view)) => view.tab_right(),
             _ => {}
         }
     }
@@ -615,7 +599,34 @@ impl UiState {
             Some(ActiveView::ProviderSettings { .. }) => {
                 self.view = Some(ActiveView::Providers(self.provider_list()));
             }
-            Some(ActiveView::Providers(_) | ActiveView::Models(_)) => {
+            Some(ActiveView::AuthPrompt(view)) => {
+                let provider = view.provider.clone();
+                self.view = Some(provider_settings(
+                    self.providers
+                        .get(&provider)
+                        .cloned()
+                        .unwrap_or_else(|| ProviderChoice {
+                            id: provider,
+                            display_name: view.display_name.clone(),
+                            authenticated: false,
+                            credential_method: None,
+                            auth_methods: Vec::new(),
+                        }),
+                ));
+            }
+            Some(ActiveView::Thinking(_)) => {
+                self.view = self
+                    .model_picker_before_thinking
+                    .take()
+                    .map(ActiveView::Models);
+                self.thinking_only = false;
+            }
+            Some(
+                ActiveView::Providers(_)
+                | ActiveView::Models(_)
+                | ActiveView::Sessions(_)
+                | ActiveView::AgentDiscard(_),
+            ) => {
                 self.view = None;
                 self.provider_operation = None;
                 self.provider_device_code = None;
@@ -625,25 +636,14 @@ impl UiState {
                 let Some(ActiveView::ActivityLog(view)) = self.view.take() else {
                     return;
                 };
+                let view = *view;
                 self.activity_preview = view.output;
+                self.agent_preview = None;
                 self.view = Some(ActiveView::Activities(view.picker));
             }
+            Some(ActiveView::Question(_)) => {}
+            Some(ActiveView::Context(_)) => self.view = None,
             None => {}
         }
-    }
-}
-
-pub(super) fn spinner_frame(ticks: u128) -> &'static str {
-    match ticks % 10 {
-        0 => "⠋",
-        1 => "⠙",
-        2 => "⠹",
-        3 => "⠸",
-        4 => "⠼",
-        5 => "⠴",
-        6 => "⠦",
-        7 => "⠧",
-        8 => "⠇",
-        _ => "⠏",
     }
 }

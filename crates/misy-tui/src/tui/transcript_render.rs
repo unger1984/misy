@@ -18,7 +18,7 @@ pub(super) fn transcript_lines(
         let block = tools
             .get(&index)
             .cloned()
-            .or_else(|| semantic_block(row, width));
+            .or_else(|| semantic_block(row, width, expanded));
         let Some(block) = block else {
             continue;
         };
@@ -30,7 +30,7 @@ pub(super) fn transcript_lines(
     lines
 }
 
-fn semantic_block(row: &TranscriptRow, width: u16) -> Option<Vec<Line<'static>>> {
+fn semantic_block(row: &TranscriptRow, width: u16, expanded: bool) -> Option<Vec<Line<'static>>> {
     match row {
         TranscriptRow::Provider { id, authenticated } => {
             Some(vec![provider_status_line(id, *authenticated)])
@@ -50,10 +50,76 @@ fn semantic_block(row: &TranscriptRow, width: u16) -> Option<Vec<Line<'static>>>
             Span::styled(message.clone(), style::error()),
         ])]),
         TranscriptRow::WorkSeparator { elapsed } => Some(vec![work_separator(*elapsed, width)]),
+        TranscriptRow::Compaction(checkpoint) => {
+            Some(compaction_block(checkpoint, width, expanded))
+        }
         TranscriptRow::ToolCall { .. }
         | TranscriptRow::ToolResult { .. }
         | TranscriptRow::ActivityFinished(_) => None,
     }
+}
+
+fn compaction_block(
+    checkpoint: &misy_core::CompactionCheckpoint,
+    width: u16,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    let label = format!(
+        " Compacted context · {} → {} ",
+        compact_tokens(checkpoint.tokens_before),
+        compact_tokens(checkpoint.tokens_after)
+    );
+    let mut lines = vec![centered_divider(&label, width)];
+    if expanded {
+        let preview = bounded_summary_preview(&checkpoint.summary);
+        let content_width = usize::from(width).saturating_sub(2).max(1);
+        lines.extend(
+            preview
+                .lines()
+                .take(12)
+                .flat_map(|line| wrap_text(line, content_width))
+                .map(|line| Line::styled(format!("  {line}"), style::muted())),
+        );
+    }
+    lines
+}
+
+fn centered_divider(label: &str, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    if label.chars().count() >= width {
+        return Line::styled(
+            super::display_width::truncate_to_width(label, width),
+            style::muted(),
+        );
+    }
+    let left = width.saturating_sub(label.chars().count()) / 2;
+    let right = width.saturating_sub(label.chars().count() + left);
+    Line::styled(
+        format!("{}{}{}", "─".repeat(left), label, "─".repeat(right)),
+        style::muted(),
+    )
+}
+
+fn compact_tokens(tokens: usize) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens.is_multiple_of(1_000) {
+        format!("{}k", tokens / 1_000)
+    } else {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    }
+}
+
+fn bounded_summary_preview(summary: &str) -> &str {
+    const MAX_PREVIEW_BYTES: usize = 2 * 1024;
+    if summary.len() <= MAX_PREVIEW_BYTES {
+        return summary;
+    }
+    let mut end = MAX_PREVIEW_BYTES;
+    while !summary.is_char_boundary(end) {
+        end -= 1;
+    }
+    &summary[..end]
 }
 
 fn provider_status_line(id: &str, authenticated: bool) -> Line<'static> {
@@ -169,6 +235,25 @@ mod tests {
     use crate::tui::state::TranscriptRow;
     use std::time::Duration;
 
+    fn compaction_row(summary: String) -> TranscriptRow {
+        TranscriptRow::Compaction(misy_core::CompactionCheckpoint {
+            summary,
+            first_kept_index: 2,
+            profile: misy_core::ModelProfile::new(
+                misy_core::ModelRef::new(
+                    misy_core::ProviderId::new("fixture"),
+                    misy_core::ModelId::new("model"),
+                ),
+                None,
+            ),
+            tokens_before: 96_000,
+            tokens_after: 18_000,
+            trigger: "manual".to_owned(),
+            timestamp_ms: 1,
+            history_len: 4,
+        })
+    }
+
     fn text(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
         lines
             .iter()
@@ -216,5 +301,17 @@ mod tests {
                     .all(|span| span.style.bg == Some(ratatui::style::Color::DarkGray))
             );
         }
+    }
+
+    #[test]
+    fn compaction_divider_reveals_only_a_bounded_preview_when_expanded() {
+        let rows = vec![compaction_row("summary line\n".repeat(300))];
+        let compact = text(&transcript_lines(&rows, 80, false, "Ctrl+O"));
+        let expanded = text(&transcript_lines(&rows, 80, true, "Ctrl+O"));
+
+        assert_eq!(compact.len(), 1);
+        assert!(compact[0].contains("Compacted context · 96k → 18k"));
+        assert!(expanded.len() > compact.len());
+        assert!(expanded.len() <= 13);
     }
 }

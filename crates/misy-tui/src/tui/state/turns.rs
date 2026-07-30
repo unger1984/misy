@@ -43,7 +43,30 @@ impl UiState {
         self.active_submission()
     }
 
+    pub(in crate::tui) fn compaction_is_cancellable(&self) -> bool {
+        self.snapshot
+            .compaction
+            .as_ref()
+            .is_some_and(|activity| activity.cancellable)
+    }
+
     pub(in crate::tui) fn busy_label(&self, now: Instant) -> Option<String> {
+        if let Some(activity) = &self.snapshot.compaction {
+            let elapsed = self
+                .compaction_started_at
+                .map_or(Duration::ZERO, |started| {
+                    now.saturating_duration_since(started)
+                });
+            return Some(format!(
+                "{} Compacting context ({}, {}s · esc to interrupt)",
+                spinner_frame(elapsed.as_millis() / 100),
+                activity.trigger,
+                elapsed.as_secs()
+            ));
+        }
+        if !self.snapshot.pending_questions.is_empty() {
+            return None;
+        }
         let started = self.submission_started_at?;
         let elapsed = now.saturating_duration_since(started);
         let phase = if self.response_started {

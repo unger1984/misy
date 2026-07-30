@@ -15,8 +15,20 @@ pub enum UiAction {
     ShowModels,
     /// Open the shared tasks and agents picker.
     ShowActivities,
+    /// Open the saved-session picker.
+    ShowSessions,
+    /// Start a clean conversation while retaining the current saved session.
+    NewSession,
+    /// Resume a saved conversation by id or unambiguous prefix.
+    ResumeSession(String),
     /// Fetch account-limit usage for the selected model's provider.
     ShowUsage,
+    /// Open the core-owned context usage report.
+    ShowContext,
+    /// Open reasoning choices for the selected model.
+    ShowThinking,
+    /// Compact root context with an optional user focus.
+    Compact(Option<String>),
     /// Select a model.
     SelectModel(ModelRef),
     /// Submit a user prompt.
@@ -92,12 +104,24 @@ pub enum UiMode {
     ProviderList,
     /// Settings for one provider.
     ProviderDetail,
+    /// Generic provider-owned authentication form.
+    AuthPrompt,
     /// Model selection view.
     ModelList,
+    /// Reasoning-level selection for the current model.
+    ThinkingList,
     /// Shared tasks and agents picker.
     ActivityList,
+    /// Saved conversation-session picker.
+    SessionList,
+    /// Confirmation before discarding retained child-agent state.
+    Confirmation,
     /// Output for one command activity.
     ActivityDetail,
+    /// Structured question dialog owned by the core lifecycle.
+    Question,
+    /// Scrollable context-usage report.
+    Context,
 }
 
 /// Maps navigation keys to their old action vocabulary for API compatibility.
@@ -112,10 +136,20 @@ pub fn map_key(mode: UiMode, key: UiKey) -> UiAction {
     match key {
         UiKey::Up => UiAction::PickerUp,
         UiKey::Down => UiAction::PickerDown,
-        UiKey::Left if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+        UiKey::Left
+            if matches!(
+                mode,
+                UiMode::ModelList | UiMode::ActivityList | UiMode::Question
+            ) =>
+        {
             UiAction::PickerTabLeft
         }
-        UiKey::Right if matches!(mode, UiMode::ModelList | UiMode::ActivityList) => {
+        UiKey::Right
+            if matches!(
+                mode,
+                UiMode::ModelList | UiMode::ActivityList | UiMode::Question
+            ) =>
+        {
             UiAction::PickerTabRight
         }
         UiKey::Enter => UiAction::PickerConfirm,
@@ -141,6 +175,11 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         "/provider" => Ok(UiAction::ShowProviders),
         "/model" => Ok(UiAction::ShowModels),
         "/tasks" => Ok(UiAction::ShowActivities),
+        "/context" => Ok(UiAction::ShowContext),
+        "/thinking" => Ok(UiAction::ShowThinking),
+        "/compact" => Ok(UiAction::Compact(None)),
+        "/new" | "/clear" => Ok(UiAction::NewSession),
+        "/resume" => Ok(UiAction::ShowSessions),
         "/status" | "/usage" => Ok(UiAction::ShowUsage),
         "/exit" => Ok(UiAction::CancelAndExit),
         command if command.starts_with("/provider ") => {
@@ -151,6 +190,30 @@ pub fn map_input(input: &str) -> Result<UiAction, String> {
         }
         command if command.starts_with("/tasks ") => {
             Err("use `/tasks` without arguments".to_owned())
+        }
+        command if command.starts_with("/context ") => {
+            Err("use `/context` without arguments".to_owned())
+        }
+        command if command.starts_with("/thinking ") => {
+            Err("use `/thinking` without arguments".to_owned())
+        }
+        command if command.starts_with("/compact ") => {
+            let focus = command.strip_prefix("/compact ").unwrap_or_default().trim();
+            Ok(UiAction::Compact(
+                (!focus.is_empty()).then(|| focus.to_owned()),
+            ))
+        }
+        command if command.starts_with("/new ") => Err("use `/new` without arguments".to_owned()),
+        command if command.starts_with("/clear ") => {
+            Err("use `/clear` without arguments".to_owned())
+        }
+        command if command.starts_with("/resume ") => {
+            let id = command.strip_prefix("/resume ").unwrap_or_default().trim();
+            if id.is_empty() {
+                Ok(UiAction::ShowSessions)
+            } else {
+                Ok(UiAction::ResumeSession(id.to_owned()))
+            }
         }
         command if command.starts_with("/usage ") => {
             Err("use `/usage` without arguments".to_owned())

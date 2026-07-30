@@ -18,6 +18,9 @@ use std::{
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) type ProviderStreamReceiver =
+    mpsc::UnboundedReceiver<Result<ProviderEvent, PendingFailure>>;
+
 /// Deadlines the host applies while waiting on provider subprocesses.
 ///
 /// A provider is an external process that can hang without dying, so every wait on it is
@@ -67,6 +70,51 @@ pub struct PendingProviderRequest {
     provider: ProviderId,
     id: ProviderRequestId,
     receiver: oneshot::Receiver<Result<Value, PendingFailure>>,
+}
+
+/// A streaming chat with independently correlated response and notification routes.
+#[derive(Debug)]
+pub struct PendingProviderChat {
+    request: PendingProviderRequest,
+    events: ProviderStreamReceiver,
+}
+
+impl PendingProviderChat {
+    /// Returns the host-assigned request identifier shared by the response and stream route.
+    pub fn id(&self) -> ProviderRequestId {
+        self.request.id()
+    }
+
+    /// Waits for the next event from this chat's correlated stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns request-scoped or process-wide provider failures. `Ok(None)` means a terminal
+    /// notification closed the stream route after its final event.
+    #[cfg(feature = "test-support")]
+    pub async fn next_event(&mut self) -> Result<Option<ProviderEvent>, ProviderError> {
+        match self.events.recv().await {
+            Some(Ok(event)) => Ok(Some(event)),
+            Some(Err(failure)) => Err(failure.into_error(&self.request.provider, self.request.id)),
+            None => Ok(None),
+        }
+    }
+
+    /// Waits for the JSON-RPC response paired with this chat stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, protocol, remote, cancellation, or shutdown failures from the paired
+    /// request response.
+    #[cfg(feature = "test-support")]
+    pub async fn wait_response(self) -> Result<Value, ProviderError> {
+        self.request.wait().await
+    }
+
+    /// Separates the response waiter from its already-registered stream receiver.
+    pub(crate) fn into_parts(self) -> (PendingProviderRequest, ProviderStreamReceiver) {
+        (self.request, self.events)
+    }
 }
 
 impl PendingProviderRequest {
@@ -177,6 +225,7 @@ impl ProviderHost {
     /// Returns an error when the provider is unknown, shut down, cannot start, or cannot accept
     /// the request.
     #[allow(clippy::needless_pass_by_value)] // The public contract transfers opaque JSON.
+    #[cfg(feature = "test-support")]
     pub async fn request_async(
         &self,
         provider: &ProviderId,
@@ -190,6 +239,32 @@ impl ProviderHost {
             provider: provider.clone(),
             id,
             receiver,
+        })
+    }
+
+    /// Starts a streaming chat after atomically registering its response and stream routes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unknown, shut down, cannot start, or rejects the
+    /// request write. The stream receiver receives request-scoped protocol failures, while an
+    /// uncorrelatable framing failure terminates the provider and fails every pending chat.
+    #[allow(clippy::needless_pass_by_value)] // The public contract transfers opaque JSON.
+    pub async fn start_chat(
+        &self,
+        provider: &ProviderId,
+        params: Value,
+    ) -> Result<PendingProviderChat, ProviderError> {
+        let process = self.process_for(provider).await?;
+        let id = ProviderRequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let (receiver, events) = process.send_chat(id, params).await?;
+        Ok(PendingProviderChat {
+            request: PendingProviderRequest {
+                provider: provider.clone(),
+                id,
+                receiver,
+            },
+            events,
         })
     }
 
@@ -387,7 +462,7 @@ impl ProviderHost {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum PendingFailure {
+pub(crate) enum PendingFailure {
     Transport(String),
     Protocol(String),
     Remote {
@@ -400,7 +475,7 @@ pub(super) enum PendingFailure {
 }
 
 impl PendingFailure {
-    fn into_error(self, provider: &ProviderId, id: ProviderRequestId) -> ProviderError {
+    pub(crate) fn into_error(self, provider: &ProviderId, id: ProviderRequestId) -> ProviderError {
         match self {
             Self::Transport(message) => ProviderError::Transport {
                 provider: provider.as_str().to_owned(),

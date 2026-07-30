@@ -1,10 +1,33 @@
 //! Persistent, best-effort cache of provider model catalogs.
 
 use crate::{
-    InputModality, MisyPaths, ModelId, ModelInfo, ModelRef, ProviderId, config::write_atomic,
+    InputModality, MisyPaths, ModelId, ModelInfo, ModelRef, ProviderId, ThinkingInfo,
+    config::write_atomic,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, error::Error, fmt, fs, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+pub(crate) const MODEL_CACHE_TTL_MS: u64 = 15 * 60 * 1_000;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogSource {
+    Remote,
+    Bundled,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CachedCatalog {
+    pub(crate) models: Vec<ModelInfo>,
+    pub(crate) fetched_at: u64,
+    pub(crate) source: CatalogSource,
+}
 
 /// Errors while persisting the non-critical model catalog cache.
 #[derive(Debug)]
@@ -50,7 +73,15 @@ impl Default for ModelCatalogFile {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CachedProvider {
+    #[serde(default)]
+    fetched_at: u64,
+    #[serde(default = "remote_source")]
+    source: CatalogSource,
     models: Vec<CachedModel>,
+}
+
+const fn remote_source() -> CatalogSource {
+    CatalogSource::Remote
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -58,6 +89,12 @@ struct CachedModel {
     id: String,
     display_name: String,
     context_window: u32,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    pricing: Option<String>,
+    #[serde(default)]
+    thinking: Option<ThinkingInfo>,
     #[serde(default = "text_only_modalities")]
     input_modalities: Vec<InputModality>,
 }
@@ -82,7 +119,7 @@ pub(crate) struct PendingModelCatalogWrite {
 
 impl ModelCatalogStore {
     /// Current model-cache schema revision.
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     /// Creates a model catalog store rooted at `paths`.
     pub fn new(paths: MisyPaths) -> Self {
@@ -115,6 +152,29 @@ impl ModelCatalogStore {
             .into_iter()
             .flat_map(|(provider, catalog)| cached_models(&provider, catalog))
             .collect()
+    }
+
+    pub(crate) fn catalog(&self, provider: &ProviderId) -> Option<CachedCatalog> {
+        let catalog = self
+            .state
+            .lock()
+            .expect("model cache state mutex must not be poisoned")
+            .file
+            .providers
+            .get(provider)
+            .cloned()?;
+        Some(CachedCatalog {
+            fetched_at: catalog.fetched_at,
+            source: catalog.source,
+            models: cached_models(provider, catalog),
+        })
+    }
+
+    pub(crate) fn is_stale(&self, provider: &ProviderId) -> bool {
+        self.catalog(provider).is_none_or(|catalog| {
+            catalog.source == CatalogSource::Bundled
+                || now_millis().saturating_sub(catalog.fetched_at) >= MODEL_CACHE_TTL_MS
+        })
     }
 
     /// Replaces one provider's cached catalog.
@@ -157,11 +217,22 @@ impl ModelCatalogStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_save(
         &self,
         provider: &ProviderId,
         models: &[ModelInfo],
         credential_epoch: u64,
+    ) -> PendingModelCatalogWrite {
+        self.stage_save_with_source(provider, models, credential_epoch, CatalogSource::Remote)
+    }
+
+    pub(crate) fn stage_save_with_source(
+        &self,
+        provider: &ProviderId,
+        models: &[ModelInfo],
+        credential_epoch: u64,
+        source: CatalogSource,
     ) -> PendingModelCatalogWrite {
         let mut state = self
             .state
@@ -170,6 +241,8 @@ impl ModelCatalogStore {
         state.file.providers.insert(
             provider.clone(),
             CachedProvider {
+                fetched_at: now_millis(),
+                source,
                 models: models.iter().map(CachedModel::from).collect(),
             },
         );
@@ -234,6 +307,14 @@ impl ModelCatalogStore {
     }
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 fn read_file(paths: &MisyPaths) -> ModelCatalogFile {
     let Ok(contents) = fs::read(paths.models_file()) else {
         return ModelCatalogFile::default();
@@ -241,12 +322,6 @@ fn read_file(paths: &MisyPaths) -> ModelCatalogFile {
     let Ok(cache) = serde_json::from_slice::<ModelCatalogFile>(&contents) else {
         return ModelCatalogFile::default();
     };
-    if cache.version == 1 {
-        return ModelCatalogFile {
-            version: ModelCatalogStore::VERSION,
-            providers: cache.providers,
-        };
-    }
     if cache.version != ModelCatalogStore::VERSION {
         return ModelCatalogFile::default();
     }
@@ -259,6 +334,9 @@ impl From<&ModelInfo> for CachedModel {
             id: model.model.model.as_str().to_owned(),
             display_name: model.display_name.clone(),
             context_window: model.context_window,
+            description: model.description.clone(),
+            pricing: model.pricing.clone(),
+            thinking: model.thinking.clone(),
             input_modalities: model.input_modalities.clone(),
         }
     }
@@ -275,6 +353,7 @@ fn cached_models(provider: &ProviderId, catalog: CachedProvider) -> Vec<ModelInf
                 model.context_window,
             )
             .with_input_modalities(model.input_modalities)
+            .with_optional_metadata(model.description, model.pricing, model.thinking)
         })
         .collect()
 }
@@ -322,7 +401,7 @@ mod tests {
 
         let contents = fs::read(paths.models_file()).expect("read cache file");
         let json: serde_json::Value = serde_json::from_slice(&contents).expect("cache json");
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["version"], 3);
         assert!(
             json["providers"].get("provider-a").is_some(),
             "provider id must stay a plain string key: {json}"
@@ -349,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_version_one_models_to_text_only() {
+    fn treats_version_two_cache_as_empty() {
         let temporary = tempdir().expect("temporary root");
         let paths = MisyPaths::from_root(temporary.path());
         fs::create_dir_all(paths.models_file().parent().expect("models parent"))
@@ -357,7 +436,7 @@ mod tests {
         fs::write(
             paths.models_file(),
             br#"{
-                "version": 1,
+                "version": 2,
                 "providers": {
                     "provider-a": {"models": [{
                         "id": "model-a",
@@ -371,8 +450,7 @@ mod tests {
 
         let models = ModelCatalogStore::new(paths).load();
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].input_modalities, vec![InputModality::Text]);
+        assert!(models.is_empty());
     }
 
     #[test]

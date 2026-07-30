@@ -1,15 +1,17 @@
 //! Public values and errors exposed by the headless core.
 
+use super::session::SessionError;
 use crate::{
-    ActivitySummary, ConfigError, CredentialError, ImageAttachment, InputModality, Message,
-    ModelInfo, ModelRef, ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId,
-    ToolCall, ToolResult,
+    ActivitySummary, AgentId, AgentSummary, ConfigError, CredentialError, ImageAttachment,
+    InputModality, InstructionWarning, Message, ModelInfo, ModelProfile, ModelRef,
+    ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{error::Error, fmt};
 
 /// A stable handle for one asynchronous agent submission.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct SubmissionId(pub(super) u64);
 
 impl SubmissionId {
@@ -20,7 +22,7 @@ impl SubmissionId {
 }
 
 /// A canonical history item retained by the Rust core. Provider metadata stays opaque.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct HistoryEntry {
     /// User, assistant, or tool message retained for the next provider request.
     pub message: Message,
@@ -59,6 +61,11 @@ pub struct ProviderModelError {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreEvent {
+    /// Context compaction changed state.
+    CompactionChanged {
+        /// Latest bounded compaction projection.
+        compaction: crate::CompactionActivity,
+    },
     /// A background activity was added or changed state.
     ActivityChanged {
         /// Latest bounded activity projection.
@@ -71,6 +78,16 @@ pub enum CoreEvent {
     ActivityFinished {
         /// Final metadata and bounded process output.
         output: crate::ActivityOutput,
+    },
+    /// A background child agent reached its terminal state.
+    ///
+    /// This client-facing notification is independent from the model-facing mailbox. Bounded
+    /// subscribers may recover it from [`CoreSnapshot::agents`](crate::CoreSnapshot::agents).
+    AgentFinished {
+        /// Final bounded roster metadata.
+        agent: AgentSummary,
+        /// Final bounded child result or failure description.
+        result: String,
     },
     /// A package was discovered during core construction.
     ProviderDiscovered {
@@ -143,6 +160,21 @@ pub enum CoreEvent {
         /// Tool execution outcome.
         result: ToolResult,
     },
+    /// The attached conversation's root checklist was replaced.
+    TodoListUpdated {
+        /// New ordered checklist snapshot.
+        todos: Vec<crate::TodoItem>,
+    },
+    /// A core-owned tool is waiting for structured client input.
+    QuestionRequested {
+        /// Complete request used by clients to render and answer the prompt.
+        request: crate::QuestionRequest,
+    },
+    /// A pending request was answered, dismissed, or cancelled by its owner.
+    QuestionResolved {
+        /// Request removed from the current snapshot before this event was published.
+        request_id: crate::QuestionRequestId,
+    },
     /// A submission completed successfully.
     Completed {
         /// Completed submission.
@@ -159,6 +191,16 @@ pub enum CoreEvent {
         submission: SubmissionId,
         /// User-facing failure description.
         message: String,
+    },
+    /// Conversation persistence failed while the in-memory turn continued.
+    SessionPersistenceFailed {
+        /// User-facing description of the local storage failure.
+        message: String,
+    },
+    /// A hierarchical instruction source was blocked or truncated.
+    InstructionWarning {
+        /// Content-free diagnostic safe for every frontend.
+        warning: InstructionWarning,
     },
     /// The core shut down and no longer accepts work.
     Shutdown,
@@ -204,6 +246,8 @@ pub enum CoreError {
     },
     /// The private Tokio runtime could not be started or a runtime task could not complete.
     Runtime(String),
+    /// Required `AGENTS.md` instructions cannot be applied safely.
+    InstructionBlocked(String),
     /// A provider does not advertise the requested optional capability revision.
     UnsupportedCapability {
         /// Provider whose manifest was checked.
@@ -224,10 +268,47 @@ pub enum CoreError {
     },
     /// The selected model is not advertised by its provider.
     UnknownModel(ModelRef),
+    /// A selected model does not advertise the requested reasoning level.
+    UnsupportedThinking(ModelProfile),
     /// No model has been selected for direct interaction.
     NoModelSelected,
     /// No active submission has this identifier.
     UnknownSubmission(SubmissionId),
+    /// No unresolved question has this process-local identifier.
+    UnknownQuestion(crate::QuestionRequestId),
+    /// A client response did not satisfy the pending question contract.
+    InvalidQuestionResponse(String),
+    /// The process-wide live child-agent limit has been reached.
+    AgentLimitReached,
+    /// A task path segment was malformed or already used by a sibling.
+    InvalidAgentTaskName(String),
+    /// Every lossless background-completion mailbox slot is reserved.
+    AgentMailboxFull,
+    /// No retained child agent has this identifier.
+    UnknownAgent(AgentId),
+    /// The requested child agent has already reached a terminal state.
+    AgentAlreadyFinished(AgentId),
+    /// A requested child model is absent or unavailable in the local cache.
+    AgentModelUnavailable(ModelRef),
+    /// A child cannot continue without interactive provider authentication.
+    AgentAuthenticationRequired(ProviderId),
+    /// A synchronous child exceeded the core-owned execution deadline.
+    AgentTimedOut(AgentId),
+    /// Conversation-session storage or lookup failed.
+    Session(SessionError),
+    /// A session switch was requested while queued or active work still owns the conversation.
+    SessionBusy,
+    /// No complete prefix exists before the two preserved user turns.
+    NothingToCompact,
+    /// Generated compaction did not reduce the active projection.
+    CompactionNoProgress,
+    /// A session switch requires explicit disposal of retained child-agent state.
+    SessionAgentStatePending {
+        /// Live children that will be stopped by disposal.
+        live_agents: usize,
+        /// Unconsumed background results that will be discarded.
+        pending_results: usize,
+    },
     /// The core has been shut down.
     Shutdown,
 }
@@ -255,6 +336,9 @@ impl fmt::Display for CoreError {
                 "submission images contain {found} bytes; maximum is {maximum}"
             ),
             Self::Runtime(message) => write!(formatter, "runtime error: {message}"),
+            Self::InstructionBlocked(message) => {
+                write!(formatter, "instruction context is blocked: {message}")
+            }
             Self::UnsupportedCapability {
                 provider,
                 capability,
@@ -277,8 +361,51 @@ impl fmt::Display for CoreError {
             Self::UnknownModel(model) => {
                 write!(formatter, "unknown model `{}`", model.model.as_str())
             }
+            Self::UnsupportedThinking(profile) => {
+                write!(formatter, "unsupported model profile `{profile}`")
+            }
             Self::NoModelSelected => formatter.write_str("no model is selected"),
             Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
+            Self::UnknownQuestion(id) => write!(formatter, "unknown or resolved question `{id}`"),
+            Self::InvalidQuestionResponse(message) => {
+                write!(formatter, "invalid question response: {message}")
+            }
+            Self::AgentLimitReached => {
+                formatter.write_str("the root-inclusive agent thread limit is already active")
+            }
+            Self::InvalidAgentTaskName(message) => formatter.write_str(message),
+            Self::AgentMailboxFull => {
+                formatter.write_str("the background agent result mailbox is full")
+            }
+            Self::UnknownAgent(id) => write!(formatter, "unknown agent `{id}`"),
+            Self::AgentAlreadyFinished(id) => write!(formatter, "agent `{id}` is already finished"),
+            Self::AgentModelUnavailable(model) => write!(
+                formatter,
+                "agent model `{}/{}` is unavailable",
+                model.provider.as_str(),
+                model.model.as_str()
+            ),
+            Self::AgentAuthenticationRequired(provider) => write!(
+                formatter,
+                "agent provider `{}` requires authentication",
+                provider.as_str()
+            ),
+            Self::AgentTimedOut(id) => write!(formatter, "agent `{id}` timed out"),
+            Self::Session(error) => write!(formatter, "session error: {error}"),
+            Self::SessionBusy => {
+                formatter.write_str("cannot switch sessions while a submission is active or queued")
+            }
+            Self::NothingToCompact => formatter.write_str("nothing to compact"),
+            Self::CompactionNoProgress => {
+                formatter.write_str("compaction did not reduce the active context")
+            }
+            Self::SessionAgentStatePending {
+                live_agents,
+                pending_results,
+            } => write!(
+                formatter,
+                "session has {live_agents} live agents and {pending_results} pending agent results"
+            ),
             Self::Shutdown => formatter.write_str("misy core has shut down"),
         }
     }
@@ -291,8 +418,15 @@ impl Error for CoreError {
             Self::Credentials(error) => Some(error),
             Self::Discovery(error) => Some(error),
             Self::Provider(error) => Some(error),
+            Self::Session(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<SessionError> for CoreError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
     }
 }
 

@@ -17,6 +17,7 @@ const TERMINAL_SPIRIT: [&str; 4] = [".-----.", "|  >_  |", "| .__. |", "'--..--'
 pub(super) struct StartupHeader {
     model: String,
     directory: String,
+    notice: Option<String>,
 }
 
 impl StartupHeader {
@@ -27,7 +28,15 @@ impl StartupHeader {
         let directory = directory
             .map(display_directory)
             .unwrap_or_else(|| "unavailable".to_owned());
-        Self { model, directory }
+        Self {
+            model,
+            directory,
+            notice: None,
+        }
+    }
+
+    pub(super) fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
     }
 
     pub(super) fn lines(&self, terminal_width: u16) -> Vec<Line<'static>> {
@@ -43,6 +52,14 @@ impl StartupHeader {
             lines.extend(self.dual_column_lines(inner_width));
         } else {
             lines.extend(self.single_column_lines(inner_width));
+        }
+        if let Some(notice) = &self.notice {
+            lines.push(bordered_line(
+                &format!(" {notice}"),
+                inner_width,
+                Alignment::Left,
+                style::muted(),
+            ));
         }
         lines.push(Line::styled(
             format!(" ╰{}╯", "─".repeat(inner_width)),

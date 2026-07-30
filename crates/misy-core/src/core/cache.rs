@@ -54,9 +54,47 @@ impl CoreState {
             .provider_request(provider, "models.list", json!({}))
             .await?;
         let models = parse_models(provider, &response)?;
-        self.save_models_if_current(provider, credential_epoch, &models)
+        let source = if response.get("source").and_then(Value::as_str) == Some("bundled") {
+            crate::model_cache::CatalogSource::Bundled
+        } else {
+            crate::model_cache::CatalogSource::Remote
+        };
+        self.save_models_if_current(provider, credential_epoch, &models, source)
             .await;
         Ok(FetchedModels { response, models })
+    }
+
+    pub(super) async fn refresh_models_if_stale(
+        &self,
+        provider: &ProviderId,
+    ) -> Result<Vec<ModelInfo>, CoreError> {
+        if !self.model_cache.is_stale(provider) {
+            return Ok(self
+                .model_cache
+                .catalog(provider)
+                .map_or_else(Vec::new, |catalog| catalog.models));
+        }
+        let operation = {
+            let mut operations = self
+                .model_refreshes
+                .lock()
+                .expect("model refresh mutex must not be poisoned");
+            Arc::clone(
+                operations
+                    .entry(provider.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _guard = operation.lock().await;
+        if !self.model_cache.is_stale(provider) {
+            return Ok(self
+                .model_cache
+                .catalog(provider)
+                .map_or_else(Vec::new, |catalog| catalog.models));
+        }
+        self.fetch_models(provider)
+            .await
+            .map(|catalog| catalog.models)
     }
 
     async fn save_models_if_current(
@@ -64,14 +102,15 @@ impl CoreState {
         provider: &ProviderId,
         expected: CredentialEpoch,
         models: &[ModelInfo],
+        source: crate::model_cache::CatalogSource,
     ) {
         let _credentials = self.credential_operations.lock().await;
         if self.credential_epoch(provider).value != expected.value || !expected.present {
             return;
         }
-        let write = self
-            .model_cache
-            .stage_save(provider, models, expected.value);
+        let write =
+            self.model_cache
+                .stage_save_with_source(provider, models, expected.value, source);
         let cache = Arc::clone(&self.model_cache);
         // Cache persistence is best effort and never invalidates a usable provider response.
         let _ = tokio::task::spawn_blocking(move || cache.persist(write)).await;

@@ -1,6 +1,6 @@
 /** Discovers account-scoped Codex models and retains a bundled offline fallback. */
 
-import { fetchWithTimeout } from "@misy/provider-sdk";
+import { fetchWithTimeout, referencePricing } from "@misy/provider-sdk";
 import { authHeaders } from "./auth";
 import type { ProviderConfig } from "./config";
 import type { Credentials } from "./types";
@@ -14,6 +14,12 @@ export type Model = {
 	display_name: string;
 	context_window: number;
 	reasoning: boolean;
+	description?: string;
+	pricing?: string;
+	thinking?: {
+		default: string;
+		levels: { id: string; description: string }[];
+	};
 	input_modalities: ("text" | "image")[];
 };
 
@@ -59,6 +65,12 @@ const FALLBACK_MODELS: readonly Model[] = [
 ];
 
 let reasoningByModel = reasoningLookup(FALLBACK_MODELS);
+let lastCatalogSource: "remote" | "bundled" = "bundled";
+
+/** Returns the source of the most recently resolved catalog. */
+export function catalogSource(): "remote" | "bundled" {
+	return lastCatalogSource;
+}
 
 /**
  * Lists models available to the supplied subscription, using bundled models when discovery fails.
@@ -74,11 +86,13 @@ export async function listModels(
 	for (const path of ["/codex/models", "/models"]) {
 		const models = await discoverModels(config, credentials, path);
 		if (models !== undefined) {
-			reasoningByModel = reasoningLookup(models);
+			lastCatalogSource = "remote";
+			reasoningByModel = reasoningLookup([...FALLBACK_MODELS, ...models]);
 			return copyModels(models);
 		}
 	}
 	reasoningByModel = reasoningLookup(FALLBACK_MODELS);
+	lastCatalogSource = "bundled";
 	return copyModels(FALLBACK_MODELS);
 }
 
@@ -137,16 +151,24 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 	if (!isRecord(value)) return [];
 	const id = nonEmptyString(value["slug"]) ?? nonEmptyString(value["id"]);
 	if (!id || isHidden(value["visibility"])) return [];
+	const fallback = FALLBACK_MODELS.find((model) => model.id === id);
+	const thinking = mergeThinking(
+		thinkingMetadata(value["default_reasoning_level"], value["supported_reasoning_levels"]),
+		fallback?.thinking,
+	);
+	const pricing = nonEmptyString(value["pricing"]) ?? fallback?.pricing ?? referencePricing(id);
 	return [
 		{
 			id,
 			display_name: nonEmptyString(value["display_name"]) ?? id,
 			context_window: positiveInteger(value["context_window"]) ?? contextWindowFallback(id),
 			input_modalities: inputModalities(value["input_modalities"]),
-			reasoning: hasReasoning(
-				value["default_reasoning_level"],
-				value["supported_reasoning_levels"],
-			),
+			reasoning: thinking !== undefined,
+			...(thinking === undefined ? {} : { thinking }),
+			...(nonEmptyString(value["description"]) === undefined
+				? {}
+				: { description: nonEmptyString(value["description"]) }),
+			...(pricing === undefined ? {} : { pricing }),
 			priority: finiteNumber(value["priority"]) ?? Number.MAX_SAFE_INTEGER,
 		},
 	];
@@ -173,12 +195,58 @@ function contextWindowFallback(modelId: string): number {
 		: DEFAULT_CONTEXT_WINDOW;
 }
 
-function hasReasoning(defaultLevel: unknown, supportedLevels: unknown): boolean {
-	return nonEmptyString(defaultLevel) !== undefined || nonEmptyReasoningLevels(supportedLevels);
+function thinkingMetadata(
+	defaultLevel: unknown,
+	supportedLevels: unknown,
+): Model["thinking"] | undefined {
+	const ids = Array.isArray(supportedLevels)
+		? supportedLevels.flatMap((level) => {
+				const id =
+					typeof level === "string"
+						? nonEmptyString(level)
+						: isRecord(level)
+							? nonEmptyString(level["id"])
+							: undefined;
+				return id && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(id) ? [id] : [];
+			})
+		: [];
+	const unique = [...new Set(ids)];
+	const declaredDefault = nonEmptyString(defaultLevel);
+	if (declaredDefault && !unique.includes(declaredDefault)) unique.push(declaredDefault);
+	if (unique.length === 0) return undefined;
+	const defaultId =
+		declaredDefault && unique.includes(declaredDefault) ? declaredDefault : unique[0];
+	if (defaultId === undefined) return undefined;
+	return {
+		default: defaultId,
+		levels: unique.map((id) => ({ id, description: reasoningDescription(id) })),
+	};
 }
 
-function nonEmptyReasoningLevels(value: unknown): boolean {
-	return Array.isArray(value) && value.length > 0;
+function reasoningDescription(id: string): string {
+	return (
+		{
+			minimal: "Minimal reasoning",
+			low: "Faster, lighter reasoning",
+			medium: "Balanced reasoning",
+			high: "Deeper reasoning",
+			xhigh: "Extra-high reasoning",
+			max: "Maximum reasoning",
+		}[id] ?? `Provider reasoning level ${id}`
+	);
+}
+
+function mergeThinking(
+	discovered: Model["thinking"] | undefined,
+	reference: Model["thinking"] | undefined,
+): Model["thinking"] | undefined {
+	if (!discovered) return reference;
+	if (!reference) return discovered;
+	const levels = [...discovered.levels];
+	for (const level of reference.levels) {
+		if (!levels.some((candidate) => candidate.id === level.id)) levels.push({ ...level });
+	}
+	return { default: discovered.default, levels };
 }
 
 function isHidden(visibility: unknown): boolean {
@@ -213,5 +281,17 @@ function reasoningLookup(models: readonly Model[]): Map<string, boolean> {
 }
 
 function imageModel(model: Omit<Model, "input_modalities">): Model {
-	return { ...model, input_modalities: ["text", "image"] };
+	const levels = model.id.startsWith("gpt-5.6")
+		? ["low", "medium", "high", "xhigh", "max"]
+		: ["low", "medium", "high", "xhigh"];
+	return {
+		...model,
+		...(model.pricing === undefined && referencePricing(model.id) !== undefined
+			? { pricing: referencePricing(model.id) }
+			: {}),
+		...(model.reasoning && model.thinking === undefined
+			? { thinking: thinkingMetadata("medium", levels) }
+			: {}),
+		input_modalities: ["text", "image"],
+	};
 }

@@ -41,7 +41,20 @@ const FALLBACK_MODELS: readonly CatalogEntry[] = [
 		context_window: 262_144,
 		protocol: "anthropic",
 	}),
-	imageModel({ id: "k3", display_name: "K3", context_window: 1_048_576, protocol: "openai" }),
+	imageModel({
+		id: "k3",
+		display_name: "K3",
+		context_window: 1_048_576,
+		protocol: "openai",
+		thinking: k3Thinking(),
+	}),
+	imageModel({
+		id: "k3-256k",
+		display_name: "K3 256K",
+		context_window: 262_144,
+		protocol: "openai",
+		thinking: k3Thinking(),
+	}),
 ];
 
 /** Lists Kimi's live catalog and provider-local protocols, retaining an outage fallback. */
@@ -116,6 +129,8 @@ function parseModel(value: unknown): CatalogEntry | undefined {
 	if (!isRecord(value) || typeof value["id"] !== "string" || value["id"].trim() === "")
 		return undefined;
 	const id = value["id"];
+	const protocol = modelProtocol(value["protocol"]);
+	const thinking = thinkingMetadata(id, protocol);
 	return {
 		id,
 		display_name:
@@ -130,7 +145,30 @@ function parseModel(value: unknown): CatalogEntry | undefined {
 			value["supports_image_in"] === true || id.toLowerCase().startsWith("kimi-k2")
 				? ["text", "image"]
 				: ["text"],
-		protocol: modelProtocol(value["protocol"]),
+		protocol,
+		...(typeof value["description"] === "string" && value["description"].trim()
+			? { description: value["description"] }
+			: {}),
+		...(typeof value["pricing"] === "string" && value["pricing"].trim()
+			? { pricing: value["pricing"] }
+			: {}),
+		...(thinking === undefined ? {} : { thinking }),
+	};
+}
+
+function thinkingMetadata(id: string, protocol: KimiProtocol): Model["thinking"] {
+	if (protocol !== "openai" || (id !== "k3" && id !== "k3-256k")) return undefined;
+	return k3Thinking();
+}
+
+function k3Thinking(): NonNullable<Model["thinking"]> {
+	return {
+		default: "high",
+		levels: [
+			{ id: "low", description: "Lower reasoning effort" },
+			{ id: "high", description: "Recommended reasoning effort" },
+			{ id: "max", description: "Maximum reasoning effort" },
+		],
 	};
 }
 
@@ -149,6 +187,14 @@ function catalog(entries: readonly CatalogEntry[], authoritative: boolean): Mode
 		models: entries.map(({ protocol: _protocol, ...model }) => ({
 			...model,
 			input_modalities: [...model.input_modalities],
+			...(model.thinking
+				? {
+						thinking: {
+							...model.thinking,
+							levels: model.thinking.levels.map((level) => ({ ...level })),
+						},
+					}
+				: {}),
 		})),
 		protocols: new Map(entries.map((entry) => [entry.id, entry.protocol])),
 		authoritative,

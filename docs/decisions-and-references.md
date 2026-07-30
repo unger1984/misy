@@ -36,18 +36,54 @@ Read this document before making a new architecture or user-interaction choice.
   by adding `description` and `run_in_background`. Its initial and incremental output projections
   share the Codex-style 10,000-token default without claiming wire compatibility.
 - The shared activity UI follows the local Codex and Oh My Pi session/task picker patterns while
-  retaining Misy's core/client boundary. Agent sessions remain deferred, but their activity kind,
-  tabs, and `Main` navigation slot are reserved by the contract.
+  retaining Misy's core/client boundary. `spawn_agent` supports synchronous and detached runs;
+  background results use an explicit pull mailbox. A configurable root-inclusive limit governs a
+  nested agent tree; child histories remain ephemeral and independent, and role tool allowlists
+  determine whether a child may spawn descendants.
+- From Codex, Misy adopts forked child sessions, request-correlated streams, and addressable
+  wait/message/stop operations. From Oh My Pi, it adopts a shared sync/background lifecycle,
+  core-owned activity projection, bounded concurrency, and owner-scoped cleanup.
+- Conversations are always persisted incrementally in flat, versioned, append-only JSONL files
+  under `~/.misy/sessions`. Headers carry canonical cwd and model identity; the resume picker and
+  `--continue` are scoped to an exact canonical cwd match. Resume is explicit, appends to the same
+  file, tolerates malformed trailing records, and fails on a missing, ambiguous, or unsupported
+  session instead of silently creating a new one. `/clear` and `/new` share one handler.
+- `SetTodoList` and `AskUserQuestion` follow Kimi's model-visible names and payload shapes.
+  Checklists replace a complete ordered snapshot with `pending`, `in_progress`, and `done`
+  statuses. Questions accept one to four tabs, two to four choices, single or multiple selection,
+  and a client-synthesized `Other` choice. The recommended twelve-character header length remains
+  model guidance, matching Kimi; clients truncate longer labels instead of rejecting the request.
+  Codex contributes only typed request identity and snapshot recovery. In the TUI, a pending
+  question replaces the composer bottom slot while the current root todo snapshot stays pinned
+  directly above it; questions are not modal popups. The core owns both tools; question capability
+  version 1 is immutable for the core lifetime. One question submits immediately; multiple
+  questions use a separate review-and-submit tab. Three dismissals suppress further dialogs for the
+  same turn owner.
+- Misy always reads the optional global `~/.misy/AGENTS.md` and project-root `AGENTS.md` for a new
+  root conversation. Nested `AGENTS.md` files are discovered only on the ancestor chain of an
+  actual filesystem target, cached per main/child session, and applied before tool side effects.
+  Deeper files win a shared leaf-first 32 KiB project budget. Conditional routing prose remains a
+  model instruction; the core does not parse natural-language conditions or eagerly load linked
+  documents.
+- Instruction discovery follows Codex's stable session ownership, Kimi's leaf-first priority, and
+  Oh My Pi's separate context diagnostics. Misy deliberately adds stricter blocked-source and
+  whole-batch retry semantics. Arbitrary shell text is not parsed: `exec_command` is scoped only by
+  its normalized `cwd`, while `write_stdin` inherits the original command activity cwd.
 - Kimi's push notification delivery and Oh My Pi's push-oriented task presentation were considered
   but rejected for model delivery. Oh My Pi remains the implementation reference for descendant
   post-order traversal, process-group signalling, and graceful-to-hard tree termination; Misy v1
   scopes its portable PTY guarantee to processes that stay in the created Unix process group.
+- Protocol v2 prompt authentication is rendered as a generic TUI form. Secret values are masked
+  and remain transient; the Rust core persists only the provider-owned opaque credential object.
+- Compaction preserves the append-only full transcript and replaces only a derived active-history
+  projection after persisting a manual or automatic checkpoint. Provider-native/archive
+  compaction strategies are outside v1.
 
 ## Deferred Scope
 
-MCP, permissions, subagents, marketplace installation/update, persisted
-conversations, daemon/public IPC, desktop UI, API-key authentication, generic prompt-based
-authentication, and a cross-process credential transaction policy are outside this MVP. The Kimi
+MCP, permissions, agent batches/worktree isolation, marketplace
+installation/update, daemon/public IPC, desktop UI, and a cross-process credential transaction
+policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.
 
 ## Accepted Dependency Risks
@@ -60,11 +96,13 @@ subscription device flow is supported through the version 2 provider protocol.
 
 ## Reference Policy
 
-`.references/openai-codex/` and `.references/oh-my-pi/` are equal local reference implementations. They are idea and implementation sources, not architectural authorities over Misy. `.references/kimi-cli/` is the upstream Kimi CLI, consulted for Kimi provider wire formats and behavior.
+`.references/openai-codex/`, `.references/kimi-cli/`, and `.references/oh-my-pi/` are the three
+local reference implementations. They are idea and implementation sources, not architectural
+authorities over Misy. Kimi CLI is also the primary reference for Kimi provider wire formats.
 
 When a comparable implementation or UX question appears:
 
-1. Inspect both references.
+1. Inspect all three references for the comparable behavior.
 2. Reuse an established pattern that fits Misy's fixed boundaries.
 3. Do not silently invent a third alternative when a suitable pattern exists.
 4. If the references differ materially and the choice changes architecture or user-visible behavior, present the alternatives to the user unless the behavior is already specified.

@@ -10,6 +10,7 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 pub(super) type TransportStateLock = Arc<Mutex<TransportState>>;
@@ -19,6 +20,7 @@ type PendingSender = oneshot::Sender<Result<Value, PendingFailure>>;
 #[derive(Debug, Default)]
 pub(super) struct TransportState {
     pub(super) pending: BTreeMap<u64, PendingSender>,
+    pub(super) streams: BTreeMap<u64, UnboundedSender<Result<ProviderEvent, PendingFailure>>>,
     pub(super) failure: Option<PendingFailure>,
 }
 
@@ -42,11 +44,43 @@ pub(super) fn route_message(
                 "provider requests are not supported".to_owned(),
             ));
         }
-        subscribers.emit(&ProviderEvent {
+        let params = redact_stream_event_params(method, object.get("params"));
+        let request_id = params
+            .get("request_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                PendingFailure::Protocol("stream request_id must be an unsigned integer".to_owned())
+            })?;
+        let event = ProviderEvent {
             provider: provider.clone(),
             method: method.to_owned(),
-            params: redact_stream_event_params(method, object.get("params")),
-        });
+            params,
+        };
+        let route = {
+            let mut transport = state
+                .lock()
+                .expect("provider transport mutex must not be poisoned");
+            let route = transport.streams.get(&request_id).cloned();
+            if matches!(method, "completed" | "failed") {
+                transport.streams.remove(&request_id);
+            }
+            route
+        };
+        if let Some(route) = route {
+            // A closed receiver belongs to a cancelled collector; its late event is harmless.
+            if matches!(method, "text_delta" | "tool_call" | "completed" | "failed") {
+                let _ = route.send(Ok(event.clone()));
+                subscribers.emit(&event);
+            } else {
+                let _ = route.send(Err(PendingFailure::Protocol(format!(
+                    "unknown provider stream event `{method}`"
+                ))));
+            }
+        } else {
+            // Diagnostic subscribers may observe late events, but no active stream can receive
+            // them because correlation found no route.
+            subscribers.emit(&event);
+        }
         return Ok(());
     }
     let id = object.get("id").and_then(Value::as_u64).ok_or_else(|| {
@@ -82,10 +116,15 @@ pub(super) fn fail_pending(state: &TransportStateLock, failure: &PendingFailure)
             return false;
         }
         state.failure = Some(failure.clone());
-        std::mem::take(&mut state.pending)
+        let pending = std::mem::take(&mut state.pending);
+        let streams = std::mem::take(&mut state.streams);
+        (pending, streams)
     };
-    for sender in pending.into_values() {
+    for sender in pending.0.into_values() {
         // A dropped receiver means the waiter already gave up; the failure stays in state.
+        let _ = sender.send(Err(failure.clone()));
+    }
+    for sender in pending.1.into_values() {
         let _ = sender.send(Err(failure.clone()));
     }
     true

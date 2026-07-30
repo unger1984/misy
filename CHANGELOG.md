@@ -1,9 +1,62 @@
 # Changelog
 
+## 2026-07-30
+
+### Added
+
+- Added optional, best-effort Herdr pane lifecycle reporting for interactive Misy sessions, with
+  semantic idle/working/blocked state, coalesced shell-free subprocess calls, and shutdown release.
+
+### Fixed
+
+- Made the model picker present model, context, cost, provider, and description as aligned table
+  columns instead of expanding the selected row into a multi-line metadata block. Missing catalog
+  values stay blank. AnyModel enriches missing price, context, name, and description fields from
+  its official public catalog with a 24-hour stale-preserving cache, and sends selected thinking
+  levels through its documented `reasoning_effort` field. It no longer fabricates a 128k context
+  window. OpenAI reasoning metadata restores the full verified level set when live discovery
+  returns only one level; `Esc` returns to the model list.
+- Added a visible model-search input below the provider tabs that retains and applies its query on
+  `All` and every provider tab.
+- Kept long-list viewports stationary while the cursor moves within their visible rows, scrolling
+  only after the cursor reaches the top or bottom edge.
+- Added Kimi K3 and K3-256K thinking selection with the official `low`, `high`, and `max` levels,
+  defaulting to `high` and sending the choice as `reasoning_effort` through both direct Kimi and
+  AnyModel routes.
+- Passed the pane identifier before reporting options as required by the Herdr CLI, allowing Misy
+  sessions to appear in the Herdr Agents sidebar.
+
 ## 2026-07-29
 
 ### Added
 
+- Added layered hot-reloaded agent roles, exact model search, provider-owned thinking selection,
+  nested canonical agent trees, and visible ordered model attempts.
+- Added append-only manual and automatic context compaction with resumable active-history
+  checkpoints and separate `/context` accounting.
+
+- Added the core-owned `SetTodoList` tool with full-snapshot updates, root-session persistence,
+  resume support, child-agent isolation, and semantic TUI transcript rendering.
+- Added the capability-gated `AskUserQuestion` tool with single- and multi-select prompts, custom
+  answers, cancellation-safe response handling, dismissal suppression, and an interactive TUI
+  dialog.
+- Added hierarchical `AGENTS.md` context with mandatory global and project-root instructions,
+  target-scoped nested rules, stable main/child caches, leaf-first budgets, and atomic tool-batch
+  preflight before filesystem side effects.
+- Added a scrollable `/context` popup backed by a content-free core report for model window,
+  estimated prompt categories, active instruction sources, decoded image bytes, and warnings.
+- Added the bundled AnyModel provider with masked API-key authentication, a dynamic namespaced
+  model catalog, OpenAI-compatible streaming, tool calls, and image input.
+- Added generic protocol v2 prompt forms to the TUI with secret masking, editing, paste,
+  cancellation, and transient credential buffers.
+- Added independent synchronous and background child agents with inherited context, correlated
+  provider streams, scoped command ownership, addressable messaging, bounded transcripts, and a
+  pull-based completion mailbox.
+- Added agent roster, preview, fullscreen transcript, stop handling, and completion notices to the
+  shared TUI activity workflow.
+- Added private, versioned, append-only conversation sessions with automatic incremental
+  persistence, cwd-scoped resume, model restoration, transcript replay, `/new`, `/clear`,
+  `/resume [id]`, `--continue`, and `--resume [id]`.
 - Added clipboard image paste through `Ctrl+V` and `Cmd+V`, including image-only prompts,
   removable composer placeholders, multimodal OpenAI, Anthropic, and Kimi requests, and the
   core-owned `view_image` tool.
@@ -12,6 +65,14 @@
 
 ### Changed
 
+- Expanded provider catalogs with source freshness, descriptions, pricing text, reasoning levels,
+  completed-token usage, stale-cache retention, and compact context-window presentation.
+- Changed the agent limit to a configurable root-inclusive tree budget and made role/parent tool
+  intersections authoritative for nested spawning.
+
+- Moved child role guidance and all `AGENTS.md` contents into an ephemeral request system prefix;
+  session JSONL and visible transcripts retain neither instruction contents nor internal scope
+  retry turns.
 - Redesigned the session transcript with a consistent left inset, distinct user and assistant
   blocks, paired friendly tool calls and results, compact head/tail output, global `Ctrl+O`
   expansion, background-task completion cards, and successful tool-work separators.
@@ -22,6 +83,22 @@
 
 ### Fixed
 
+- Added a Kimi-style progress header to sticky todos and aligned them and the live generation
+  indicator with the transcript content inset.
+- Added a separate review-and-submit tab for multi-question requests while preserving immediate
+  submission for a single question, and compacted completed interactive-tool headers to `Used`.
+- Translated Misy history into strict OpenAI Chat Completions messages for AnyModel instead of
+  forwarding internal metadata and tool records that upstream rejects with HTTP 400.
+- Made AnyModel rate-limit failures actionable and deterministic instead of racing a terminal
+  stream failure against a second JSON-RPC error for the same chat request.
+- Treated the Kimi-style question header length as model guidance instead of rejecting the tool
+  call, truncated long tabs safely, and hid the generation indicator while awaiting an answer.
+- Rendered pending Kimi-style questions inline in the composer slot, preserving hidden drafts and
+  attachments while keeping the current todo snapshot visible with status-specific markers.
+- Rendered provider prompt authentication as an explicit in-popup input field with a visible
+  editing cursor and validation hint, so AnyModel API-key entry is discoverable and actionable.
+- Kept active conversations usable after session-storage failures, tolerated malformed trailing
+  JSONL records, and rejected missing, ambiguous, incompatible, or active-work resume attempts.
 - Prevented foreground commands from being terminated when they transition to background while
   all remaining process permits are occupied.
 - Preserved pasted images when recalling the latest submitted prompt with `Up`, while keeping

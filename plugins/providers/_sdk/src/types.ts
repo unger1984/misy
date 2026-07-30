@@ -8,14 +8,30 @@
 /** JSON values retained verbatim in Misy's opaque credential store. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
+/** Base JSON object the core echoes back opaquely to the provider that issued it. */
+export type ProviderCredentials = Record<string, Json>;
+
 /** OAuth credentials the core echoes back opaquely to the provider that issued them. */
-export type Credentials = {
+export type OAuthCredentials = ProviderCredentials & {
 	access_token: string;
 	refresh_token?: string;
 	expires_at?: number;
 	type: "oauth";
-	[key: string]: Json | undefined;
 };
+
+/** Backward-compatible name for bundled OAuth provider credentials. */
+export type Credentials = OAuthCredentials;
+
+/** API-key credentials owned by providers that authenticate with a static secret. */
+export type ApiKeyCredentials = ProviderCredentials & {
+	api_key: string;
+	type: "api_key";
+};
+
+/** Narrows an opaque credential value for one provider adapter. */
+export type CredentialParser<TCredentials extends ProviderCredentials> = (
+	value: unknown,
+) => TCredentials | undefined;
 
 /** A core-owned tool definition forwarded to the remote model. */
 export type ToolDefinition = {
@@ -46,11 +62,15 @@ export type ChatMessage = Record<string, Json> & {
 };
 
 /** A validated `chat.start` request handed to the provider adapter. */
-export type ChatRequest = {
+export type ChatRequest<TCredentials extends ProviderCredentials = OAuthCredentials> = {
 	model_id: string;
+	/** Optional provider-owned thinking level, negotiated through capability `thinking` v1. */
+	thinking?: string;
+	/** Optional core-owned output ceiling used by maintenance turns such as compaction. */
+	max_output_tokens?: number;
 	messages: readonly ChatMessage[];
 	tools: readonly ToolDefinition[];
-	credentials: Credentials;
+	credentials: TCredentials;
 };
 
 /** Delivers one stream notification correlated to its `chat.start` JSON-RPC request. */

@@ -1,11 +1,13 @@
 //! Command-line argument parsing for the Misy executable.
 
 use misy_core::{ConfigError, MisyPaths};
+use misy_tui::SessionStart;
 use std::{env, error::Error, ffi::OsString, fmt, path::PathBuf};
 
 #[derive(Debug)]
 pub(crate) struct Arguments {
     config_root: Option<PathBuf>,
+    session_start: SessionStart,
 }
 
 impl Arguments {
@@ -20,13 +22,20 @@ impl Arguments {
         }
     }
 
+    pub(crate) fn session_start(&self) -> SessionStart {
+        self.session_start.clone()
+    }
+
     fn parse<I, T>(values: I) -> Result<Self, ArgumentsError>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
-        let mut values = values.into_iter().map(Into::into);
-        let mut arguments = Self { config_root: None };
+        let mut values = values.into_iter().map(Into::into).peekable();
+        let mut arguments = Self {
+            config_root: None,
+            session_start: SessionStart::Fresh,
+        };
 
         while let Some(argument) = values.next() {
             if argument == "-c" {
@@ -39,6 +48,30 @@ impl Arguments {
                 .and_then(|value| value.strip_prefix("--config="))
             {
                 arguments.set_config_root(OsString::from(root))?;
+                continue;
+            }
+            if argument == "--continue" {
+                arguments.set_session_start(SessionStart::ResumeLatest)?;
+                continue;
+            }
+            if argument == "--resume" {
+                let id = values
+                    .next_if(|value| !value.to_string_lossy().starts_with('-'))
+                    .map(|value| value.to_string_lossy().into_owned());
+                let start = id.map_or(SessionStart::ResumePicker, SessionStart::ResumeId);
+                arguments.set_session_start(start)?;
+                continue;
+            }
+            if let Some(id) = argument
+                .to_str()
+                .and_then(|value| value.strip_prefix("--resume="))
+            {
+                let start = if id.is_empty() {
+                    SessionStart::ResumePicker
+                } else {
+                    SessionStart::ResumeId(id.to_owned())
+                };
+                arguments.set_session_start(start)?;
                 continue;
             }
             return Err(ArgumentsError::UnexpectedArgument(argument));
@@ -57,6 +90,14 @@ impl Arguments {
         self.config_root = Some(PathBuf::from(root));
         Ok(())
     }
+
+    fn set_session_start(&mut self, start: SessionStart) -> Result<(), ArgumentsError> {
+        if self.session_start != SessionStart::Fresh {
+            return Err(ArgumentsError::ConflictingSessionOptions);
+        }
+        self.session_start = start;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -64,6 +105,7 @@ pub(crate) enum ArgumentsError {
     MissingConfigPath,
     EmptyConfigPath,
     DuplicateConfigPath,
+    ConflictingSessionOptions,
     UnexpectedArgument(OsString),
 }
 
@@ -74,6 +116,9 @@ impl fmt::Display for ArgumentsError {
             Self::EmptyConfigPath => formatter.write_str("configuration directory cannot be empty"),
             Self::DuplicateConfigPath => {
                 formatter.write_str("configuration directory was specified more than once")
+            }
+            Self::ConflictingSessionOptions => {
+                formatter.write_str("session resume options are mutually exclusive")
             }
             Self::UnexpectedArgument(argument) => {
                 write!(
@@ -92,6 +137,7 @@ impl Error for ArgumentsError {}
 mod tests {
     use super::{Arguments, ArgumentsError};
     use misy_core::MisyPaths;
+    use misy_tui::SessionStart;
 
     #[test]
     fn no_option_uses_the_home_directory_default() {
@@ -147,5 +193,38 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn parses_session_start_options() {
+        let cases = [
+            (vec!["--continue"], SessionStart::ResumeLatest),
+            (vec!["--resume"], SessionStart::ResumePicker),
+            (
+                vec!["--resume", "abc123"],
+                SessionStart::ResumeId("abc123".to_owned()),
+            ),
+            (
+                vec!["--resume=def456"],
+                SessionStart::ResumeId("def456".to_owned()),
+            ),
+        ];
+        for (values, expected) in cases {
+            assert_eq!(
+                Arguments::parse(values)
+                    .expect("parse session option")
+                    .session_start(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_session_start_options() {
+        assert_eq!(
+            Arguments::parse(["--continue", "--resume"])
+                .expect_err("session options must conflict"),
+            ArgumentsError::ConflictingSessionOptions
+        );
     }
 }

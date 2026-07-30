@@ -1,6 +1,6 @@
 //! In-memory supervision and bounded output for local command activities.
 
-use crate::{ActivityId, ActivityKind, ActivityOutput, ActivityStatus, ActivitySummary};
+use crate::{ActivityId, ActivityOutput, ActivityStatus, ActivitySummary, activity::ActivityOwner};
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
@@ -17,15 +17,17 @@ use tokio::{
     time::timeout,
 };
 
-use super::command::CommandRequest;
-
 const MAX_ACTIVE_TASKS: usize = 64;
+const MAX_ACTIVE_CHILD_TASKS: usize = 48;
+const MAX_ACTIVE_TASKS_PER_CHILD: usize = 16;
 const MAX_RECENT_TASKS: usize = 20;
 mod interaction;
+mod launch;
 pub(super) mod output;
 mod pending;
 mod process;
 pub(super) mod pty;
+mod record;
 #[cfg(test)]
 mod tests;
 
@@ -48,8 +50,8 @@ pub(super) struct ActivityManager {
 struct ActivityManagerInner {
     records: Mutex<BTreeMap<ActivityId, Arc<ActivityRecord>>>,
     recent: Mutex<VecDeque<ActivityId>>,
-    next_id: AtomicU64,
-    active_slots: AtomicU64,
+    next_id: Arc<AtomicU64>,
+    admission: Mutex<ActivityAdmission>,
     shutting_down: AtomicBool,
     // Terminal output must not be dropped: the single core router drains this channel, and the
     // four-process admission limit bounds how quickly command producers can enqueue events.
@@ -60,6 +62,7 @@ struct ActivityManagerInner {
 #[derive(Debug)]
 struct ActivityRecord {
     id: ActivityId,
+    owner: ActivityOwner,
     title: String,
     cwd: Option<String>,
     started_at_ms: u64,
@@ -112,12 +115,20 @@ struct ActivityState {
 #[derive(Debug)]
 struct ProcessPermit {
     manager: std::sync::Weak<ActivityManagerInner>,
+    owner: ActivityOwner,
+}
+
+#[derive(Debug, Default)]
+struct ActivityAdmission {
+    active: usize,
+    active_children: usize,
+    per_child: BTreeMap<crate::AgentId, usize>,
 }
 
 impl Drop for ProcessPermit {
     fn drop(&mut self) {
         if let Some(manager) = self.manager.upgrade() {
-            manager.active_slots.fetch_sub(1, Ordering::AcqRel);
+            manager.release_slot(self.owner);
         }
     }
 }
@@ -130,13 +141,17 @@ enum StopReason {
 
 impl ActivityManager {
     pub(super) fn new() -> Self {
+        Self::with_ids(Arc::new(AtomicU64::new(1)))
+    }
+
+    pub(super) fn with_ids(next_id: Arc<AtomicU64>) -> Self {
         let (events, event_receiver) = mpsc::unbounded_channel();
         Self {
             inner: Arc::new(ActivityManagerInner {
                 records: Mutex::new(BTreeMap::new()),
                 recent: Mutex::new(VecDeque::new()),
-                next_id: AtomicU64::new(1),
-                active_slots: AtomicU64::new(0),
+                next_id,
+                admission: Mutex::new(ActivityAdmission::default()),
                 shutting_down: AtomicBool::new(false),
                 events,
                 event_receiver: Mutex::new(Some(event_receiver)),
@@ -173,87 +188,9 @@ impl ActivityManager {
         summaries
     }
 
-    pub(super) fn start(&self, request: &CommandRequest) -> Result<PendingCommand, String> {
-        let permit = self.reserve_slot()?;
-        let id = ActivityId::new(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
-        let (stop, stop_receiver) = watch::channel(None);
-        let (poll_cancel, _) = watch::channel(0);
-        let record = Arc::new(ActivityRecord {
-            id,
-            title: request.description.clone(),
-            cwd: request.cwd.clone(),
-            started_at_ms: now_millis(),
-            interactive: request.tty,
-            permit: Mutex::new(Some(permit)),
-            input: Mutex::new(ActivityInput::Closed),
-            state: Mutex::new(ActivityState {
-                status: ActivityStatus::Running,
-                exit_code: None,
-                output: output::OrderedOutput::default(),
-                message: None,
-                published: false,
-                terminal_event_sent: false,
-            }),
-            delivery_cursor: Mutex::new(output::DeliveryCursor::default()),
-            changed: Notify::new(),
-            stop,
-            supervisor: Mutex::new(SupervisorTask::Pending),
-            supervisor_changed: Notify::new(),
-            interaction: tokio::sync::Mutex::new(()),
-            poll_cancel,
-            session_open: AtomicBool::new(true),
-        });
-        let mut records = self
-            .inner
-            .records
-            .lock()
-            .expect("activity records mutex must not be poisoned");
-        if self.inner.shutting_down.load(Ordering::Acquire) {
-            return Err("cannot run command: activity manager is shutting down".to_owned());
-        }
-        records.insert(id, Arc::clone(&record));
-        drop(records);
-        let spawned = request.spawn().map_err(|error| {
-            self.inner
-                .records
-                .lock()
-                .expect("activity records mutex must not be poisoned")
-                .remove(&id);
-            record.mark_supervisor_unavailable();
-            format!("could not run {}: {error}", request.program_display())
-        })?;
-        let supervisor = match spawned {
-            super::command::SpawnedCommand::Pipe {
-                child,
-                stdout,
-                stderr,
-            } => process::spawn_supervisor(
-                Arc::downgrade(&self.inner),
-                Arc::clone(&record),
-                child,
-                stdout,
-                stderr,
-                stop_receiver,
-                request.timeout,
-            ),
-            super::command::SpawnedCommand::Pty(spawned) => pty::spawn_supervisor(
-                Arc::downgrade(&self.inner),
-                Arc::clone(&record),
-                spawned,
-                stop_receiver,
-                request.timeout,
-            ),
-        };
-        record.set_supervisor(supervisor);
-        let mut pending = PendingCommand {
-            manager: self.clone(),
-            record,
-            promoted: false,
-        };
-        if request.run_in_background {
-            pending.promote()?;
-        }
-        Ok(pending)
+    pub(super) fn cwd_for_owner(&self, owner: ActivityOwner, id: ActivityId) -> Option<String> {
+        self.record_for_owner(owner, id)
+            .and_then(|record| record.summary().cwd)
     }
 
     pub(super) async fn output(
@@ -282,6 +219,59 @@ impl ActivityManager {
         record.cancel_poll();
         record.stop.send_replace(Some(StopReason::Requested));
         true
+    }
+
+    pub(super) fn stop_for_owner(&self, owner: ActivityOwner, id: ActivityId) -> bool {
+        let Some(record) = self.record_for_owner(owner, id) else {
+            return false;
+        };
+        if record.summary().status.is_terminal() {
+            return false;
+        }
+        record.cancel_poll();
+        record.stop.send_replace(Some(StopReason::Requested));
+        true
+    }
+
+    pub(super) fn activities_for_owner(&self, owner: ActivityOwner) -> Vec<ActivitySummary> {
+        let records = self
+            .inner
+            .records
+            .lock()
+            .expect("activity records mutex must not be poisoned");
+        let mut summaries: Vec<_> = records
+            .values()
+            .filter(|record| record.owner == owner && record.is_published())
+            .map(|record| record.summary())
+            .collect();
+        summaries.sort_by_key(|summary| {
+            (
+                summary.status.is_terminal(),
+                std::cmp::Reverse(summary.started_at_ms),
+            )
+        });
+        summaries
+    }
+
+    pub(super) async fn stop_owner(&self, owner: ActivityOwner) {
+        let records: Vec<_> = self
+            .inner
+            .records
+            .lock()
+            .expect("activity records mutex must not be poisoned")
+            .values()
+            .filter(|record| record.owner == owner)
+            .cloned()
+            .collect();
+        for record in &records {
+            if !record.summary().status.is_terminal() {
+                record.cancel_poll();
+                record.stop.send_replace(Some(StopReason::Requested));
+            }
+        }
+        for record in records {
+            record.join_supervisor().await;
+        }
     }
 
     pub(super) async fn shutdown(&self) {
@@ -337,6 +327,14 @@ impl ActivityManager {
             .cloned()
     }
 
+    fn record_for_owner(
+        &self,
+        owner: ActivityOwner,
+        id: ActivityId,
+    ) -> Option<Arc<ActivityRecord>> {
+        self.record(id).filter(|record| record.owner == owner)
+    }
+
     fn publish(&self, record: &Arc<ActivityRecord>) -> Result<(), String> {
         let mut records = self
             .inner
@@ -371,18 +369,60 @@ impl ActivityManager {
         Ok(())
     }
 
-    fn reserve_slot(&self) -> Result<ProcessPermit, String> {
-        self.inner
-            .active_slots
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_ACTIVE_TASKS as u64).then_some(active + 1)
-            })
-            .map(|_| ProcessPermit {
-                manager: Arc::downgrade(&self.inner),
-            })
-            .map_err(|_| {
-                format!("cannot run command: {MAX_ACTIVE_TASKS} processes are already active")
-            })
+    fn reserve_slot(&self, owner: ActivityOwner) -> Result<ProcessPermit, String> {
+        self.inner.reserve_slot(owner)?;
+        Ok(ProcessPermit {
+            manager: Arc::downgrade(&self.inner),
+            owner,
+        })
+    }
+}
+
+impl ActivityManagerInner {
+    fn reserve_slot(&self, owner: ActivityOwner) -> Result<(), String> {
+        let mut admission = self
+            .admission
+            .lock()
+            .expect("activity admission mutex must not be poisoned");
+        if admission.active >= MAX_ACTIVE_TASKS {
+            return Err(format!(
+                "cannot run command: {MAX_ACTIVE_TASKS} processes are already active"
+            ));
+        }
+        if let ActivityOwner::Agent(agent) = owner {
+            let child_active = admission.per_child.get(&agent).copied().unwrap_or_default();
+            if admission.active_children >= MAX_ACTIVE_CHILD_TASKS
+                || child_active >= MAX_ACTIVE_TASKS_PER_CHILD
+            {
+                return Err("cannot run command: child-agent process quota reached".to_owned());
+            }
+            admission.active_children += 1;
+            admission.per_child.insert(agent, child_active + 1);
+        }
+        admission.active += 1;
+        Ok(())
+    }
+
+    fn release_slot(&self, owner: ActivityOwner) {
+        let mut admission = self
+            .admission
+            .lock()
+            .expect("activity admission mutex must not be poisoned");
+        admission.active = admission.active.saturating_sub(1);
+        if let ActivityOwner::Agent(agent) = owner {
+            admission.active_children = admission.active_children.saturating_sub(1);
+            let remaining = admission
+                .per_child
+                .get(&agent)
+                .copied()
+                .unwrap_or_default()
+                .saturating_sub(1);
+            if remaining == 0 {
+                admission.per_child.remove(&agent);
+            } else {
+                admission.per_child.insert(agent, remaining);
+            }
+        }
     }
 }
 
@@ -400,167 +440,6 @@ impl Drop for ActivityManagerInner {
             .expect("activity records mutex must not be poisoned");
         for record in records.values() {
             record.stop.send_replace(Some(StopReason::Shutdown));
-        }
-    }
-}
-
-impl ActivityRecord {
-    fn release_permit(&self) {
-        self.permit
-            .lock()
-            .expect("activity permit mutex must not be poisoned")
-            .take();
-    }
-
-    fn install_pty_writer(&self, writer: Box<dyn Write + Send>) {
-        *self
-            .input
-            .lock()
-            .expect("activity input mutex must not be poisoned") = ActivityInput::Pty(writer);
-    }
-
-    fn close_input(&self) {
-        *self
-            .input
-            .lock()
-            .expect("activity input mutex must not be poisoned") = ActivityInput::Closed;
-    }
-
-    fn cancel_poll(&self) {
-        let next = self.poll_cancel.borrow().saturating_add(1);
-        self.poll_cancel.send_replace(next);
-    }
-
-    fn is_published(&self) -> bool {
-        self.state
-            .lock()
-            .expect("activity state mutex must not be poisoned")
-            .published
-    }
-
-    fn summary(&self) -> ActivitySummary {
-        let state = self
-            .state
-            .lock()
-            .expect("activity state mutex must not be poisoned");
-        self.summary_from_state(&state)
-    }
-
-    fn summary_from_state(&self, state: &ActivityState) -> ActivitySummary {
-        ActivitySummary {
-            id: self.id,
-            kind: ActivityKind::Task,
-            status: state.status,
-            title: self.title.clone(),
-            cwd: self.cwd.clone(),
-            started_at_ms: self.started_at_ms,
-            exit_code: state.exit_code,
-            interactive: self.interactive,
-        }
-    }
-
-    fn output(&self) -> ActivityOutput {
-        let state = self
-            .state
-            .lock()
-            .expect("activity state mutex must not be poisoned");
-        self.output_from_state(&state)
-    }
-
-    fn model_output(&self, max_output_tokens: usize) -> ActivityOutput {
-        let state = self
-            .state
-            .lock()
-            .expect("activity state mutex must not be poisoned");
-        let mut cursor = self
-            .delivery_cursor
-            .lock()
-            .expect("activity delivery cursor mutex must not be poisoned");
-        let projection = state.output.deliver(*cursor, max_output_tokens);
-        *cursor = projection.cursor;
-        self.output_from_projection(&state, projection)
-    }
-
-    fn output_from_state(&self, state: &ActivityState) -> ActivityOutput {
-        let projection = state.output.snapshot();
-        self.output_from_projection(state, projection)
-    }
-
-    fn output_from_projection(
-        &self,
-        state: &ActivityState,
-        projection: output::OutputProjection,
-    ) -> ActivityOutput {
-        ActivityOutput {
-            activity: self.summary_from_state(state),
-            stdout: projection.stdout,
-            stderr: projection.stderr,
-            stdout_truncated: projection.stdout_truncated,
-            stderr_truncated: projection.stderr_truncated,
-            fragments: projection.fragments,
-            message: state.message.clone(),
-        }
-    }
-
-    fn output_with_message(&self, message: String) -> ActivityOutput {
-        let mut output = self.output();
-        output.activity.status = ActivityStatus::Failed;
-        output.message = Some(message);
-        output
-    }
-
-    fn take_terminal_output(&self, state: &mut ActivityState) -> Option<ActivityOutput> {
-        if !state.published || !state.status.is_terminal() || state.terminal_event_sent {
-            return None;
-        }
-        state.terminal_event_sent = true;
-        Some(self.output_from_state(state))
-    }
-
-    fn set_supervisor(&self, supervisor: JoinHandle<()>) {
-        *self
-            .supervisor
-            .lock()
-            .expect("activity supervisor mutex must not be poisoned") =
-            SupervisorTask::Spawned(supervisor);
-        self.supervisor_changed.notify_waiters();
-    }
-
-    fn mark_supervisor_unavailable(&self) {
-        *self
-            .supervisor
-            .lock()
-            .expect("activity supervisor mutex must not be poisoned") = SupervisorTask::Unavailable;
-        self.supervisor_changed.notify_waiters();
-    }
-
-    async fn join_supervisor(&self) {
-        loop {
-            let changed = self.supervisor_changed.notified();
-            tokio::pin!(changed);
-            let supervisor = {
-                let mut task = self
-                    .supervisor
-                    .lock()
-                    .expect("activity supervisor mutex must not be poisoned");
-                match &*task {
-                    SupervisorTask::Pending => None,
-                    SupervisorTask::Spawned(_) => {
-                        let SupervisorTask::Spawned(supervisor) =
-                            std::mem::replace(&mut *task, SupervisorTask::Unavailable)
-                        else {
-                            unreachable!("matched spawned activity supervisor")
-                        };
-                        Some(supervisor)
-                    }
-                    SupervisorTask::Unavailable => return,
-                }
-            };
-            if let Some(supervisor) = supervisor {
-                let _ = supervisor.await;
-                return;
-            }
-            changed.await;
         }
     }
 }

@@ -72,14 +72,25 @@ pub use activity::{
     ActivityId, ActivityKind, ActivityOutput, ActivityOutputFragment, ActivityOutputStream,
     ActivityStatus, ActivitySummary,
 };
-pub use config::{Config, ConfigError, ConfigStore, CredentialError, MisyPaths};
+pub use config::{
+    AgentConfig, CompactionConfig, Config, ConfigError, ConfigStore, CredentialError, MisyPaths,
+};
 pub use core::{
-    AvailableModels, CoreError, CoreEvent, CoreSnapshot, HistoryEntry, MisyCore, ProviderAuthState,
-    ProviderModelError, SubmissionId,
+    AgentAttempt, AgentId, AgentRoleSource, AgentRoleStatus, AgentRoleSummary, AgentSummary,
+    AgentTranscript, AgentTranscriptEntry, AgentTranscriptEntryKind, AvailableModels,
+    ClientCapabilities, CompactionActivity, CompactionCheckpoint, ContextCategory,
+    ContextCategoryUsage, ContextReport, ContextReportState, CoreError, CoreEvent, CoreOptions,
+    CoreSnapshot, HistoryEntry, InstructionOwner, InstructionScope, InstructionSourceKind,
+    InstructionSourceStatus, InstructionSourceSummary, InstructionWarning,
+    InstructionWarningReason, MisyCore, ModelAvailability, ModelFreshness, ModelSearchMatch,
+    ProviderAuthState, ProviderModelError, QuestionItem, QuestionOption, QuestionRequest,
+    QuestionRequestId, QuestionResponse, QuestionSource, ResumeOutcome, SessionError,
+    SessionSummary, SubmissionId, TodoItem, TodoStatus,
 };
 pub use domain::{
-    Message, MessageRole, ModelId, ModelInfo, ModelRef, ProviderDisplayName, ProviderId, ToolCall,
-    ToolDefinition, ToolResult,
+    Message, MessageRole, ModelId, ModelInfo, ModelProfile, ModelRef, ModelSelectorError,
+    ProviderDisplayName, ProviderId, ThinkingInfo, ThinkingLevel, ToolCall, ToolDefinition,
+    ToolResult,
 };
 pub use image::{
     ImageAttachment, ImageAttachmentInfo, ImageError, InputModality, MAX_ACTIVE_IMAGE_BYTES,
@@ -89,7 +100,8 @@ pub use providers::{
     CHAT_CANCEL_REQUEST_ID_FIELD, IMAGE_INPUT_CAPABILITY, IMAGE_INPUT_CAPABILITY_VERSION,
     PROVIDER_METHODS, PROVIDER_PROTOCOL_VERSION, PROVIDER_STREAM_EVENTS, ProviderAuthMethod,
     ProviderCapability, ProviderDiscoveryError, ProviderError, ProviderManifest, ProviderPackage,
-    ProviderRequestId, USAGE_CAPABILITY, USAGE_CAPABILITY_VERSION, USAGE_METHOD,
+    ProviderRequestId, THINKING_CAPABILITY, THINKING_CAPABILITY_VERSION, USAGE_CAPABILITY,
+    USAGE_CAPABILITY_VERSION, USAGE_METHOD,
 };
 
 // Integration tests exercise these internals through the crate boundary. They are not part of
@@ -101,7 +113,8 @@ pub use config::CredentialStore;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use providers::{
-    PendingProviderRequest, ProviderCatalog, ProviderDeadlines, ProviderEvent, ProviderHost,
+    PendingProviderChat, PendingProviderRequest, ProviderCatalog, ProviderDeadlines, ProviderEvent,
+    ProviderHost,
 };
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

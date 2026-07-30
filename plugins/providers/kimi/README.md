@@ -4,6 +4,11 @@ Standalone Misy provider for Kimi For Coding subscriptions. It uses Kimi's OAuth
 lists models dynamically, and translates Misy chat requests to Kimi's OpenAI-compatible streaming
 endpoint.
 
+Kimi K3 and K3-256K expose the official `low`, `high`, and `max` reasoning-effort levels, with
+`high` as the default. The provider sends the selected level as top-level `reasoning_effort` on the
+OpenAI-compatible route. K2.7 Coding routes remain always-thinking without a selectable effort, as
+documented by Kimi.
+
 The manifest declares optional `usage` capability version 1. Its required `usage.get` method
 uses Kimi's usage endpoint with provider-specific subscription headers and normalizes returned
 quota buckets into Misy's usage report. The core injects opaque credentials and validates that

@@ -19,4 +19,10 @@ export type Model = {
 	display_name: string;
 	context_window: number;
 	input_modalities: ("text" | "image")[];
+	description?: string;
+	pricing?: string;
+	thinking?: {
+		default: string;
+		levels: { id: string; description: string }[];
+	};
 };

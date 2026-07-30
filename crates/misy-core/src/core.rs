@@ -1,8 +1,8 @@
 //! Headless orchestration of provider sessions, credentials, events, and FIFO submissions.
 
 use crate::{
-    ActivityId, ActivityOutput, ConfigStore, MisyPaths, ModelInfo, ModelRef, ProviderId,
-    ProviderManifest, ProviderRequestId,
+    ActivityId, ActivityOutput, CompactionConfig, ConfigStore, MisyPaths, ModelProfile, ModelRef,
+    ProviderId, ProviderManifest, ProviderRequestId,
     config::CredentialStore,
     model_cache::ModelCatalogStore,
     providers::{ProviderCatalog, ProviderDeadlines, ProviderHost},
@@ -13,35 +13,72 @@ use std::{
     collections::BTreeMap,
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
 
 mod agent;
+pub(crate) mod agents;
 mod authentication;
 mod cache;
+mod compaction;
+mod context_report;
 mod contracts;
 mod events;
 mod images;
+mod instruction_contracts;
+mod instruction_paths;
+mod instructions;
+mod model_search;
+mod model_selection;
 mod models;
+mod options;
+pub(crate) mod questions;
 mod queue;
+mod roles;
 mod runtime;
+mod session;
+mod session_api;
 mod snapshot;
+pub(crate) mod todos;
+mod tool_router;
+pub(crate) mod turn;
 mod usage;
+use agents::AgentRegistry;
 use authentication::{CredentialMethodChange, ProviderCredentialState, credential_states};
 use contracts::strip_credentials;
-use events::{EventSubscribers, ProviderRoutes, start_provider_event_router};
-use models::select_catalog_default;
+use events::{EventSubscribers, start_provider_event_router};
 use queue::SubmissionQueue;
 use runtime::RuntimeControl;
 
 // These established names are the public core-client contract.
+pub use agents::{
+    AgentAttempt, AgentId, AgentSummary, AgentTranscript, AgentTranscriptEntry,
+    AgentTranscriptEntryKind,
+};
 #[allow(clippy::module_name_repetitions)]
 pub use contracts::{
     AvailableModels, CoreError, CoreEvent, HistoryEntry, ProviderModelError, SubmissionId,
 };
+pub use instruction_contracts::{
+    ContextCategory, ContextCategoryUsage, ContextReport, ContextReportState, InstructionOwner,
+    InstructionScope, InstructionSourceKind, InstructionSourceStatus, InstructionSourceSummary,
+    InstructionWarning, InstructionWarningReason,
+};
+pub use questions::{
+    ClientCapabilities, CoreOptions, QuestionItem, QuestionOption, QuestionRequest,
+    QuestionRequestId, QuestionResponse, QuestionSource,
+};
+pub use roles::{
+    AgentRoleSource, AgentRoleStatus, AgentRoleSummary, ModelAvailability, ModelFreshness,
+    ModelSearchMatch,
+};
+pub use session::{
+    CompactionActivity, CompactionCheckpoint, ResumeOutcome, SessionError, SessionSummary,
+};
+pub use todos::{TodoItem, TodoStatus};
 // These public snapshot names are part of the headless-client contract.
 #[allow(clippy::module_name_repetitions)]
 pub use snapshot::{CoreSnapshot, ProviderAuthState};
@@ -70,28 +107,43 @@ impl CoreInner {
 }
 
 pub(super) struct CoreState {
+    self_reference: OnceLock<Weak<CoreState>>,
     pub(super) catalog: ProviderCatalog,
     pub(super) host: Arc<ProviderHost>,
     pub(super) config_store: ConfigStore,
     pub(super) credential_store: CredentialStore,
     pub(super) model_cache: Arc<ModelCatalogStore>,
+    pub(super) misy_paths: MisyPaths,
+    pub(super) instructions: Mutex<instructions::InstructionRuntime>,
     pub(super) selected_model: Mutex<Option<ModelRef>>,
+    pub(super) selected_thinking: Mutex<Option<String>>,
+    pub(super) compaction_config: CompactionConfig,
+    pub(super) compaction: Mutex<Option<(CompactionActivity, Arc<ActiveSubmission>)>>,
     pub(super) keybindings: BTreeMap<String, Vec<String>>,
-    pub(super) history: Mutex<Vec<HistoryEntry>>,
+    pub(super) client_capabilities: ClientCapabilities,
+    pub(super) history: Arc<Mutex<Vec<HistoryEntry>>>,
+    pub(super) active_history: Arc<Mutex<Vec<HistoryEntry>>>,
+    /// Root checklist uses an independent short-lived lock for snapshot projection.
+    pub(super) todos: Arc<Mutex<Vec<TodoItem>>>,
+    /// Pending questions are locked after todos and never across I/O or await points.
+    pub(super) questions: questions::QuestionRegistry,
+    pub(super) session: Mutex<session::SessionState>,
+    pub(super) agents: AgentRegistry,
     pub(super) dispatcher: ToolDispatcher,
     pub(super) subscribers: EventSubscribers,
-    pub(super) routes: ProviderRoutes,
-    pub(super) provider_gates: Mutex<BTreeMap<ProviderId, Arc<AsyncMutex<()>>>>,
     pub(super) active: Mutex<BTreeMap<u64, Arc<ActiveSubmission>>>,
     pub(super) auth_operations: Mutex<BTreeMap<ProviderId, Arc<AsyncMutex<()>>>>,
     pub(super) credential_operations: AsyncMutex<()>,
     pub(super) credential_states: Mutex<BTreeMap<ProviderId, ProviderCredentialState>>,
     pub(super) model_operations: AsyncMutex<()>,
+    pub(super) model_refreshes: Mutex<BTreeMap<ProviderId, Arc<AsyncMutex<()>>>>,
     pub(super) submission_queue: Mutex<SubmissionQueue>,
+    pub(super) submission_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub(super) next_submission: AtomicU64,
     pub(super) is_shutdown: AtomicBool,
 }
 
+#[derive(Debug)]
 pub(super) struct ActiveSubmission {
     pub(super) cancelled: AtomicBool,
     pub(super) cancellation: watch::Sender<bool>,
@@ -99,7 +151,7 @@ pub(super) struct ActiveSubmission {
 }
 
 impl ActiveSubmission {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (cancellation, _) = watch::channel(false);
         Self {
             cancelled: AtomicBool::new(false),
@@ -133,66 +185,37 @@ impl MisyCore {
     ) -> Result<Self, CoreError> {
         let catalog =
             ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::build(paths, catalog, ProviderDeadlines::default())
-    }
-
-    /// Discovers providers like [`MisyCore::discover`] but with explicit provider wait deadlines.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when provider discovery, configuration loading, or runtime startup fails.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn discover_with_deadlines(
-        paths: MisyPaths,
-        bundled_providers: impl AsRef<Path>,
-        deadlines: ProviderDeadlines,
-    ) -> Result<Self, CoreError> {
-        let catalog =
-            ProviderCatalog::discover(bundled_providers.as_ref(), &paths.provider_plugins_dir())?;
-        Self::build(paths, catalog, deadlines)
-    }
-
-    /// Creates a core from an already-discovered provider catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn from_catalog(paths: MisyPaths, catalog: ProviderCatalog) -> Result<Self, CoreError> {
-        Self::build(paths, catalog, ProviderDeadlines::default())
-    }
-
-    /// Creates a core from a catalog with explicit provider wait deadlines.
-    ///
-    /// Integration tests use this to keep hung-provider scenarios fast; production clients
-    /// should prefer [`MisyCore::discover`] and the default deadlines.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when persisted configuration cannot be loaded or its runtime cannot start.
-    #[cfg(feature = "test-support")]
-    #[doc(hidden)]
-    pub fn from_catalog_with_deadlines(
-        paths: MisyPaths,
-        catalog: ProviderCatalog,
-        deadlines: ProviderDeadlines,
-    ) -> Result<Self, CoreError> {
-        Self::build(paths, catalog, deadlines)
+        Self::build(
+            paths,
+            catalog,
+            ProviderDeadlines::default(),
+            CoreOptions::default(),
+            None,
+        )
     }
 
     fn build(
         paths: MisyPaths,
         catalog: ProviderCatalog,
         deadlines: ProviderDeadlines,
+        options: CoreOptions,
+        workspace_cwd: Option<std::path::PathBuf>,
     ) -> Result<Self, CoreError> {
+        let instruction_root = match workspace_cwd {
+            Some(workspace_cwd) => {
+                instructions::InstructionRoot::load_at(&paths, false, &workspace_cwd)
+            }
+            None => instructions::InstructionRoot::load(&paths, false),
+        }
+        .map_err(CoreError::Runtime)?;
         let config_store = ConfigStore::new(paths.clone());
         let config = config_store.load()?;
         let credential_store = CredentialStore::new(paths.clone());
+        let sessions_dir = paths.sessions_dir();
         let credential_states = credential_states(&catalog, &credential_store);
         let (runtime, owner) = RuntimeControl::new()?;
         let state = Arc::new(CoreState {
+            self_reference: OnceLock::new(),
             credential_states: Mutex::new(credential_states),
             catalog: catalog.clone(),
             host: Arc::new(ProviderHost::with_handle_and_deadlines(
@@ -202,22 +225,39 @@ impl MisyCore {
             )),
             config_store,
             credential_store,
-            model_cache: Arc::new(ModelCatalogStore::new(paths)),
+            model_cache: Arc::new(ModelCatalogStore::new(paths.clone())),
+            misy_paths: paths,
+            instructions: Mutex::new(instructions::InstructionRuntime::new(instruction_root)),
             selected_model: Mutex::new(config.default_model),
+            selected_thinking: Mutex::new(config.default_thinking),
+            compaction_config: config.compaction,
+            compaction: Mutex::new(None),
             keybindings: config.keybindings,
-            history: Mutex::new(Vec::new()),
+            client_capabilities: options.client_capabilities,
+            history: Arc::new(Mutex::new(Vec::new())),
+            active_history: Arc::new(Mutex::new(Vec::new())),
+            todos: Arc::new(Mutex::new(Vec::new())),
+            questions: questions::QuestionRegistry::new(),
+            session: Mutex::new(session::SessionState::new(sessions_dir)?),
+            agents: AgentRegistry::new(config.agents.max_concurrent_threads_per_session),
             dispatcher: ToolDispatcher::new(ToolRegistry::new()),
             subscribers: EventSubscribers::default(),
-            routes: Mutex::new(BTreeMap::new()),
-            provider_gates: Mutex::new(BTreeMap::new()),
             active: Mutex::new(BTreeMap::new()),
             auth_operations: Mutex::new(BTreeMap::new()),
             credential_operations: AsyncMutex::new(()),
             model_operations: AsyncMutex::new(()),
+            model_refreshes: Mutex::new(BTreeMap::new()),
             submission_queue: Mutex::new(SubmissionQueue::default()),
+            submission_worker: Mutex::new(None),
             next_submission: AtomicU64::new(1),
             is_shutdown: AtomicBool::new(false),
         });
+        state
+            .self_reference
+            .set(Arc::downgrade(&state))
+            .map_err(|_| {
+                CoreError::Runtime("could not initialize core self reference".to_owned())
+            })?;
         owner.start(Arc::clone(&state))?;
         start_provider_event_router(
             &runtime.handle,
@@ -268,6 +308,23 @@ impl MisyCore {
             .lock()
             .expect("selected model mutex must not be poisoned")
             .clone()
+    }
+
+    /// Returns the atomically selected model and provider-owned reasoning level.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a prior core task poisoned the selected-thinking mutex.
+    pub async fn selected_profile(&self) -> Option<ModelProfile> {
+        let model = self.selected_model().await?;
+        let thinking = self
+            .inner
+            .state
+            .selected_thinking
+            .lock()
+            .expect("selected thinking mutex must not be poisoned")
+            .clone();
+        Some(ModelProfile::new(model, thinking))
     }
 
     /// Returns a snapshot of the normalized in-memory conversation history.
@@ -344,104 +401,6 @@ impl MisyCore {
         Ok(result)
     }
 
-    /// Fetches a provider's models and emits a [`CoreEvent::ModelsListed`] event.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the provider request fails or its model payload is invalid.
-    pub async fn list_models(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, CoreError> {
-        self.inner.state.ensure_running()?;
-        let models = self.inner.state.fetch_models(provider).await?.models;
-        self.emit(&CoreEvent::ModelsListed {
-            provider: provider.clone(),
-            models: models.clone(),
-        });
-        Ok(models)
-    }
-
-    /// Lists models from every provider with stored credentials.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only when local credential-store access fails.
-    pub async fn available_models(&self) -> Result<AvailableModels, CoreError> {
-        self.inner.state.ensure_running()?;
-        let mut available = AvailableModels::default();
-        for provider in self.providers().await {
-            if !self.has_credentials(&provider.id).await? {
-                continue;
-            }
-            match self.inner.state.fetch_models(&provider.id).await {
-                Ok(catalog) => available.models.extend(catalog.models),
-                Err(error) => available.errors.push(ProviderModelError {
-                    provider: provider.id,
-                    provider_display_name: provider.display_name,
-                    message: error.to_string(),
-                }),
-            }
-        }
-        Ok(available)
-    }
-
-    /// Selects the provider-declared default model, falling back to its first model.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the provider has no valid models or persistence fails.
-    pub async fn select_default_model(&self, provider: &ProviderId) -> Result<ModelRef, CoreError> {
-        self.inner.state.ensure_running()?;
-        let _operation = self.inner.state.model_operations.lock().await;
-        let catalog = self.inner.state.fetch_models(provider).await?;
-        let model = select_catalog_default(provider, &catalog.response, &catalog.models)?;
-        self.persist_selected_model(model.clone()).await?;
-        Ok(model)
-    }
-
-    /// Validates and persists a provider-scoped model selection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the model is absent from the provider catalog or persistence fails.
-    pub async fn select_model(&self, model: ModelRef) -> Result<(), CoreError> {
-        self.inner.state.ensure_running()?;
-        let _operation = self.inner.state.model_operations.lock().await;
-        if !self
-            .inner
-            .state
-            .fetch_models(&model.provider)
-            .await?
-            .models
-            .iter()
-            .any(|available| available.model == model)
-        {
-            return Err(CoreError::UnknownModel(model));
-        }
-        self.persist_selected_model(model).await
-    }
-
-    async fn persist_selected_model(&self, model: ModelRef) -> Result<(), CoreError> {
-        let store = self.inner.state.config_store.clone();
-        let saved_model = model.clone();
-        tokio::task::spawn_blocking(move || {
-            // Read-modify-write: rebuilding a fresh `Config` would silently drop every other
-            // field the file carries as soon as `Config` grows. An unreadable file fails the
-            // selection instead of being clobbered; a missing file falls back to defaults.
-            let mut config = store.load()?;
-            config.default_model = Some(saved_model);
-            store.save(&config)
-        })
-        .await
-        .map_err(|error| CoreError::Runtime(error.to_string()))??;
-        *self
-            .inner
-            .state
-            .selected_model
-            .lock()
-            .expect("selected model mutex must not be poisoned") = Some(model.clone());
-        self.emit(&CoreEvent::ModelSelected { model });
-        Ok(())
-    }
-
     /// Requests cancellation of an active submission and forwards provider cancellation when set.
     ///
     /// # Errors
@@ -463,7 +422,65 @@ impl MisyCore {
 
     /// Requests termination of one active command activity.
     pub fn stop_activity(&self, id: ActivityId) -> bool {
+        if let Some(agent) = self
+            .inner
+            .state
+            .agents
+            .list()
+            .into_iter()
+            .find(|agent| agent.activity_id == id)
+        {
+            return self.inner.state.agents.stop_tree(agent.id).is_ok();
+        }
         self.inner.state.dispatcher.stop_activity(id)
+    }
+
+    /// Returns the retained bounded transcript for one child agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::UnknownAgent`] after an agent has been evicted or belongs to another
+    /// root conversation.
+    pub fn agent_transcript(&self, id: AgentId) -> Result<AgentTranscript, CoreError> {
+        self.inner.state.agents.transcript(id)
+    }
+
+    /// Requests cancellation of one live child agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::UnknownAgent`] for an unknown child or
+    /// [`CoreError::AgentAlreadyFinished`] for a terminal child.
+    pub fn stop_agent(&self, id: AgentId) -> Result<(), CoreError> {
+        self.inner.state.agents.stop(id)
+    }
+
+    /// Stops and explicitly discards all child-agent state for the current conversation.
+    ///
+    /// Clients must obtain user confirmation before calling this operation because unconsumed
+    /// background results are removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the core is shut down or bounded child cleanup does not complete.
+    pub async fn discard_agent_state(&self) -> Result<(), CoreError> {
+        self.inner.state.ensure_running()?;
+        self.inner.state.agents.close_admission();
+        if !self
+            .inner
+            .state
+            .agents
+            .stop_all(std::time::Duration::from_secs(5))
+            .await
+        {
+            self.inner.state.agents.reopen_admission();
+            return Err(CoreError::Runtime(
+                "child-agent cleanup did not complete before the deadline".to_owned(),
+            ));
+        }
+        self.inner.state.agents.discard_current();
+        self.inner.state.agents.reopen_admission();
+        Ok(())
     }
 
     /// Signals shutdown and waits for provider/process cleanup to finish.
@@ -494,6 +511,25 @@ impl Drop for CoreInner {
 }
 
 impl CoreState {
+    pub(super) fn discover_roles(&self) -> BTreeMap<String, roles::AgentRoleSnapshot> {
+        let project_root = self
+            .instructions
+            .lock()
+            .expect("instruction runtime mutex must not be poisoned")
+            .root()
+            .project_root()
+            .to_owned();
+        roles::discover(
+            &self.misy_paths,
+            &project_root,
+            &self.dispatcher.definition_names(),
+        )
+    }
+
+    pub(super) fn weak_self(&self) -> Weak<CoreState> {
+        self.self_reference.get().cloned().unwrap_or_default()
+    }
+
     fn close_admission(&self) {
         // Queue ownership linearizes the shutdown transition with submission acceptance: a
         // submission is either enqueued before this store or rejected after it, never between.
@@ -540,7 +576,21 @@ impl CoreState {
     pub(super) async fn shutdown_services(&self) {
         self.close_admission();
         self.cancel_all_submissions().await;
+        self.cancel_active_compaction().await;
+        self.agents.close_admission();
+        let _ = self
+            .agents
+            .stop_all(std::time::Duration::from_secs(5))
+            .await;
+        // Owner cancellation normally resolves these first. Draining afterward covers an
+        // aborted owner task without waking it early enough to dispatch another local tool.
+        for (request_id, sender) in self.questions.take_all() {
+            self.emit(&CoreEvent::QuestionResolved { request_id });
+            let _ = sender.send(questions::QuestionResolution::Cancelled);
+        }
         self.dispatcher.shutdown().await;
+        self.finish_submission_worker(std::time::Duration::from_secs(5))
+            .await;
         // Provider shutdown is best effort; clients must still observe the Shutdown event.
         let _ = self.host.shutdown().await;
         self.subscribers.emit(&CoreEvent::Shutdown);

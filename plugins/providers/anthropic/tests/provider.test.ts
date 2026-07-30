@@ -411,6 +411,8 @@ test("maps user and tool-result PNGs to Anthropic base64 image blocks", async ()
 	await new AnthropicProvider({ apiBaseUrl: base }).streamChat(
 		{
 			model_id: "claude-opus-4-8",
+			thinking: "low",
+			max_output_tokens: 12_345,
 			messages: [
 				{ role: "user", content: "plain" },
 				{ role: "user", content: "look", attachments: [image] },
@@ -431,6 +433,8 @@ test("maps user and tool-result PNGs to Anthropic base64 image blocks", async ()
 		source: { type: "base64", media_type: "image/png", data: image.data_base64 },
 	};
 	expect(received?.body).toMatchObject({
+		max_tokens: 12_345,
+		thinking: { type: "enabled", budget_tokens: 4_096 },
 		messages: [
 			{ role: "user", content: "plain" },
 			{

@@ -72,16 +72,51 @@ model, authentication, session, and tool orchestration remain in the core.
   remaining amounts, exhausted limits, and known reset timing. If no model is selected, the
   provider does not declare usage capability version 1, authentication fails, the request times
   out, or the report is invalid, the TUI renders the error without changing the selected model.
+- `/context` opens a dedicated centered popup without provider or filesystem I/O. It renders the
+  core-owned report for the selected model and advertised window, estimated Misy prompt,
+  `AGENTS.md`, tool-schema, message, and free-space categories, active or last instruction source
+  summaries, decoded image count/bytes, and blocked/truncated-source warnings. A zero model window
+  is shown as unknown, and images explicitly have no fabricated token estimate. `Up`, `Down`,
+  `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
+- `/model` shows provider tabs and one compact table row per model with aligned model, context,
+  cost, provider, and description columns. A persistent search field below the tab separator shows
+  typed input and filters model names on `All` and every provider tab while retaining the query
+  across tab switches. Narrow layouts hide description and then cost before compressing identity
+  columns. Missing description or pricing values leave their cells blank.
+  Models with multiple reasoning levels open a second picker before the profile is persisted.
+  `/thinking` opens that level picker directly for the selected model, while the footer always
+  shows the effective level.
+- `/compact [focus]` asks the core to compact idle root context. Automatic compaction uses the
+  configured per-model threshold and reserve. `/context` counts effective agent-role descriptions
+  and the active compaction summary separately, lists role source/status warnings without exposing
+  instructions, and reports the automatic threshold. While compacting, the normal busy row shows
+  the trigger, elapsed time, token count, and cancellation hint. Success inserts a compact service
+  divider such as `Compacted context · 96k → 18k`; expanding it reveals a bounded summary preview.
+  Persisted dividers replay at their transcript checkpoint after resume, so prior messages remain
+  visible.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
+- `/new` and `/clear` start the same clean conversation while retaining the previous persisted
+  session. `/resume` opens a filterable, newest-first picker for sessions whose canonical cwd
+  exactly matches the current directory; `/resume <id>` accepts an exact id or unambiguous prefix.
+  The picker shows the first user message, relative modification time, and a short id. Resume
+  rebuilds both the core's provider history and the visible user/assistant/tool transcript, then
+  continues appending to the same session file. These operations are rejected while a submission
+  is active or queued. The footer shows the attached short session id once persistence begins.
+- CLI startup is fresh by default. `--continue` resumes the newest session for the current cwd;
+  `--resume` opens the picker; and `--resume <id>` resumes a specific session. The options are
+  mutually exclusive. If a saved model is no longer available, Misy keeps the current selection
+  and renders a warning instead of failing the resume.
 - `/tasks` opens the shared activity popup. The row below the composer remains visible while active
   or recent activities exist and separately counts running tasks, terminal tasks, and active
   agents. `Down` from an empty composer focuses it and `Enter` opens it. The popup has `All`,
   `Agents`, and `Tasks` tabs, includes `Main`, supports filtering, and shows a bounded tail preview
-  for the selected task. `Enter` opens its ordered output in a fullscreen log viewer. `Up`, `Down`,
+  for the selected task or semantic child-agent transcript. Agent rows show `agent-N`, model,
+  title, and status. `Enter` opens command output or the agent transcript in a fullscreen viewer.
+  `Up`, `Down`,
   `PageUp`, and `PageDown` scroll; live output follows the tail until the user scrolls upward, and
   `Escape` restores the same popup tab, filter, and selection. `Ctrl+X` immediately stops the
-  selected running task. This stop shortcut is named
+  selected running task or agent through the generic core stop operation. This stop shortcut is named
   `activities.stop` in config version 2 and may be rebound; popup hints use the effective binding.
 
   ```toml
@@ -100,9 +135,10 @@ model, authentication, session, and tool orchestration remain in the core.
   `Up` and `Down` move within the filtered model list. Its width is capped and centered on wider
   terminals, while provider tabs wrap across rows and keep the active tab visible on short screens.
   The model viewport uses the height left below those rows and scrolls the selection when the list
-  does not fit. The text filter is retained across tabs, and a background refresh preserves the
-  active tab and selected model when they still exist. Lists show up to eight scrollable numbered
-  rows, aligned dim second-column descriptions, and an
+  does not fit. Reversing direction moves the cursor through the visible rows before the viewport
+  starts scrolling at the opposite edge. The text filter is retained across tabs, and a background
+  refresh preserves the active tab and selected model when they still exist. Lists show up to eight
+  scrollable numbered rows, aligned dim second-column descriptions, and an
   accent-highlighted selection. Digits select visible numbered entries directly. The selected
   model has a checkmark; provider authentication is a second-column status. Providers without
   credentials are not queried, and a failure from one configured provider is shown without hiding
@@ -110,6 +146,25 @@ model, authentication, session, and tool orchestration remain in the core.
 - `Up`/`Down` move, `Enter` accepts, and `Esc` returns. Provider detail renders visible numbered
   `Authorize` or `Log out` actions and `Esc back`; selecting a provider alone has no auth side
   effect.
+- A pending `AskUserQuestion` request replaces the composer in the bottom slot without changing its
+  hidden draft or attachments; it is not a centered popup. Requests recover from `CoreSnapshot` and
+  appear FIFO. Tabs retain selection and custom text; arrows and digits select rows,
+  `Left`/`Right`/`Tab` switch questions, `Space` toggles multi-select choices, and `Enter` advances
+  or submits once every question has an answer. The synthetic `Other` row owns an inline editor.
+  `Esc` leaves that editor first and otherwise dismisses only the current request through the typed
+  core operation. The current root `SetTodoList` snapshot remains pinned immediately above the
+  composer or question surface until cleared: pending items use a muted empty circle, in-progress
+  items use an accented dotted circle and emphasis, and done items use a green check and
+  strikethrough. A Kimi-style `done/total Tasks` header identifies the sticky list. Long
+  question-tab headers are truncated rather than rejected. The generation busy row is hidden while
+  a question is pending, so its `Esc` hint cannot conflict with question dismissal. Both the
+  generation row and sticky todos align with the transcript content inset. The question viewport
+  keeps its selected row visible on short terminals. A single question submits immediately;
+  requests with multiple questions advance to a separate `Submit` tab that reviews every answer
+  before confirmation. Completed
+  `SetTodoList` and `AskUserQuestion` calls render their semantic lists and answers instead of raw
+  JSON, including after session replay, and use compact `Used TodoList` and `Used AskUserQuestion`
+  headers.
 - Transcript rows use a consistent two-column left inset. Submitted prompts occupy a contrasting
   full-width row inside that transcript area; assistant segments have one leading marker, service
   messages remain dim, and failures have a red marker. Tool calls use friendly built-in names with
@@ -142,21 +197,33 @@ model, authentication, session, and tool orchestration remain in the core.
 - Provider authentication follows the `auth.start` kind. `browser` validates and opens the URL,
   then waits for provider completion. `device` does the same while showing the user code in the
   provider operation row. `none` immediately marks the provider authenticated without opening a
-  browser. `prompt` reports that field input is not supported by this client yet.
-- `Esc` cancels an in-flight provider authentication start or browser/device completion wait,
+  browser. `prompt` opens a generic form; secret fields are masked, normal text and paste edit the
+  active field, arrows/Home/End edit or navigate, and Enter advances or submits the final field.
+  Submitted values leave `UiState` immediately and never enter the composer, prompt history, or
+  transcript. While completion runs the popup shows `Validating credentials…`.
+- `Esc` cancels an in-flight provider authentication start, prompt form, or completion wait,
   restores the provider actions in the popup, and asks the core to terminate the blocked provider
   process. The next attempt starts a clean provider process; late results from the cancelled task
   cannot change the popup or authentication state.
 - Browser and device authorization URLs are limited to validated HTTP(S) addresses and are passed
   directly to the OS opener without a shell. Unknown authentication kinds are reported as errors.
-- Authentication completion keeps the opaque provider session separate from the empty browser or
-  device completion object and passes both through the core without pasted credential JSON.
+- Authentication completion keeps the opaque provider session separate from the browser/device
+  completion object or prompt values and passes both through the core without copying secrets into
+  TUI persistence.
 - During active work, `Ctrl+C` interrupts the current operation without exiting. While idle, the
   first press highlights `press Ctrl+C again to exit` in the footer for one second; a second press
   inside that window shuts down the core/provider host, restores the terminal, and exits. Any
   other input clears the armed shortcut. `/exit` performs the same clean shutdown immediately.
 - Event and background-operation processing are bounded per tick so continuous streaming cannot
   starve input handling.
+- A background `AgentFinished` event adds one compact transcript notice. The model-facing mailbox
+  remains independent, and a missed lossy event can be recovered from `CoreSnapshot.agents` and
+  `agent_transcript`. Synchronous agent results are already visible as tool results and are not
+  duplicated as notices.
+- Conversation persistence belongs to the core. The TUI only requests list/new/resume operations
+  and projects the returned canonical history; it never reads or writes session JSONL directly.
+- When session switching encounters retained agent state, the TUI preserves it until the user
+  confirms discard; confirmation calls the core cleanup operation before retrying the switch.
 - The TUI never owns task processes. It polls bounded client output while an activity preview or
   log viewer is visible and sends stop requests through the core; core shutdown remains responsible
   for process-group cleanup. Ordered fragments preserve the stdout/stderr order observed by the
@@ -170,6 +237,11 @@ model, authentication, session, and tool orchestration remain in the core.
   after cancellation.
 - Usage is a core operation, not a TUI-owned provider request: the TUI supplies no endpoint,
   headers, credentials, or provider-specific parsing.
+- When launched inside a Herdr pane with `HERDR_ENV=1` and nonempty `HERDR_PANE_ID`, the client
+  best-effort reports `misy` lifecycle state as source `misy:cli`. Pending questions map to
+  `blocked` ahead of active or queued submissions (`working`), otherwise `idle`. Reporting is a
+  shell-free, deadline-bounded client-runtime adapter; failures never affect the core or terminal
+  loop, rapid duplicate states are coalesced, and normal shutdown releases pane authority.
 
 ## Change Impact
 
@@ -182,6 +254,7 @@ behavior tests. Core events or lifecycle changes also require updates to
 - [`crates/misy-tui/src/lib.rs`](../crates/misy-tui/src/lib.rs)
 - [`crates/misy-tui/src/tui/client.rs`](../crates/misy-tui/src/tui/client.rs)
 - [`crates/misy-tui/src/tui/state.rs`](../crates/misy-tui/src/tui/state.rs)
+- [`crates/misy-tui/src/tui/context_popup.rs`](../crates/misy-tui/src/tui/context_popup.rs)
 - [`crates/misy-tui/src/tui/terminal.rs`](../crates/misy-tui/src/tui/terminal.rs)
 - [`crates/misy-tui/tests/tui.rs`](../crates/misy-tui/tests/tui.rs)
 - [`crates/misy-tui/tests/tui_model_popup.rs`](../crates/misy-tui/tests/tui_model_popup.rs)

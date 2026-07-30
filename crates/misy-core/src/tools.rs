@@ -2,25 +2,25 @@
 //! arguments, and asynchronous execution of the built-ins. The dispatcher's definition list is
 //! the single source of truth for the tools declared to the model, and per-tool budgets (read
 //! and listing caps, command timeout) keep one call from growing a response without bound.
-use crate::{ActivityId, ActivityOutput, ActivitySummary, ToolCall, ToolDefinition, ToolResult};
+use crate::{
+    ActivityId, ActivityOutput, ActivitySummary, ToolCall, ToolDefinition, ToolResult,
+    activity::ActivityOwner,
+};
 use jsonschema::{Draft, Validator};
 use serde_json::Value;
-use std::{collections::BTreeMap, error::Error, fmt, fs, io::Read};
+use std::{collections::BTreeMap, error::Error, fmt, fs};
 use tokio::task::spawn_blocking;
 
 mod activity;
 mod command;
+mod definitions;
+mod filesystem;
 mod image_view;
 mod stdin;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use activity::ActivityEvent;
-
-/// Upper bound for one `read_file` result; larger files are truncated with a marker.
-const MAX_READ_FILE_BYTES: usize = 4 * 1024 * 1024;
-/// Upper bound for one `list_directory` result; extra entries are summarized in a marker.
-const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 
 /// Definitions available to providers. Built-ins are installed on construction.
 #[derive(Clone, Debug)]
@@ -32,6 +32,20 @@ pub struct ToolRegistry {
 struct RegisteredTool {
     definition: ToolDefinition,
     validator: Validator,
+    scope_policy: ToolScopePolicy,
+}
+
+/// Filesystem scope required before one validated tool call may execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolScopePolicy {
+    /// A string argument names the filesystem target.
+    PathArgument(&'static str),
+    /// An optional string argument selects the command working directory.
+    WorkingDirectory(&'static str),
+    /// A task identifier inherits the immutable cwd of its command activity.
+    ActivityWorkingDirectory(&'static str),
+    /// The tool has no filesystem side effect requiring hierarchical instructions.
+    None,
 }
 
 impl ToolRegistry {
@@ -42,16 +56,20 @@ impl ToolRegistry {
     /// Panics only if a statically defined built-in schema is invalid, which is a build-time
     /// invariant covered by tests.
     pub fn new() -> Self {
-        let definitions = builtin_definitions()
+        let definitions = definitions::builtin_definitions()
             .into_iter()
+            .chain(crate::core::agents::tool_definitions())
             .map(|definition| {
                 let validator = compile_schema(&definition.input_schema)
                     .expect("built-in tool schemas must be valid JSON Schema draft 2020-12");
+                let scope_policy = builtin_scope_policy(&definition.name)
+                    .expect("every built-in tool must declare an instruction scope policy");
                 (
                     definition.name.clone(),
                     RegisteredTool {
                         definition,
                         validator,
+                        scope_policy,
                     },
                 )
             })
@@ -89,6 +107,7 @@ impl ToolRegistry {
             RegisteredTool {
                 definition,
                 validator,
+                scope_policy: ToolScopePolicy::None,
             },
         );
         Ok(())
@@ -154,17 +173,28 @@ impl Error for ToolRegistryError {}
 pub struct ToolDispatcher {
     registry: ToolRegistry,
     activities: activity::ActivityManager,
+    activity_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     command_timeout: Option<std::time::Duration>,
 }
 
 impl ToolDispatcher {
     /// Creates an asynchronous dispatcher backed by `registry`.
     pub fn new(registry: ToolRegistry) -> Self {
+        let activity_ids = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
         Self {
             registry,
-            activities: activity::ActivityManager::new(),
+            activities: activity::ActivityManager::with_ids(std::sync::Arc::clone(&activity_ids)),
+            activity_ids,
             command_timeout: None,
         }
+    }
+
+    /// Allocates one identifier shared by command and child-agent activities.
+    pub(crate) fn next_activity_id(&self) -> ActivityId {
+        ActivityId::new(
+            self.activity_ids
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Returns cloned definitions for every registered tool in stable name order.
@@ -184,6 +214,51 @@ impl ToolDispatcher {
             .into_iter()
             .filter(|definition| supports_images || definition.name != "view_image")
             .collect()
+    }
+
+    pub(crate) fn definition_names(&self) -> std::collections::BTreeSet<String> {
+        self.registry.definitions.keys().cloned().collect()
+    }
+
+    pub(crate) fn definitions_for_agent(
+        &self,
+        supports_images: bool,
+        supports_questions: bool,
+        allowed: Option<&std::collections::BTreeSet<String>>,
+    ) -> Vec<ToolDefinition> {
+        self.definitions_for_client(supports_images, supports_questions)
+            .into_iter()
+            .filter(|definition| allowed.is_none_or(|tools| tools.contains(&definition.name)))
+            .collect()
+    }
+
+    pub(crate) fn definitions_for_client(
+        &self,
+        supports_images: bool,
+        supports_questions: bool,
+    ) -> Vec<ToolDefinition> {
+        self.definitions_for(supports_images)
+            .into_iter()
+            .filter(|definition| supports_questions || definition.name != "AskUserQuestion")
+            .collect()
+    }
+
+    pub(crate) fn validate_arguments(&self, call: &ToolCall) -> Result<(), ToolRegistryError> {
+        self.registry
+            .validate_arguments(&call.name, &call.arguments)
+    }
+
+    pub(crate) fn scope_policy(&self, name: &str) -> Result<ToolScopePolicy, ToolRegistryError> {
+        self.registry
+            .definitions
+            .get(name)
+            .map(|tool| tool.scope_policy)
+            .ok_or_else(|| ToolRegistryError::UnknownTool(name.to_owned()))
+    }
+
+    pub(crate) fn activity_cwd(&self, call: &ToolCall, owner: ActivityOwner) -> Option<String> {
+        let id = task_id(call)?;
+        self.activities.cwd_for_owner(owner, id)
     }
 
     /// Replaces the command execution timeout used by `exec_command`.
@@ -233,7 +308,7 @@ impl ToolDispatcher {
     /// than an out-of-band core error.
     #[cfg(feature = "test-support")]
     pub async fn dispatch(&self, call: &ToolCall) -> ToolResult {
-        self.dispatch_inner(call, None).await
+        self.dispatch_inner(call, ActivityOwner::Main, None).await
     }
 
     pub(crate) async fn dispatch_cancellable(
@@ -241,12 +316,23 @@ impl ToolDispatcher {
         call: &ToolCall,
         cancellation: tokio::sync::watch::Receiver<bool>,
     ) -> ToolResult {
-        self.dispatch_inner(call, Some(cancellation)).await
+        self.dispatch_inner(call, ActivityOwner::Main, Some(cancellation))
+            .await
+    }
+
+    pub(crate) async fn dispatch_for_owner(
+        &self,
+        call: &ToolCall,
+        owner: ActivityOwner,
+        cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> ToolResult {
+        self.dispatch_inner(call, owner, Some(cancellation)).await
     }
 
     async fn dispatch_inner(
         &self,
         call: &ToolCall,
+        owner: ActivityOwner,
         cancellation: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> ToolResult {
         if let Err(error) = self
@@ -259,10 +345,10 @@ impl ToolDispatcher {
             "list_directory" => self.list_directory(call).await,
             "read_file" => self.read_file(call).await,
             "view_image" => image_view::execute(call).await,
-            "exec_command" => self.exec_command(call, cancellation).await,
-            "task_list" => self.task_list(call),
-            "task_stop" => self.task_stop(call),
-            "write_stdin" => stdin::execute(call, &self.activities, cancellation).await,
+            "exec_command" => self.exec_command(call, owner, cancellation).await,
+            "task_list" => self.task_list(call, owner),
+            "task_stop" => self.task_stop(call, owner),
+            "write_stdin" => stdin::execute(call, owner, &self.activities, cancellation).await,
             "write_file" => self.write_file(call).await,
             _ => ToolResult::error(&call.id, format!("tool `{}` is not executable", call.name)),
         }
@@ -275,7 +361,7 @@ impl ToolDispatcher {
         let path = path.to_owned();
         let names = match spawn_blocking({
             let path = path.clone();
-            move || list_directory_entries(&path)
+            move || filesystem::list_directory_entries(&path)
         })
         .await
         {
@@ -304,7 +390,7 @@ impl ToolDispatcher {
         let path = path.to_owned();
         match spawn_blocking({
             let path = path.clone();
-            move || read_file_contents(&path)
+            move || filesystem::read_file_contents(&path)
         })
         .await
         {
@@ -320,23 +406,31 @@ impl ToolDispatcher {
     async fn exec_command(
         &self,
         call: &ToolCall,
+        owner: ActivityOwner,
         cancellation: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> ToolResult {
-        command::run(call, &self.activities, self.command_timeout, cancellation).await
+        command::run(
+            call,
+            owner,
+            &self.activities,
+            self.command_timeout,
+            cancellation,
+        )
+        .await
     }
 
-    fn task_list(&self, call: &ToolCall) -> ToolResult {
-        match serde_json::to_string(&self.activities.activities()) {
+    fn task_list(&self, call: &ToolCall, owner: ActivityOwner) -> ToolResult {
+        match serde_json::to_string(&self.activities.activities_for_owner(owner)) {
             Ok(content) => ToolResult::success(&call.id, content),
             Err(error) => ToolResult::error(&call.id, format!("could not encode tasks: {error}")),
         }
     }
 
-    fn task_stop(&self, call: &ToolCall) -> ToolResult {
+    fn task_stop(&self, call: &ToolCall, owner: ActivityOwner) -> ToolResult {
         let Some(id) = task_id(call) else {
             return ToolResult::error(&call.id, "arguments.task_id must have the form `task-N`");
         };
-        if self.activities.stop(id) {
+        if self.activities.stop_for_owner(owner, id) {
             ToolResult::success(&call.id, format!("stop requested for {id}"))
         } else {
             ToolResult::error(
@@ -344,6 +438,10 @@ impl ToolDispatcher {
                 format!("task `{id}` is unknown or already finished"),
             )
         }
+    }
+
+    pub(crate) async fn stop_owner_commands(&self, owner: ActivityOwner) {
+        self.activities.stop_owner(owner).await;
     }
 
     async fn write_file(&self, call: &ToolCall) -> ToolResult {
@@ -373,123 +471,6 @@ impl ToolDispatcher {
     }
 }
 
-fn builtin_definitions() -> [ToolDefinition; 8] {
-    [
-        ToolDefinition::new(
-            "list_directory",
-            "List entries in a directory.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": {"path": {"type": "string"}},
-                "additionalProperties": false,
-            }),
-        ),
-        ToolDefinition::new(
-            "read_file",
-            "Read a UTF-8 file.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": {"path": {"type": "string"}},
-                "additionalProperties": false,
-            }),
-        ),
-        image_view::definition(),
-        exec_command_definition(),
-        ToolDefinition::new(
-            "task_list",
-            "List active and recent background tasks.",
-            serde_json::json!({"type": "object", "additionalProperties": false}),
-        ),
-        ToolDefinition::new(
-            "task_stop",
-            "Stop an active background task and its child processes.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {"type": "string", "pattern": "^task-[1-9][0-9]*$"}
-                },
-                "additionalProperties": false,
-            }),
-        ),
-        ToolDefinition::new(
-            "write_stdin",
-            "Poll new output from any live exec_command session, or write to a PTY session. \
-             Empty chars only polls and never closes stdin. No completion notification is sent; \
-             keep polling until exit_code is returned. Non-empty input to a pipe session returns \
-             StdinClosed.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {"type": "string", "pattern": "^task-[1-9][0-9]*$"},
-                    "chars": {"type": "string", "default": ""},
-                    "yield_time_ms": {
-                        "type": "integer", "minimum": 250, "maximum": 300000
-                    },
-                    "max_output_tokens": {
-                        "type": "integer", "minimum": 1, "maximum": 1000000, "default": 10000
-                    }
-                },
-                "additionalProperties": false,
-            }),
-        ),
-        ToolDefinition::new(
-            "write_file",
-            "Write UTF-8 content to a file.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["path", "content"],
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "additionalProperties": false,
-            }),
-        ),
-    ]
-}
-
-fn exec_command_definition() -> ToolDefinition {
-    ToolDefinition::new(
-        "exec_command",
-        "Run a shell command. Fast commands return inline; long commands continue as sessions. \
-         No completion notification is sent to the model, so poll a returned task_id with an \
-         empty write_stdin until exit_code is present. PTY mode is supported on macOS and Linux.",
-        serde_json::json!({
-            "type": "object",
-            "required": ["cmd"],
-            "properties": {
-                "cmd": {"type": "string"},
-                "cwd": {"type": "string"},
-                "description": {"type": "string"},
-                "run_in_background": {"type": "boolean", "default": false},
-                "yield_time_ms": command_yield_schema(),
-                "timeout_seconds": command_timeout_schema(),
-                "tty": {"type": "boolean", "default": false},
-                "max_output_tokens": {
-                    "type": "integer", "minimum": 1, "maximum": 1000000, "default": 10000
-                }
-            },
-            "additionalProperties": false,
-        }),
-    )
-}
-
-fn command_yield_schema() -> Value {
-    serde_json::json!({
-        "type": "integer", "minimum": 250, "maximum": 30000, "default": 10000
-    })
-}
-
-fn command_timeout_schema() -> Value {
-    serde_json::json!({
-        "type": "integer", "minimum": 0, "maximum": 86400, "default": 0
-    })
-}
-
 fn task_id(call: &ToolCall) -> Option<ActivityId> {
     call.arguments
         .get("task_id")
@@ -504,71 +485,16 @@ fn compile_schema(schema: &Value) -> Result<Validator, ToolRegistryError> {
         .map_err(|error| ToolRegistryError::InvalidSchema(error.to_string()))
 }
 
-/// Reads a regular file into a string, truncating at [`MAX_READ_FILE_BYTES`] with an explicit
-/// marker when the file is larger.
-///
-/// # Errors
-///
-/// Returns an error when the path is missing, is not a regular file, cannot be read, or does not
-/// hold valid UTF-8.
-fn read_file_contents(path: &str) -> Result<String, String> {
-    let metadata = fs::metadata(path).map_err(|error| format!("could not read {path}: {error}"))?;
-    // Opening a FIFO or a device would block a blocking-pool thread until a peer shows up, and
-    // spawn_blocking tasks cannot be cancelled, so only regular files are safe to open.
-    if !metadata.is_file() {
-        return Err(format!(
-            "read_file supports regular files only: {path} is not a regular file"
-        ));
-    }
-    let file = fs::File::open(path).map_err(|error| format!("could not read {path}: {error}"))?;
-    // Reading one byte past the cap both detects truncation and keeps the read bounded when the
-    // file grows after the metadata check above.
-    let mut bytes = Vec::new();
-    file.take(MAX_READ_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("could not read {path}: {error}"))?;
-    let truncated = bytes.len() > MAX_READ_FILE_BYTES;
-    bytes.truncate(MAX_READ_FILE_BYTES);
-    let mut content = match String::from_utf8(bytes) {
-        Ok(content) => content,
-        Err(error) if truncated && error.utf8_error().error_len().is_none() => {
-            // take() can split a multi-byte character exactly at the cap; the prefix before the
-            // incomplete tail is complete UTF-8 and the tail reappears in any continuation read.
-            let valid_up_to = error.utf8_error().valid_up_to();
-            let mut bytes = error.into_bytes();
-            bytes.truncate(valid_up_to);
-            String::from_utf8_lossy(&bytes).into_owned()
+fn builtin_scope_policy(name: &str) -> Option<ToolScopePolicy> {
+    match name {
+        "list_directory" | "read_file" | "view_image" | "write_file" => {
+            Some(ToolScopePolicy::PathArgument("path"))
         }
-        Err(_) => return Err(format!("could not read {path}: file is not valid UTF-8")),
-    };
-    if truncated {
-        content.push_str(&format!(
-            "\n[... truncated: showing the first {MAX_READ_FILE_BYTES} of {} bytes. \
-             Use exec_command, e.g. `sed -n` or `tail`, to read the rest ...]",
-            metadata.len()
-        ));
+        "exec_command" => Some(ToolScopePolicy::WorkingDirectory("cwd")),
+        "write_stdin" => Some(ToolScopePolicy::ActivityWorkingDirectory("task_id")),
+        "task_list" | "task_stop" | "spawn_agent" | "agent_list" | "agent_wait"
+        | "agent_output" | "agent_message" | "agent_stop" | "model_search" | "SetTodoList"
+        | "AskUserQuestion" => Some(ToolScopePolicy::None),
+        _ => None,
     }
-    Ok(content)
-}
-
-fn list_directory_entries(path: &str) -> Result<Vec<String>, String> {
-    let entries = fs::read_dir(path).map_err(|error| format!("could not list {path}: {error}"))?;
-    let mut names = Vec::new();
-    let mut overflow = 0_usize;
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| format!("could not inspect an entry in {path}: {error}"))?;
-        // Entries past the cap are counted rather than collected, so a huge directory cannot
-        // grow the result without bound.
-        if names.len() < MAX_DIRECTORY_ENTRIES {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        } else {
-            overflow += 1;
-        }
-    }
-    names.sort_unstable();
-    if overflow > 0 {
-        names.push(format!("... and {overflow} more"));
-    }
-    Ok(names)
 }

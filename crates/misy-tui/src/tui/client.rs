@@ -3,8 +3,11 @@
 mod authentication;
 mod interrupts;
 mod operation_result;
+mod questions;
+mod sessions;
 mod snapshot;
 mod submission;
+mod view_keys;
 
 use super::{
     action::{UiAction, UiKey, UiMode},
@@ -13,11 +16,12 @@ use super::{
     composer_attachment::ComposerDraft,
     history::PromptHistoryStore,
     keymap::Keymap,
-    state::{OperationScope, ProviderAction, ProviderOperationKind, UiState},
+    state::{ProviderAction, ProviderOperationKind, UiState},
 };
 use misy_core::{
-    ActivityId, ActivityOutput, AvailableModels, CoreError, CoreEvent, MisyCore, MisyPaths,
-    ModelRef, ProviderDisplayName, ProviderId, ProviderManifest, SubmissionId, UsageReport,
+    ActivityId, ActivityOutput, AgentId, AgentTranscript, AvailableModels, CompactionCheckpoint,
+    CoreError, CoreEvent, MisyCore, MisyPaths, ModelRef, ProviderDisplayName, ProviderId,
+    ProviderManifest, SubmissionId, UsageReport,
 };
 use serde_json::Value;
 use snapshot::provider_choices;
@@ -66,15 +70,29 @@ impl From<CoreError> for TuiError {
 
 pub(super) enum ProviderOperationResult {
     Start(ProviderId, String, Result<Value, String>),
-    Complete(ProviderId, String, Result<(), String>),
+    Complete(
+        ProviderId,
+        String,
+        ProviderOperationKind,
+        Result<(), String>,
+    ),
     CancelAuth(ProviderId, Result<(), String>),
     Logout(ProviderId, Result<(), String>),
     Models(u64, Result<AvailableModels, String>),
     SelectModel(ProviderId, Result<ModelRef, String>),
     Usage(ModelRef, Result<UsageReport, String>),
+    Compact(Result<CompactionCheckpoint, String>),
     // `SubmissionAccepted` maps the transcript; this result gates draft clearing and history.
     Submit(SubmissionRequest, Result<SubmissionId, String>),
     ActivityOutput(ActivityId, Option<ActivityOutput>),
+    AgentTranscript(AgentId, Result<AgentTranscript, String>),
+    DiscardAgents(Result<(), String>),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum PendingSessionSwitch {
+    New,
+    Resume(String),
 }
 
 pub(super) struct SubmissionRequest {
@@ -102,6 +120,7 @@ pub struct TuiClient<B> {
     composer_submission_pending: bool,
     activity_output_pending: bool,
     next_activity_output_refresh: std::time::Instant,
+    pending_session_switch: Option<PendingSessionSwitch>,
     keymap: Keymap,
 }
 
@@ -171,6 +190,7 @@ impl<B: BrowserHandoff> TuiClient<B> {
             composer_submission_pending: false,
             activity_output_pending: false,
             next_activity_output_refresh: std::time::Instant::now(),
+            pending_session_switch: None,
             keymap,
         }
     }
@@ -194,7 +214,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
     pub fn insert_text(&mut self, text: &str) {
         self.state.clear_quit_shortcut();
         self.state.activity_bar_focused = false;
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Question {
+            self.state.insert_filter(text);
+        } else if self.state.mode() == UiMode::AuthPrompt {
+            self.state.auth_prompt_insert(text);
+        } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(text);
             }
@@ -208,7 +232,12 @@ impl<B: BrowserHandoff> TuiClient<B> {
         self.state.clear_quit_shortcut();
         self.state.activity_bar_focused = false;
         let normalized = normalize_paste(text);
-        if self.state.mode() == UiMode::Input {
+        if self.state.mode() == UiMode::Question {
+            self.state.insert_filter(&normalized);
+        } else if self.state.mode() == UiMode::AuthPrompt {
+            self.state
+                .auth_prompt_insert(&normalized.replace(['\n', '\t'], " "));
+        } else if self.state.mode() == UiMode::Input {
             if !self.composer_submission_pending {
                 self.state.composer.insert_str(&normalized);
             }
@@ -283,6 +312,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         if key == UiKey::Escape {
             self.refresh_core_projection();
+            if self.state.compaction_is_cancellable() {
+                let core = self.core.clone();
+                tokio::spawn(async move {
+                    core.cancel_compaction().await;
+                });
+                return Ok(());
+            }
             if let Some(submission) = self.state.interruptible_submission() {
                 self.handle_escape(submission);
                 return Ok(());
@@ -325,6 +361,9 @@ impl<B: BrowserHandoff> TuiClient<B> {
                         }
                     }
                     self.state.apply_core_event(event);
+                    if self.state.mode() == UiMode::Context {
+                        self.state.refresh_context(self.core.context_report());
+                    }
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
@@ -337,53 +376,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
         }
         self.refresh_activity_output_if_due();
         received
-    }
-
-    fn handle_view_key(&mut self, key: UiKey) -> Result<(), TuiError> {
-        if self.state.mode() == UiMode::ActivityDetail {
-            match key {
-                UiKey::Up => self.state.scroll_activity_log_up(false),
-                UiKey::Down => self.state.scroll_activity_log_down(false),
-                UiKey::PageUp => self.state.scroll_activity_log_up(true),
-                UiKey::PageDown => self.state.scroll_activity_log_down(true),
-                UiKey::Escape => self.state.reduce(&UiAction::PickerBack),
-                UiKey::StopActivity => self.stop_selected_activity(),
-                _ => {}
-            }
-            return Ok(());
-        }
-        match key {
-            UiKey::Up => self.state.reduce(&UiAction::PickerUp),
-            UiKey::Down => self.state.reduce(&UiAction::PickerDown),
-            UiKey::Left => self.state.reduce(&UiAction::PickerTabLeft),
-            UiKey::Right => self.state.reduce(&UiAction::PickerTabRight),
-            UiKey::Backspace => self.state.backspace_filter(),
-            UiKey::Escape => {
-                if self.cancel_active_authentication() {
-                    return Ok(());
-                }
-                if matches!(
-                    self.state.provider_operation,
-                    Some((
-                        _,
-                        ProviderOperationKind::CancelAuth
-                            | ProviderOperationKind::Logout
-                            | ProviderOperationKind::SelectModel
-                    ))
-                ) {
-                    return Ok(());
-                }
-                self.state.reduce(&UiAction::PickerBack);
-            }
-            UiKey::Enter => return self.confirm_view(),
-            UiKey::SelectIndex(index) => {
-                if self.state.select_picker_number(index) {
-                    return self.confirm_view();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
     }
 
     fn handle_composer_key(&mut self, key: UiKey) -> Result<(), TuiError> {
@@ -419,7 +411,13 @@ impl<B: BrowserHandoff> TuiClient<B> {
             UiAction::ShowProviders => self.show_providers()?,
             UiAction::ShowModels => self.start_model_refresh(),
             UiAction::ShowActivities => self.state.open_activities(),
+            UiAction::ShowSessions => self.show_sessions()?,
+            UiAction::NewSession => self.start_new_session()?,
+            UiAction::ResumeSession(id) => self.resume_session(&id)?,
             UiAction::ShowUsage => self.show_usage()?,
+            UiAction::ShowContext => self.state.open_context(self.core.context_report()),
+            UiAction::ShowThinking => self.show_thinking(),
+            UiAction::Compact(focus) => self.start_compaction(focus),
             UiAction::SubmitPrompt(prompt) => self.submit_prompt(prompt),
             UiAction::SelectModel(model) => self.select_model(model),
             UiAction::StartAuth(provider) => {
@@ -454,15 +452,34 @@ impl<B: BrowserHandoff> TuiClient<B> {
         });
     }
 
+    fn start_agent_transcript_refresh(&mut self, id: AgentId) {
+        if self.activity_output_pending {
+            return;
+        }
+        self.activity_output_pending = true;
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let transcript = core.agent_transcript(id).map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::AgentTranscript(id, transcript));
+        });
+    }
+
     fn refresh_activity_output_if_due(&mut self) {
-        let Some(id) = self.state.activity_output_target() else {
+        let command = self.state.activity_output_target();
+        let agent = self.state.agent_transcript_target();
+        if command.is_none() && agent.is_none() {
             self.activity_output_pending = false;
             return;
-        };
+        }
         let now = std::time::Instant::now();
         if now >= self.next_activity_output_refresh {
             self.next_activity_output_refresh = now + Duration::from_millis(200);
-            self.start_activity_output_refresh(id);
+            if let Some(id) = command {
+                self.start_activity_output_refresh(id);
+            } else if let Some(id) = agent {
+                self.start_agent_transcript_refresh(id);
+            }
         }
     }
 
@@ -476,7 +493,11 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 .add_error(format!("task `{id}` is already finished"));
         }
         if refresh_detail {
-            self.start_activity_output_refresh(id);
+            if let Some(agent) = self.state.agent_transcript_target() {
+                self.start_agent_transcript_refresh(agent);
+            } else {
+                self.start_activity_output_refresh(id);
+            }
         }
     }
 
@@ -506,9 +527,52 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     }
                 }
             }
+            UiMode::AuthPrompt => {}
             UiMode::ModelList => {
                 if let Some(model) = self.state.selected_model_choice() {
-                    self.select_model(model);
+                    let metadata = self
+                        .cached_models
+                        .models
+                        .iter()
+                        .find(|candidate| candidate.model == model)
+                        .cloned();
+                    if let Some(metadata) = metadata.filter(|metadata| {
+                        metadata
+                            .thinking
+                            .as_ref()
+                            .is_some_and(|thinking| thinking.levels.len() > 1)
+                    }) {
+                        let snapshot = self.core.snapshot();
+                        let selected = snapshot
+                            .selected_thinking
+                            .as_deref()
+                            .filter(|level| {
+                                metadata.thinking.as_ref().is_some_and(|thinking| {
+                                    thinking
+                                        .levels
+                                        .iter()
+                                        .any(|candidate| candidate.id == *level)
+                                })
+                            })
+                            .or_else(|| {
+                                metadata
+                                    .thinking
+                                    .as_ref()
+                                    .map(|thinking| thinking.default.as_str())
+                            });
+                        self.state.open_thinking(&metadata, selected);
+                    } else {
+                        self.select_model(model);
+                    }
+                }
+            }
+            UiMode::ThinkingList => {
+                if let Some(profile) = self.state.selected_profile_choice() {
+                    if self.state.thinking_selection_is_reasoning_only() {
+                        self.select_thinking(profile);
+                    } else {
+                        self.select_profile(profile);
+                    }
                 }
             }
             UiMode::ActivityList => match self.state.selected_activity_choice() {
@@ -517,12 +581,48 @@ impl<B: BrowserHandoff> TuiClient<B> {
                     self.state.open_activity_detail(id);
                     self.start_activity_output_refresh(id);
                 }
+                Some(super::activity_picker::ActivityChoice::Agent(id, agent)) => {
+                    self.state.open_agent_detail(id, agent);
+                    self.start_agent_transcript_refresh(agent);
+                }
                 None => {}
             },
+            UiMode::SessionList => {
+                if let Some(id) = self.state.selected_session_id() {
+                    self.resume_session(&id)?;
+                }
+            }
+            UiMode::Confirmation => {
+                if self.state.selected_agent_discard() == Some(true) {
+                    self.start_agent_discard();
+                } else {
+                    self.pending_session_switch = None;
+                    self.state.view = None;
+                    self.state
+                        .add_info("Agent state kept; session switch cancelled");
+                }
+            }
             UiMode::ActivityDetail => {}
+            UiMode::Question => {}
+            UiMode::Context => {}
             UiMode::Input => {}
         }
         Ok(())
+    }
+
+    fn start_agent_discard(&mut self) {
+        let core = self.core.clone();
+        let sender = self.operation_sender.clone();
+        tokio::spawn(async move {
+            let result = core
+                .discard_agent_state()
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(ProviderOperationResult::DiscardAgents(result));
+        });
+        self.state.view = None;
+        self.state
+            .add_info("Stopping agents and discarding retained results…");
     }
 
     fn provider_display_name<'a>(&'a self, provider: &'a ProviderId) -> &'a str {
@@ -549,44 +649,6 @@ impl<B: BrowserHandoff> TuiClient<B> {
         {
             self.auth_task = None;
         }
-    }
-
-    fn cancel_active_authentication(&mut self) -> bool {
-        let Some((OperationScope::Provider(provider), kind)) =
-            self.state.provider_operation.clone()
-        else {
-            return false;
-        };
-        if !matches!(
-            kind,
-            ProviderOperationKind::Start | ProviderOperationKind::Complete
-        ) {
-            return false;
-        }
-        let Some((task_provider, task_kind, task)) = self.auth_task.take() else {
-            return false;
-        };
-        if task_provider != provider || task_kind != kind {
-            self.auth_task = Some((task_provider, task_kind, task));
-            return false;
-        }
-        task.abort();
-        self.state.finish_provider_operation(&provider, kind);
-        self.state.set_provider_operation(
-            provider.clone(),
-            ProviderOperationKind::CancelAuth,
-            None,
-        );
-        let core = self.core.clone();
-        let sender = self.operation_sender.clone();
-        tokio::spawn(async move {
-            let result = core
-                .cancel_authentication(&provider)
-                .await
-                .map_err(|error| error.to_string());
-            let _ = sender.send(ProviderOperationResult::CancelAuth(provider, result));
-        });
-        true
     }
 }
 

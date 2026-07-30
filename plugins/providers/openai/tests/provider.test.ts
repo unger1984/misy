@@ -164,6 +164,10 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			context_window: 272_000,
 			reasoning: true,
 			input_modalities: ["text"],
+			thinking: {
+				default: "low",
+				levels: [{ id: "low", description: "Faster, lighter reasoning" }],
+			},
 		},
 		{
 			id: "gpt-5.6-codex",
@@ -171,6 +175,10 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			context_window: 372_000,
 			reasoning: true,
 			input_modalities: ["text", "image"],
+			thinking: {
+				default: "medium",
+				levels: [{ id: "medium", description: "Balanced reasoning" }],
+			},
 		},
 		{
 			id: "zeta",
@@ -235,6 +243,34 @@ test("returns bundled models when model discovery is unavailable", async () => {
 	]);
 });
 
+test("enriches Sol pricing and complete reasoning levels from the reference catalog", async () => {
+	const base = fakeServer(() =>
+		Response.json({
+			models: [
+				{
+					slug: "gpt-5.6-sol",
+					default_reasoning_level: "low",
+					supported_reasoning_levels: ["low"],
+				},
+			],
+		}),
+	);
+
+	const models = await new OpenAiProvider({ codexBaseUrl: base }).listModels(credentials());
+
+	expect(models[0]?.pricing).toBe("$5/30");
+	expect(models[0]?.thinking).toEqual({
+		default: "low",
+		levels: [
+			{ id: "low", description: "Faster, lighter reasoning" },
+			{ id: "medium", description: "Balanced reasoning" },
+			{ id: "high", description: "Deeper reasoning" },
+			{ id: "xhigh", description: "Extra-high reasoning" },
+			{ id: "max", description: "Maximum reasoning" },
+		],
+	});
+});
+
 test("normalizes ChatGPT subscription usage", async () => {
 	let received: CapturedRequest | undefined;
 	const base = fakeServer((request) => {
@@ -294,6 +330,8 @@ test("sends account identity and complete subscription request fields", async ()
 	await provider.streamChat(
 		{
 			model_id: "gpt-5.5",
+			thinking: "high",
+			max_output_tokens: 12_345,
 			messages: [
 				{ role: "system", content: "System instruction" },
 				{ role: "user", content: "Hi" },
@@ -323,7 +361,8 @@ test("sends account identity and complete subscription request fields", async ()
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 		include: ["reasoning.encrypted_content"],
-		reasoning: { effort: "medium", summary: "auto" },
+		reasoning: { effort: "high", summary: "auto" },
+		max_output_tokens: 12_345,
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 		text: { verbosity: "medium" },
 		input: [

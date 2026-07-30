@@ -48,7 +48,7 @@ async fn model_picker_shows_partial_results_and_skips_unconfigured_provider() {
     })
     .await;
     let labels = client.state().picker_labels();
-    assert!(labels.iter().any(|label| label == "fixture-model"));
+    assert!(labels.iter().any(|label| label == "Fixture"));
     assert!(
         labels
             .iter()
@@ -74,14 +74,35 @@ async fn model_picker_opens_from_cached_models_before_the_refresh_arrives() {
     let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
     client.handle_input("/model").expect("open cached models");
 
-    assert_eq!(
-        client.state().picker_labels(),
-        ["fixture-model", "fixture-model-b"]
-    );
+    assert_eq!(client.state().picker_labels(), ["Fixture", "Fixture B"]);
     assert_eq!(
         client.state().picker_tabs(),
         [("All".to_owned(), true), ("Fixture AI".to_owned(), false)]
     );
+    let lines = buffer_lines(&render_buffer(client.state(), 67, 20), 67);
+    let first_context_edge = lines
+        .iter()
+        .find(|line| line.contains("Fixture") && line.contains("128k"))
+        .and_then(|line| line.split("128k").next())
+        .map(|prefix| prefix.chars().count() + "128k".chars().count())
+        .expect("first context value");
+    let second_context_edge = lines
+        .iter()
+        .find(|line| line.contains("Fixture B") && line.contains("64k"))
+        .and_then(|line| line.split("64k").next())
+        .map(|prefix| prefix.chars().count() + "64k".chars().count())
+        .expect("second context value");
+    assert_eq!(first_context_edge, second_context_edge, "{lines:#?}");
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("Model"));
+    assert!(rendered.contains("Context"));
+    assert!(rendered.contains("Cost"));
+    assert!(rendered.contains("Provider"));
+    assert!(rendered.contains("Fixture AI"));
+    assert!(!rendered.contains("Unknown"));
+    let wide = buffer_lines(&render_buffer(client.state(), 120, 20), 120).join("\n");
+    assert!(wide.contains("Description"), "{wide}");
+    assert!(!wide.contains("Unknown"), "{wide}");
     client.handle_ctrl_c();
 }
 
@@ -107,7 +128,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
     assert_eq!(client.state().picker_labels().len(), 4);
     client.insert_text("fixture-model-b");
     client.handle_key(UiKey::Right).expect("first provider tab");
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["Fixture B"]);
     assert_eq!(
         client.state().picker_tabs()[1],
         ("First AI".to_owned(), true)
@@ -115,7 +136,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
     client
         .handle_key(UiKey::Right)
         .expect("second provider tab");
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["Fixture B"]);
     client.handle_key(UiKey::Left).expect("first provider tab");
     assert_eq!(
         client.state().picker_tabs()[1],
@@ -127,7 +148,7 @@ async fn model_picker_tabs_filter_models_and_preserve_filter_after_switching() {
         client.state().picker_tabs()[1],
         ("First AI".to_owned(), true)
     );
-    assert_eq!(client.state().picker_labels(), ["fixture-model-b"]);
+    assert_eq!(client.state().picker_labels(), ["Fixture B"]);
     client
         .handle_key(UiKey::Enter)
         .expect("confirm refreshed selection");
@@ -164,7 +185,7 @@ async fn empty_cached_model_picker_renders_a_spinner_then_the_refreshed_models()
             .state()
             .picker_labels()
             .iter()
-            .any(|label| label.contains("fixture-model"))
+            .any(|label| label.contains("Fixture"))
     );
     client.handle_ctrl_c();
 }
@@ -179,6 +200,12 @@ async fn model_picker_uses_the_herdr_style_popup_without_clipping_on_narrow_term
     let lines = buffer_lines(&buffer, 72);
     assert!(lines.iter().any(|line| line.contains("Select model")));
     assert!(lines.iter().any(|line| line.contains("─")));
+    assert!(lines.iter().any(|line| line.contains("Search:")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("type to filter models"))
+    );
     assert!(lines.iter().any(|line| line.contains("↑↓ select")));
     assert!(lines.iter().any(|line| line.contains("›")));
     assert!(
@@ -195,6 +222,29 @@ async fn model_picker_uses_the_herdr_style_popup_without_clipping_on_narrow_term
     assert!(narrow_lines.iter().any(|line| line.contains("Select")));
     assert!(narrow_lines.iter().any(|line| line.contains("›")));
     assert!(narrow_lines.iter().any(|line| line.contains("esc")));
+    client.handle_ctrl_c();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_command_opens_a_scrollable_content_specific_popup() {
+    let (_temporary, mut client, _) = test_client().await;
+    client.handle_input("/context").expect("open context");
+    assert_eq!(client.state().mode(), UiMode::Context);
+
+    let lines = buffer_lines(&render_buffer(client.state(), 82, 24), 82);
+    assert!(lines.iter().any(|line| line.contains("Context usage")));
+    assert!(lines.iter().any(|line| line.contains("Estimated")));
+    assert!(lines.iter().any(|line| line.contains("AGENTS.md")));
+    client.handle_key(UiKey::End).expect("context end");
+    let end_lines = buffer_lines(&render_buffer(client.state(), 82, 24), 82);
+    assert!(
+        end_lines
+            .iter()
+            .any(|line| line.contains("token estimate unavailable"))
+    );
+    client.handle_key(UiKey::PageUp).expect("context page up");
+    client.handle_key(UiKey::Escape).expect("close context");
+    assert_eq!(client.state().mode(), UiMode::Input);
     client.handle_ctrl_c();
 }
 
@@ -420,6 +470,18 @@ async fn model_picker_filters_and_confirms_with_a_transcript_message() {
     .await;
     client.insert_text("model-b");
     assert_eq!(client.state().picker_labels().len(), 1);
+    let filtered = buffer_lines(&render_buffer(client.state(), 100, 20), 100);
+    assert!(filtered.iter().any(|line| line.contains("Search: model-b")));
+    client
+        .handle_key(UiKey::Right)
+        .expect("switch to provider tab");
+    assert_eq!(client.state().picker_labels().len(), 1);
+    let provider_tab = buffer_lines(&render_buffer(client.state(), 100, 20), 100);
+    assert!(
+        provider_tab
+            .iter()
+            .any(|line| line.contains("Search: model-b"))
+    );
     client
         .handle_key(UiKey::Enter)
         .expect("select filtered model");
@@ -427,6 +489,39 @@ async fn model_picker_filters_and_confirms_with_a_transcript_message() {
     assert!(client.state().transcript().iter().any(
         |row| matches!(row, TranscriptRow::Info(message) if message == "model: fixture-model-b")
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_thinking_step_marks_defaults_and_escape_restores_the_filtered_picker() {
+    let (_temporary, core) =
+        core_with_providers(&[("fixture", "Fixture AI", "thinking-persistence")]);
+    populate_cached_models(&core, &["fixture"]).await;
+    let mut client = TuiClient::new(core, RecordingBrowser::default()).await;
+    client.handle_input("/model").expect("open cached models");
+    client.insert_text("fixture-model-b");
+    assert_eq!(client.state().picker_labels(), ["Fixture B"]);
+
+    client
+        .handle_key(UiKey::Enter)
+        .expect("open thinking levels");
+    let thinking = buffer_lines(&render_buffer(client.state(), 100, 20), 100);
+    assert!(
+        thinking
+            .iter()
+            .any(|line| line.contains("Thinking for Fixture B"))
+    );
+    assert!(
+        thinking
+            .iter()
+            .any(|line| line.contains("medium (default)"))
+    );
+
+    client
+        .handle_key(UiKey::Escape)
+        .expect("return to model picker");
+    assert_eq!(client.state().mode(), UiMode::ModelList);
+    assert_eq!(client.state().picker_labels(), ["Fixture B"]);
+    client.handle_ctrl_c();
 }
 
 #[tokio::test(flavor = "current_thread")]

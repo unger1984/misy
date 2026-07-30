@@ -24,8 +24,8 @@ when bundled or the matching user plugin directory when installed. It contains `
 documentation, a license, language-native build metadata/lockfiles, source, and tests.
 
 Plugins may use any language that can run as a process and speak the protocol. Bun is the
-implementation choice for the bundled `openai`, `anthropic`, and `kimi` packages, not a global
-host dependency.
+implementation choice for the bundled `openai`, `anthropic`, `kimi`, and `anymodel` packages, not
+a global host dependency.
 
 ### Shared TypeScript SDK
 
@@ -104,6 +104,15 @@ notification carries the numeric `request_id` of its `chat.start`; cancellation 
 
 `models.list` returns `models` and may include a provider-local `default_model` ID. The core uses
 that declared default when it is present and falls back to the first model for older providers.
+Each model may also provide bounded `description`, opaque display-only `pricing`, and `thinking`
+metadata containing an ordered level list and default level. Catalog results identify their source
+as `remote` or `bundled`; the core caches each provider atomically for fifteen minutes, preserves a
+stale catalog across transient refresh failures, and reports availability separately from age.
+Provider plugins keep explicit upstream pricing authoritative and may fill missing display prices
+from a provider-appropriate source. AnyModel uses its official public catalog because those values
+are route-specific final prices; its process caches that catalog for 24 hours and retains stale data
+across transient failures. Other provider reference values may use compact `$input/output`
+USD-per-million text. The core treats all pricing text as opaque and never computes spend from it.
 
 ## Optional Capabilities
 
@@ -197,6 +206,18 @@ non-negative numbers, and a populated `limit` is positive. Supported units are `
 `exhausted`, and `unknown`. The core rejects unknown fields and malformed, duplicate, oversized,
 or unsafe reports.
 
+### Thinking capability version 1
+
+A provider declaring `capabilities.thinking.version` as `1` accepts the optional provider-owned
+`thinking` string on `chat.start`. The core validates it against the selected model's catalog and
+omits the field for providers without the capability. A `completed` notification may additionally
+include normalized non-negative `input_tokens` and `output_tokens`; these are diagnostic usage,
+not account-limit data.
+
+`chat.start` may include a positive `max_output_tokens`. Providers translate that core-owned
+budget to their remote protocol's output-token field; compaction requests use it to bound summary
+generation.
+
 Before calling the provider, the core verifies the manifest declaration, uses the snapshotted
 selected `ModelRef`, refreshes credentials when needed, injects opaque credentials, and enforces a
 30-second JSON-RPC deadline. The core reports unavailable capabilities, authentication failures,
@@ -256,6 +277,29 @@ fall back to the default on any other value.
 - `MISY_KIMI_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
 - `MISY_KIMI_DATA_DIR` — plugin data directory (default `~/.local/share/misy/kimi`).
 
+Kimi K3 and K3-256K advertise `low`, `high`, and `max` thinking levels with `high` as the default.
+The plugin sends the selected level as top-level `reasoning_effort` on their OpenAI-compatible
+route. K2.7 Coding models remain always-thinking and do not advertise selectable effort levels.
+
+**anymodel** (`plugins/providers/anymodel/src/config.ts`)
+
+- `MISY_ANYMODEL_BASE_URL` — OpenAI-compatible API base URL (default
+  `https://anymodel.org/v1`).
+- `MISY_ANYMODEL_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_URL` — official catalog URL used for optional model metadata
+  enrichment (default `https://anymodel.org/en/models`; empty disables enrichment).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_TTL_MS` — successful public-catalog cache lifetime (default
+  86400000).
+- `MISY_ANYMODEL_PUBLIC_CATALOG_TIMEOUT_MS` — per-page public-catalog timeout (default 5000).
+
+AnyModel accepts an API key only through its protocol v2 prompt form. The core stores the returned
+opaque credential object, while the plugin validates it against the live `/models` catalog and
+sends raw upstream IDs such as `cx/gpt-5.6-sol`. Qualified Misy identities add the provider
+namespace, for example `anymodel/cx/gpt-5.6-sol`; that outer prefix is never sent upstream.
+The optional thinking suffix remains core-owned and colon-delimited, for example
+`anymodel/cx/gpt-5.6-sol:high`; the plugin sends `high` as `reasoning_effort` separately from the
+unchanged upstream model ID.
+
 ## Change Impact
 
 Protocol changes require a version decision plus updates to host, core, provider packages,
@@ -269,4 +313,5 @@ fixtures, README, and contract tests. Do not silently widen the current protocol
 - [`plugins/providers/openai/README.md`](../plugins/providers/openai/README.md)
 - [`plugins/providers/anthropic/README.md`](../plugins/providers/anthropic/README.md)
 - [`plugins/providers/kimi/README.md`](../plugins/providers/kimi/README.md)
+- [`plugins/providers/anymodel/README.md`](../plugins/providers/anymodel/README.md)
 - [Architecture](architecture.md)

@@ -25,6 +25,8 @@ export function createChatRequest(
 	model: string,
 	messages: readonly Record<string, unknown>[],
 	tools: readonly ToolDefinition[],
+	maxOutputTokens?: number,
+	thinking?: string,
 ): Record<string, unknown> {
 	return {
 		model,
@@ -38,6 +40,8 @@ export function createChatRequest(
 			},
 		})),
 		stream: true,
+		...(maxOutputTokens === undefined ? {} : { max_tokens: maxOutputTokens }),
+		...(thinking === undefined ? {} : { reasoning_effort: thinking }),
 	};
 }
 

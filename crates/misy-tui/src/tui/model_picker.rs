@@ -147,6 +147,10 @@ impl ModelPicker {
             .collect()
     }
 
+    pub(super) fn query(&self) -> &str {
+        &self.query
+    }
+
     pub(super) fn visible_rows(&self, visible_rows: usize) -> Vec<ListRowDisplay> {
         self.list.visible_rows(visible_rows)
     }
@@ -196,23 +200,37 @@ fn rows_and_tabs(
                 .get(&provider)
                 .map(|name| name.as_str().to_owned())
                 .unwrap_or_else(|| provider.as_str().to_owned());
-            let label = model.model.model.as_str().to_owned();
+            let label = model.display_name.clone();
+            let context = compact_context(model.context_window);
+            let description = model.description.as_deref().unwrap_or_default();
+            let pricing = model.pricing.as_deref().unwrap_or_default();
+            let thinking = model.thinking.as_ref().map_or_else(
+                || "unavailable".to_owned(),
+                |thinking| format!("{} levels: {}", thinking.levels.len(), thinking.default),
+            );
+            let search = format!(
+                "{} {} {} {} {} {}",
+                model.model.model.as_str(),
+                model.display_name,
+                provider_name,
+                description,
+                pricing,
+                thinking
+            );
             let row = if selected_model == Some(&model.model) {
-                ListRow::current_with_search(
-                    model.model,
-                    label,
-                    Some(provider_name),
-                    model.display_name,
-                )
+                ListRow::current_with_search(model.model, label, model.description.clone(), search)
             } else {
                 ListRow::selectable_with_search(
                     model.model,
                     label,
-                    Some(provider_name),
-                    model.display_name,
+                    model.description.clone(),
+                    search,
                 )
             };
-            PickerRow { provider, row }
+            PickerRow {
+                provider,
+                row: row.with_model_columns(context, pricing, provider_name),
+            }
         })
         .collect::<Vec<_>>();
     rows.extend(available.errors.into_iter().map(|error| {
@@ -229,6 +247,17 @@ fn rows_and_tabs(
         .chain(providers.into_iter().map(ModelPickerTab::Provider))
         .collect();
     (rows, tabs)
+}
+
+fn compact_context(tokens: u32) -> String {
+    match tokens {
+        0 => "—".to_owned(),
+        tokens if tokens >= 1_000_000 && tokens % 1_000_000 == 0 => {
+            format!("{}m", tokens / 1_000_000)
+        }
+        tokens if tokens >= 1_000 => format!("{}k", tokens / 1_000),
+        tokens => tokens.to_string(),
+    }
 }
 
 fn labels_for_tabs(
@@ -249,7 +278,9 @@ fn labels_for_tabs(
 #[cfg(test)]
 mod tests {
     use super::ModelPicker;
-    use misy_core::{AvailableModels, ModelId, ModelInfo, ModelRef, ProviderId};
+    use misy_core::{
+        AvailableModels, ModelId, ModelInfo, ModelRef, ProviderId, ThinkingInfo, ThinkingLevel,
+    };
     use std::collections::BTreeMap;
 
     fn available() -> AvailableModels {
@@ -275,9 +306,50 @@ mod tests {
         let mut picker = ModelPicker::from_available(available(), &BTreeMap::new(), None);
         picker.insert_filter("a");
         picker.tab_right();
-        assert_eq!(picker.labels(), ["alpha"]);
+        assert_eq!(picker.labels(), ["Alpha"]);
         picker.tab_right();
-        assert_eq!(picker.labels(), ["beta"]);
+        assert_eq!(picker.labels(), ["Beta"]);
         assert_eq!(picker.tabs()[2], ("second".to_owned(), true));
+    }
+
+    #[test]
+    fn model_rows_expose_aligned_catalog_columns() {
+        let model = ModelInfo::new(
+            ModelRef::new(ProviderId::new("fixture"), ModelId::new("alpha")),
+            "Alpha",
+            128_000,
+        )
+        .with_optional_metadata(
+            Some("Fast general model".to_owned()),
+            None,
+            Some(ThinkingInfo {
+                default: "medium".to_owned(),
+                levels: vec![
+                    ThinkingLevel {
+                        id: "low".to_owned(),
+                        description: "Quick".to_owned(),
+                    },
+                    ThinkingLevel {
+                        id: "medium".to_owned(),
+                        description: "Balanced".to_owned(),
+                    },
+                ],
+            }),
+        );
+        let picker = ModelPicker::from_available(
+            AvailableModels {
+                models: vec![model],
+                errors: Vec::new(),
+            },
+            &BTreeMap::new(),
+            None,
+        );
+
+        let row = picker.visible_rows(1).remove(0);
+        assert_eq!(row.label, "Alpha");
+        assert_eq!(row.context.as_deref(), Some("128k"));
+        assert_eq!(row.pricing.as_deref(), Some(""));
+        assert_eq!(row.provider.as_deref(), Some("fixture"));
+        assert_eq!(row.description.as_deref(), Some("Fast general model"));
     }
 }

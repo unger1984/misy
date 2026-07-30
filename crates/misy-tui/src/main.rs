@@ -3,16 +3,26 @@
 mod cli;
 
 use cli::Arguments;
-use misy_core::MisyCore;
-use misy_tui::run;
+use misy_core::{ClientCapabilities, CoreOptions, MisyCore};
+use misy_tui::{HerdrReporter, run_with_herdr_reporter};
 use std::{error::Error, path::Path};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let bundled_providers = bundled_providers();
-    let paths = Arguments::from_env()?.paths()?;
-    let core = MisyCore::discover(paths.clone(), bundled_providers)?;
-    run(core, &paths).await?;
+    let arguments = Arguments::from_env()?;
+    let paths = arguments.paths()?;
+    let core = MisyCore::discover_with_options(
+        paths.clone(),
+        bundled_providers,
+        CoreOptions {
+            client_capabilities: ClientCapabilities {
+                question_request: Some(1),
+            },
+        },
+    )?;
+    let reporter = HerdrReporter::from_environment();
+    run_with_herdr_reporter(core, &paths, arguments.session_start(), reporter).await?;
     Ok(())
 }
 

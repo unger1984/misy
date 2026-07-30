@@ -2,7 +2,7 @@ use super::{
     ActivityEvent, ActivityManager, ActivityRecord, ActivityState, MAX_ACTIVE_TASKS, StopReason,
     SupervisorTask, output::OrderedOutput, process,
 };
-use crate::{ActivityId, ActivityStatus, ToolCall};
+use crate::{ActivityId, ActivityStatus, AgentId, ToolCall, activity::ActivityOwner};
 use serde_json::json;
 use std::{
     io,
@@ -15,6 +15,10 @@ use tokio::sync::{Notify, watch};
 use super::super::command::CommandRequest;
 
 fn record(id: u64, status: ActivityStatus) -> Arc<ActivityRecord> {
+    record_for_owner(id, status, ActivityOwner::Main)
+}
+
+fn record_for_owner(id: u64, status: ActivityStatus, owner: ActivityOwner) -> Arc<ActivityRecord> {
     let (stop, _) = watch::channel(None::<StopReason>);
     let mut output = OrderedOutput::default();
     output.append(
@@ -23,6 +27,7 @@ fn record(id: u64, status: ActivityStatus) -> Arc<ActivityRecord> {
     );
     Arc::new(ActivityRecord {
         id: ActivityId::new(id),
+        owner,
         title: format!("activity-{id}"),
         cwd: None,
         started_at_ms: id,
@@ -46,6 +51,54 @@ fn record(id: u64, status: ActivityStatus) -> Arc<ActivityRecord> {
         poll_cancel: watch::channel(0).0,
         session_open: std::sync::atomic::AtomicBool::new(true),
     })
+}
+
+#[test]
+fn command_admission_reserves_capacity_for_main_and_limits_each_child() {
+    let manager = ActivityManager::new();
+    let agents = [AgentId::new(1), AgentId::new(2), AgentId::new(3)];
+    let child_permits = agents
+        .into_iter()
+        .flat_map(|agent| {
+            (0..16).map({
+                let manager = manager.clone();
+                move |_| {
+                    manager
+                        .reserve_slot(ActivityOwner::Agent(agent))
+                        .expect("reserve child process")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        manager
+            .reserve_slot(ActivityOwner::Agent(AgentId::new(1)))
+            .is_err()
+    );
+    let main_permits = (0..16)
+        .map(|_| {
+            manager
+                .reserve_slot(ActivityOwner::Main)
+                .expect("reserve main process")
+        })
+        .collect::<Vec<_>>();
+    assert!(manager.reserve_slot(ActivityOwner::Main).is_err());
+    drop(child_permits);
+    drop(main_permits);
+}
+
+#[test]
+fn model_task_roster_is_scoped_to_its_owner() {
+    let manager = ActivityManager::new();
+    let main = record_for_owner(1, ActivityStatus::Running, ActivityOwner::Main);
+    let child_owner = ActivityOwner::Agent(AgentId::new(1));
+    let child = record_for_owner(2, ActivityStatus::Running, child_owner);
+    manager.publish(&main).expect("publish main command");
+    manager.publish(&child).expect("publish child command");
+    assert_eq!(manager.activities_for_owner(ActivityOwner::Main).len(), 1);
+    assert_eq!(manager.activities_for_owner(child_owner).len(), 1);
+    assert!(!manager.stop_for_owner(ActivityOwner::Main, child.id));
+    assert!(manager.stop_for_owner(child_owner, child.id));
 }
 
 #[test]
@@ -145,7 +198,11 @@ async fn foreground_promotion_keeps_its_existing_process_permit() {
     .expect("parse foreground command");
     let pending = manager.start(&request).expect("start foreground command");
     let other_permits = (1..MAX_ACTIVE_TASKS)
-        .map(|_| manager.reserve_slot().expect("reserve remaining permit"))
+        .map(|_| {
+            manager
+                .reserve_slot(ActivityOwner::Main)
+                .expect("reserve remaining permit")
+        })
         .collect::<Vec<_>>();
 
     let promoted = pending
@@ -161,7 +218,7 @@ async fn foreground_promotion_keeps_its_existing_process_permit() {
     assert_eq!(stopped.activity.status, ActivityStatus::Stopped);
     drop(other_permits);
     manager
-        .reserve_slot()
+        .reserve_slot(ActivityOwner::Main)
         .expect("completed process releases permit");
 }
 
@@ -170,7 +227,11 @@ async fn foreground_promotion_keeps_its_existing_process_permit() {
 async fn exhausted_process_limit_rejects_before_spawn() {
     let manager = ActivityManager::new();
     let permits = (0..MAX_ACTIVE_TASKS)
-        .map(|_| manager.reserve_slot().expect("reserve process permit"))
+        .map(|_| {
+            manager
+                .reserve_slot(ActivityOwner::Main)
+                .expect("reserve process permit")
+        })
         .collect::<Vec<_>>();
     let request = CommandRequest::from_call(
         &ToolCall::new(

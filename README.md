@@ -38,11 +38,12 @@ flowchart LR
     Core --> Host[Provider host]
     Host <-->|JSON-RPC 2.0 over NDJSON| Plugin[Provider plugin]
     Plugin --> API[Remote model API]
-    Core --> Data[Config and credentials]
+    Core --> Data[Config, credentials, and sessions]
 ```
 
-- **The Rust core is the harness.** It owns conversation state, the FIFO submission queue, the
-  agent/tool loop, provider supervision, authentication, cancellation, and normalized events.
+- **The Rust core is the harness.** It owns persisted conversation state, the FIFO submission
+  queue, the agent/tool loop, provider supervision, authentication, cancellation, and normalized
+  events.
 - **Frontends are clients.** The TUI renders core state and sends user actions; it does not
   reimplement orchestration. Other clients can be built on the same core contract later.
 - **Providers are adapters.** Each provider is a standalone, language-independent process that
@@ -59,25 +60,29 @@ documentation index is at [docs/README.md](docs/README.md).
 The repository already contains a working development-stage vertical slice:
 
 - a reusable async `misy-core` crate with configuration, opaque credential storage, model caching,
-  in-memory conversations, FIFO prompt scheduling, streaming events, cancellation, and provider
-  process lifecycle management;
+  append-only conversation sessions, FIFO prompt scheduling, streaming events, cancellation, and
+  provider process lifecycle management;
 - a fullscreen Ratatui client with a multiline composer, prompt history, transcript scrolling and
-  copying, command completion, provider authentication, model selection, queued prompts, streaming
-  output, tool rendering, interruption, and clean terminal restoration;
+  copying, command completion, provider authentication, model selection, session resume, queued
+  prompts, streaming output, tool rendering, interruption, and clean terminal restoration;
 - a versioned JSON-RPC 2.0 provider protocol with manifest discovery, lazy process startup,
-  streaming chat, browser and device authentication flows, credential refresh, model discovery,
+  streaming chat, browser, device, and prompt authentication flows, credential refresh, model
+  discovery,
   request cancellation, and an optional normalized usage capability;
-- bundled subscription-based provider plugins for OpenAI, Anthropic, and Kimi, implemented in
-  TypeScript and run with Bun;
+- bundled provider plugins for OpenAI, Anthropic, Kimi, and the API-key-based AnyModel catalog,
+  implemented in TypeScript and run with Bun;
 - Rust-owned filesystem and unified `exec_command` tools, including JSON Schema validation,
   automatic foreground-to-background yielding, optional macOS/Linux PTY input through
   `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
+- independent synchronous and background child-agent sessions with inherited context, scoped
+  tools, addressable messaging, bounded transcripts, and a pull-based completion mailbox;
+- hierarchical global, project-root, and target-scoped nested `AGENTS.md` instructions with
+  pre-side-effect tool gating and a dedicated `/context` usage popup;
 - unit, integration, end-to-end, and provider contract tests that use local fixtures instead of
   real accounts or external network access.
 
-This is an MVP foundation, not a stable release. In particular, conversations are not persisted,
-the process represents a single agent session, and the TUI does not yet support prompt-based
-authentication such as entering API keys.
+This is an MVP foundation, not a stable release. One process still owns one attached conversation
+at a time. Provider protocol v2 prompt forms are supported in the TUI with masked secret fields.
 
 ## Planned work
 
@@ -85,10 +90,8 @@ The following areas are intentionally deferred and remain open for future develo
 
 - explicit permissions and approval flows for local tools;
 - MCP integration;
-- persisted conversations and session recovery;
-- subagents and richer orchestration;
+- recursive agent trees, roles, batch spawning, and isolated agent worktrees;
 - provider marketplace installation and updates;
-- API-key and generic prompt-based authentication;
 - a daemon or public IPC boundary for multiple clients;
 - additional clients, including a possible desktop UI.
 
@@ -111,6 +114,7 @@ cd plugins/providers/_sdk && bun install --frozen-lockfile
 cd ../openai && bun install --frozen-lockfile
 cd ../anthropic && bun install --frozen-lockfile
 cd ../kimi && bun install --frozen-lockfile
+cd ../anymodel && bun install --frozen-lockfile
 cd ../../..
 ```
 
@@ -121,8 +125,8 @@ cargo run -p misy-tui
 ```
 
 Inside Misy, use `/provider` to authenticate, `/model` to select a model, `/status` to inspect
-provider limits when supported, and `/exit` to shut down cleanly. Type `?` to see keyboard
-shortcuts.
+provider limits, `/context` to inspect active prompt usage and instructions, and `/exit` to shut
+down cleanly. Type `?` to see keyboard shortcuts.
 
 Misy stores configuration, credentials, model metadata, and prompt history under `~/.misy` by
 default. Use a separate development profile when experimenting:
@@ -162,9 +166,12 @@ Development happens on `dev`; do not work directly on `main`. Keep changes withi
 architecture, add tests for behavior changes, and update the relevant documentation when a public
 contract or user-visible behavior changes.
 
-Before submitting a change, run the checks for every area you touched. The complete, authoritative
-command list is maintained in [docs/development-and-testing.md](docs/development-and-testing.md).
-At minimum, Rust changes should pass formatting, Clippy, and the test suite:
+Before submitting a change, run only checks that validate the inputs or behavior you changed. A
+documentation-only edit does not require Rust or provider suites unless it changes compiled
+examples, generated output, or executable contracts. The complete, authoritative selection rules
+and command list are maintained in
+[docs/development-and-testing.md](docs/development-and-testing.md). Rust changes should pass the
+applicable formatting, Clippy, and focused or workspace tests:
 
 ```console
 cargo fmt --all -- --check
@@ -195,5 +202,5 @@ provider lazily.
 
 See [docs/provider-plugins.md](docs/provider-plugins.md) for the protocol and lifecycle contract,
 and the bundled [OpenAI](plugins/providers/openai/README.md),
-[Anthropic](plugins/providers/anthropic/README.md), and [Kimi](plugins/providers/kimi/README.md)
-packages for working examples.
+[Anthropic](plugins/providers/anthropic/README.md), [Kimi](plugins/providers/kimi/README.md), and
+[AnyModel](plugins/providers/anymodel/README.md) packages for working examples.

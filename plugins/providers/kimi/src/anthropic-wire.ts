@@ -25,6 +25,7 @@ export function createAnthropicRequest(
 	model: string,
 	messages: readonly Record<string, unknown>[],
 	tools: readonly ToolDefinition[],
+	maxOutputTokens?: number,
 ): Record<string, Json> {
 	const system = messages
 		.filter((message) => message["role"] === "system")
@@ -33,7 +34,7 @@ export function createAnthropicRequest(
 		.join("\n\n");
 	return {
 		model,
-		max_tokens: 32_000,
+		max_tokens: maxOutputTokens ?? 32_000,
 		stream: true,
 		...(system.length > 0 ? { system } : {}),
 		messages: messages.filter((message) => message["role"] !== "system").map(messageBody),

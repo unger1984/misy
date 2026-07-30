@@ -5,13 +5,21 @@
  * of the provider protocol: plugins in other languages implement the same JSON-RPC contract
  * independently, and every plugin remains a standalone process with its own manifest.
  */
-export { oauthCredentials, requireOauthCredentials } from "./credentials";
+export {
+	apiKeyCredentials,
+	oauthCredentials,
+	requireCredentials,
+	requireOauthCredentials,
+} from "./credentials";
 export { endpointUrl, fetchWithTimeout } from "./http";
+export { referencePricing } from "./model-metadata";
 export { preferredDefaultModel } from "./models";
 export { type ProviderAdapter, serve } from "./serve";
 export {
+	type ApiKeyCredentials,
 	type ChatMessage,
 	type ChatRequest,
+	type CredentialParser,
 	type Credentials,
 	type ImageAttachment,
 	imageAttachments,
@@ -20,6 +28,8 @@ export {
 	isRecord,
 	type Json,
 	type Notify,
+	type OAuthCredentials,
+	type ProviderCredentials,
 	type ToolDefinition,
 	type ToolResult,
 } from "./types";

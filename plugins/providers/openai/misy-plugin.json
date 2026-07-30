@@ -5,7 +5,11 @@
 	"kind": "provider",
 	"protocol_version": 2,
 	"description": "OpenAI models via ChatGPT subscription (browser OAuth)",
-	"capabilities": { "usage": { "version": 1 }, "image_input": { "version": 1 } },
+	"capabilities": {
+		"usage": { "version": 1 },
+		"image_input": { "version": 1 },
+		"thinking": { "version": 1 }
+	},
 	"auth_methods": [{ "id": "oauth", "display_name": "ChatGPT subscription" }],
 	"author": "Misy",
 	"homepage": "https://github.com/cobalt/misy",

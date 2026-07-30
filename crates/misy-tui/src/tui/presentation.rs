@@ -11,6 +11,7 @@ pub(super) fn operation_label(kind: ProviderOperationKind, device_code: Option<&
         (ProviderOperationKind::Complete, Some(code)) => format!("Code: {code} · waiting…"),
         (ProviderOperationKind::Start, _) => "Opening browser…".to_owned(),
         (ProviderOperationKind::Complete, None) => "Waiting for browser…".to_owned(),
+        (ProviderOperationKind::PromptComplete, _) => "Validating credentials…".to_owned(),
         (ProviderOperationKind::CancelAuth, _) => "Cancelling authentication…".to_owned(),
         (ProviderOperationKind::Logout, _) => "Logging out…".to_owned(),
         (ProviderOperationKind::Models, _) => "Loading models…".to_owned(),
@@ -26,6 +27,7 @@ pub(super) fn list_presentation<T>(
     ModalPresentation {
         title: view.title().to_owned(),
         rows: view.visible_rows(visible_rows),
+        filter: None,
         operation,
         back_hint: false,
         tabs: Vec::new(),
@@ -41,6 +43,7 @@ pub(super) fn model_picker_presentation(
     ModalPresentation {
         title: "Select model".to_owned(),
         rows: picker.visible_rows(visible_rows),
+        filter: Some(picker.query().to_owned()),
         operation: None,
         back_hint: false,
         tabs: picker.tabs(),

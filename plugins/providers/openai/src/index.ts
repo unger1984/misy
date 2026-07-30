@@ -1,5 +1,10 @@
 /** OpenAI provider process entry point: wires the provider adapter to the protocol SDK. */
-import { preferredDefaultModel, requireOauthCredentials, serve } from "@misy/provider-sdk";
+import {
+	oauthCredentials,
+	preferredDefaultModel,
+	requireOauthCredentials,
+	serve,
+} from "@misy/provider-sdk";
 import { DEFAULT_MODEL_ID } from "./model-catalog";
 import { OpenAiProvider } from "./provider";
 
@@ -8,6 +13,7 @@ const provider = new OpenAiProvider();
 serve({
 	name: "OpenAI",
 	requestFailureMessage: "OpenAI provider request failed",
+	parseCredentials: oauthCredentials,
 	authStatus: (credentials) => provider.authStatus(credentials),
 	startAuth: async (method) => {
 		const started = await provider.startAuth(method);
@@ -19,7 +25,9 @@ serve({
 	listModels: async (credentials) => {
 		const models = await provider.listModels(requireOauthCredentials(credentials, "OpenAI"));
 		const defaultModel = preferredDefaultModel(models, DEFAULT_MODEL_ID);
-		return defaultModel === undefined ? { models } : { models, default_model: defaultModel };
+		return defaultModel === undefined
+			? { models, source: provider.catalogSource() }
+			: { models, default_model: defaultModel, source: provider.catalogSource() };
 	},
 	usage: (credentials) => provider.usage(credentials),
 	chat: (request, requestId, notify, signal) =>

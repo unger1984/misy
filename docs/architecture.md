@@ -25,13 +25,15 @@ flowchart LR
     Core --> Store[Config and opaque credentials]
 ```
 
-- The `misy-core` workspace crate owns normalized state, configuration, credentials, the persisted model catalog
-  cache (`~/.misy/models.json`), the in-memory conversation, FIFO submission scheduling,
+- The `misy-core` workspace crate owns normalized state, configuration, opaque OAuth or API-key
+  credentials, the persisted
+  model catalog cache (`~/.misy/models.json`), persisted conversations, FIFO submission scheduling,
   agent/tool iteration, cancellation, provider supervision, and public events. Clients read the
   model cache through the core. The core also owns capability negotiation, credential injection,
   deadlines, and validation for
   provider-normalized account-limit reports.
-- `config.toml`, the credential files, and `models.json` each carry an independent format version.
+- `config.toml`, the credential files, `models.json`, and session JSONL headers each carry an
+  independent format version.
   Config version 1 is atomically migrated to version 2, which adds frontend-owned named
   keybindings; newer unknown revisions are rejected. Credential storage remains version 1 and the
   model cache has its own migration. Every future version bump MUST ship with a migration or an
@@ -50,7 +52,10 @@ flowchart LR
 - Frontends acquire clipboard media, but the core owns image validation, normalized bytes,
   session attachment state, and `view_image` execution. Provider plugins receive only normalized
   image data and never read local image paths.
-- One Misy process currently represents one agent session and one in-memory conversation. A daemon or shared multi-client service is not part of the MVP.
+- One Misy process owns one attached conversation at a time. Conversations are incrementally
+  persisted as private append-only files in `~/.misy/sessions/*.jsonl`; starting a new session
+  detaches the current file, and resuming restores canonical core history before appending to the
+  same file. A daemon or shared multi-client service is not part of the MVP.
 
 ## Runtime Flow
 
@@ -68,16 +73,20 @@ flowchart LR
 8. Direct-interaction submissions enter one core-owned FIFO queue. Exactly one submission mutates
    session history at a time; cancelling the active submission advances the next queued item,
    while cancelling all submissions prevents every pending item from starting.
-9. Optional provider capabilities are negotiated from the discovered manifest before a request.
+9. Every canonical history entry is appended to the attached versioned session JSONL after it
+   enters memory. The first entry lazily creates the file with mode `0600`, a canonical cwd, model,
+   and schema header. Persistence failure emits `SessionPersistenceFailed` without discarding the
+   in-memory turn. Session switching is rejected while active or queued work exists.
+10. Optional provider capabilities are negotiated from the discovered manifest before a request.
    For usage capability version 1, the core snapshots the selected `ModelRef`, refreshes and
    injects its opaque credentials, bounds `usage.get` to 30 seconds, and strictly validates the
    normalized result. The provider retains ownership of remote endpoint selection, headers, and
    provider-specific response parsing.
-10. Image input requires both provider capability version 1 and model image modality support.
+11. Image input requires both provider capability version 1 and model image modality support.
     The core refreshes stale selected-provider metadata before rejecting a submission, includes
     normalized images in bounded in-memory history for visual follow-ups, and replaces older image
     payloads when the user attaches a new image set. Text-only models receive image-free history.
-11. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
+12. The unified `exec_command` tool spawns shell commands under a core-owned activity manager.
     Every live process reserves one of 64 permits before spawn; foreground calls may publish the
     same process after a bounded yield without acquiring another permit. Pipe commands use process
     groups with closed stdin. On macOS and Linux, optional PTY commands use a writable terminal and
@@ -86,21 +95,64 @@ flowchart LR
     Ordered stdout/stderr capture has one 1 MiB data-plus-metadata budget per activity, model
     delivery has a separate `max_output_tokens` projection, and the latest twenty terminal tasks
     remain available to clients.
-12. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
+13. Terminal activity events and full bounded snapshots are client contracts. They let the TUI
     refresh its activity popup, fullscreen log viewer, and transcript after cleanup and output
     draining. The model is not notified when a background command finishes: it must pull new output
     and the final `exit_code` with empty `write_stdin` calls. A final model delivery is consumed
     once, while the terminal summary and client snapshot remain in the recent-task registry.
+14. Agent concurrency is one root-inclusive tree limit, configurable from 1 through 64. Every
+    child owns ephemeral history, cancellation/request slots, an immutable role/profile/tool
+    snapshot, inbox, and command owner; only root history is persisted. Nested spawning is allowed
+    only when `spawn_agent` survives the parent and role allowlist intersection. Canonical paths
+    provide stable addressing, and stopping a parent cancels its descendants.
+15. Background agent results reserve one of eight lossless mailbox slots and are pulled by the
+    model with `agent_wait`; `AgentFinished` independently informs clients. Child commands share
+    the 64-process limit, are capped at 48 collectively and 16 per child, and are reaped before
+    terminal agent publication. Root plus active child histories retain at most 100 MiB of
+    image payloads; retained semantic transcripts omit image bytes and use a 1 MiB budget.
+16. Agent records belong to the current root-conversation generation. Session switching refuses
+    live, mailbox, or retained agent state until a client explicitly confirms discard. Shutdown
+    closes agent admission, stops and reaps children, then shuts down commands and providers.
+17. `SetTodoList` and `AskUserQuestion` are core-owned tools. Root checklists are projected in
+    snapshots and persisted as append-only session records; child checklists remain isolated and
+    ephemeral with child history. Structured questions are exposed only when the client declares
+    question capability version 1. The core owns pending request identity, answer validation,
+    cancellation, dismissal suppression, and snapshot recovery; clients only render requests and
+    call the typed answer or dismiss operations. A question has no elapsed timeout because it waits
+    for local user intent, but owner cancellation and shutdown always wake the waiter.
+18. The core builds an ephemeral request system prefix from built-in guidance, the optional global
+    `~/.misy/AGENTS.md`, the project-root `AGENTS.md`, and nested files on the ancestor chain of
+    actual tool targets. Global/root snapshots are shared across main and child sessions; nested
+    caches and active scopes are agent-session-local. A validated tool batch that discovers a new
+    nested scope is retried as a whole before any handler runs. Instruction contents and internal
+    retry turns are never appended to conversation JSONL or client transcripts.
+19. Model selection is one atomic `ModelProfile`: provider/model plus optional provider-owned
+    thinking level. A reasoning-only change is persisted separately as `thinking_change`. Exact
+    profile chains are preflighted in order. Runtime fallback is allowed only for profile-specific,
+    capacity, network, or server failures before the first ordinary assistant text or tool-call
+    start; cancellation, policy denial, malformed common input, and refusals remain terminal.
+    Context overflow receives exactly one compaction and same-profile retry before fallback.
+20. Sessions keep an append-only canonical transcript and a derived provider-facing active
+    history. Manual, threshold, overflow, or model-downshift compaction persists a checkpoint
+    before replacing the active projection, preserves recent user turns, and resumes from the
+    latest valid checkpoint without deleting visible history. A downshift compacts with the old
+    profile before changing selection. Default reserve is 20% of the context window clamped to
+    8,000–50,000 tokens; the threshold is the lesser of the configured ratio and window minus
+    reserve, including the pending request. Summary output is half the reserve clamped to
+    2,000–16,000 tokens and never reintroduces built-in, role, or `AGENTS.md` instructions.
 
 ## Fixed Constraints
 
 - The architecture is approved and changes only by explicit user decision.
 - Provider plugins are language-independent standalone packages and subprocesses.
-- The selected model is a default for direct interaction, not a global singleton assumption; future agents may use other provider/model pairs.
+- The selected model is the main-session default; a child may select another cached,
+  authenticated provider/model pair.
 - External clients must reuse the `misy-core` contract, including its public async operations,
   events, cancellation methods, and `CoreSnapshot` projection.
-- The multimodal public-domain additions ship with the workspace contract version `0.2.0`;
-  provider protocol v2 remains compatible because image fields are capability-gated.
+- Hierarchical instruction context ships with workspace contract version `0.4.0`; provider
+  protocol v2, config version 2, credential version 1, model-cache format, and session format
+  remain compatible. `context_window = 0` means unknown in the in-memory context report.
+  compatible because concurrent chat notifications already carry request IDs.
 
 ## Change Impact
 
@@ -112,6 +164,8 @@ Changing ownership or event semantics affects the core, TUI, provider host, inte
 - [`crates/misy-core/src/core.rs`](../crates/misy-core/src/core.rs)
 - [`crates/misy-core/src/core/agent.rs`](../crates/misy-core/src/core/agent.rs)
 - [`crates/misy-core/src/core/events.rs`](../crates/misy-core/src/core/events.rs)
+- [`crates/misy-core/src/core/instructions.rs`](../crates/misy-core/src/core/instructions.rs)
+- [`crates/misy-core/src/core/context_report.rs`](../crates/misy-core/src/core/context_report.rs)
 - [`crates/misy-core/src/core/snapshot.rs`](../crates/misy-core/src/core/snapshot.rs)
 - [Provider Plugins](provider-plugins.md)
 - [TUI Client](tui-client.md)

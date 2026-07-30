@@ -6,8 +6,27 @@ use misy_core::{ActivityOutput, CoreEvent, SubmissionId, ToolResult};
 impl UiState {
     pub(in crate::tui) fn apply_core_event(&mut self, event: CoreEvent) {
         match event {
+            CoreEvent::CompactionChanged { compaction } => {
+                if compaction.status == "completed"
+                    && let Some(checkpoint) = compaction.checkpoint
+                {
+                    self.add_compaction(checkpoint);
+                }
+            }
             CoreEvent::ActivityChanged { .. } => {}
             CoreEvent::ActivityFinished { output } => self.add_activity_finished(output),
+            CoreEvent::AgentFinished { agent, result } => {
+                let result = result.trim();
+                let detail = if result.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {result}")
+                };
+                self.add_info(format!(
+                    "{} · {} · {:?}{detail}",
+                    agent.id, agent.title, agent.status
+                ));
+            }
             CoreEvent::ProviderDiscovered { .. } | CoreEvent::ModelsListed { .. } => {}
             CoreEvent::AuthenticationChanged { .. } | CoreEvent::ModelSelected { .. } => {}
             CoreEvent::SubmissionAccepted {
@@ -37,6 +56,8 @@ impl UiState {
                 });
             }
             CoreEvent::ToolResult { result, .. } => self.add_tool_result(result),
+            CoreEvent::TodoListUpdated { .. } => {}
+            CoreEvent::QuestionRequested { .. } | CoreEvent::QuestionResolved { .. } => {}
             CoreEvent::Completed { submission } => self.complete_turn(submission),
             CoreEvent::Cancelled { submission } => {
                 self.discard_terminal_turn(submission);
@@ -48,6 +69,15 @@ impl UiState {
             } => {
                 self.discard_terminal_turn(submission);
                 self.add_error(message);
+            }
+            CoreEvent::SessionPersistenceFailed { message } => {
+                self.add_error(format!("could not save session: {message}"));
+            }
+            CoreEvent::InstructionWarning { warning } => {
+                self.add_error(format!(
+                    "AGENTS.md warning for {}: {:?}",
+                    warning.source.display_path, warning.reason
+                ));
             }
             CoreEvent::Shutdown => {
                 self.terminal_turn = None;

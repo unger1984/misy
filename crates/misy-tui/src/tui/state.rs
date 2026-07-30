@@ -4,6 +4,7 @@ mod activities;
 mod context;
 mod events;
 mod input;
+mod models;
 mod providers;
 mod questions;
 mod sessions;
@@ -33,8 +34,8 @@ use super::{
     startup_header::StartupHeader,
 };
 use misy_core::{
-    ActivityOutput, AgentTranscript, CoreSnapshot, ModelInfo, ModelProfile, ModelRef,
-    ProviderAuthMethod, ProviderDisplayName, ProviderId, SubmissionId,
+    ActivityOutput, AgentTranscript, CoreSnapshot, ModelProfile, ModelRef, ProviderAuthMethod,
+    ProviderDisplayName, ProviderId, SubmissionId,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -139,6 +140,7 @@ pub struct UiState {
     pub(super) agent_preview: Option<AgentTranscript>,
     session_id: Option<String>,
     thinking_only: bool,
+    model_picker_before_thinking: Option<ModelPicker>,
 }
 
 impl Default for UiState {
@@ -182,6 +184,7 @@ impl Default for UiState {
             agent_preview: None,
             session_id: None,
             thinking_only: false,
+            model_picker_before_thinking: None,
         }
     }
 }
@@ -517,68 +520,6 @@ impl UiState {
         }
     }
 
-    pub(super) fn selected_model_choice(&self) -> Option<ModelRef> {
-        match &self.view {
-            Some(ActiveView::Models(view)) => view.selected_value().cloned(),
-            _ => None,
-        }
-    }
-
-    pub(super) fn selected_profile_choice(&self) -> Option<ModelProfile> {
-        match &self.view {
-            Some(ActiveView::Thinking(view)) => view.selected_value().cloned(),
-            _ => None,
-        }
-    }
-
-    pub(super) fn thinking_selection_is_reasoning_only(&self) -> bool {
-        self.thinking_only
-    }
-
-    pub(super) fn open_thinking(&mut self, model: &ModelInfo, selected: Option<&str>) {
-        self.thinking_only = false;
-        self.open_thinking_picker(model, selected);
-    }
-
-    pub(super) fn open_thinking_only(&mut self, model: &ModelInfo, selected: Option<&str>) {
-        self.thinking_only = true;
-        self.open_thinking_picker(model, selected);
-    }
-
-    fn open_thinking_picker(&mut self, model: &ModelInfo, selected: Option<&str>) {
-        let rows = model
-            .thinking
-            .as_ref()
-            .map(|thinking| {
-                thinking
-                    .levels
-                    .iter()
-                    .map(|level| {
-                        let profile =
-                            ModelProfile::new(model.model.clone(), Some(level.id.clone()));
-                        if selected == Some(level.id.as_str()) {
-                            super::list::ListRow::current(
-                                profile,
-                                level.id.clone(),
-                                Some(level.description.clone()),
-                            )
-                        } else {
-                            super::list::ListRow::selectable(
-                                profile,
-                                level.id.clone(),
-                                Some(level.description.clone()),
-                            )
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.view = Some(ActiveView::Thinking(ListView::new(
-            "Select reasoning level",
-            rows,
-        )));
-    }
-
     pub(super) fn select_picker_number(&mut self, one_based: usize) -> bool {
         match &mut self.view {
             Some(ActiveView::Providers(view)) => view.select_number(one_based),
@@ -668,10 +609,16 @@ impl UiState {
                         }),
                 ));
             }
+            Some(ActiveView::Thinking(_)) => {
+                self.view = self
+                    .model_picker_before_thinking
+                    .take()
+                    .map(ActiveView::Models);
+                self.thinking_only = false;
+            }
             Some(
                 ActiveView::Providers(_)
                 | ActiveView::Models(_)
-                | ActiveView::Thinking(_)
                 | ActiveView::Sessions(_)
                 | ActiveView::AgentDiscard(_),
             ) => {

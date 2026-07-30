@@ -196,23 +196,39 @@ fn rows_and_tabs(
                 .get(&provider)
                 .map(|name| name.as_str().to_owned())
                 .unwrap_or_else(|| provider.as_str().to_owned());
-            let label = format!(
-                "{}  {}",
-                model.model.model.as_str(),
-                compact_context(model.context_window)
+            let label = model.display_name.clone();
+            let context = compact_context(model.context_window);
+            let description = model.description.as_deref().unwrap_or("Unknown");
+            let pricing = model.pricing.as_deref().unwrap_or("Unknown");
+            let thinking = model.thinking.as_ref().map_or_else(
+                || "unavailable".to_owned(),
+                |thinking| format!("{} levels: {}", thinking.levels.len(), thinking.default),
             );
+            let metadata = [
+                format!("Provider: {provider_name} · Runnable"),
+                format!("Thinking: {thinking}"),
+                format!("Pricing: {pricing}"),
+                format!("Description: {description}"),
+            ]
+            .join("\n");
             let search = format!(
-                "{} {} {}",
+                "{} {} {} {} {} {}",
+                model.model.model.as_str(),
                 model.display_name,
-                model.description.as_deref().unwrap_or_default(),
-                model.pricing.as_deref().unwrap_or_default()
+                provider_name,
+                description,
+                pricing,
+                thinking
             );
             let row = if selected_model == Some(&model.model) {
-                ListRow::current_with_search(model.model, label, Some(provider_name), search)
+                ListRow::current_with_search(model.model, label, Some(metadata), search)
             } else {
-                ListRow::selectable_with_search(model.model, label, Some(provider_name), search)
+                ListRow::selectable_with_search(model.model, label, Some(metadata), search)
             };
-            PickerRow { provider, row }
+            PickerRow {
+                provider,
+                row: row.with_context(context),
+            }
         })
         .collect::<Vec<_>>();
     rows.extend(available.errors.into_iter().map(|error| {
@@ -260,7 +276,9 @@ fn labels_for_tabs(
 #[cfg(test)]
 mod tests {
     use super::ModelPicker;
-    use misy_core::{AvailableModels, ModelId, ModelInfo, ModelRef, ProviderId};
+    use misy_core::{
+        AvailableModels, ModelId, ModelInfo, ModelRef, ProviderId, ThinkingInfo, ThinkingLevel,
+    };
     use std::collections::BTreeMap;
 
     fn available() -> AvailableModels {
@@ -286,9 +304,54 @@ mod tests {
         let mut picker = ModelPicker::from_available(available(), &BTreeMap::new(), None);
         picker.insert_filter("a");
         picker.tab_right();
-        assert_eq!(picker.labels(), ["alpha  1"]);
+        assert_eq!(picker.labels(), ["Alpha"]);
         picker.tab_right();
-        assert_eq!(picker.labels(), ["beta  1"]);
+        assert_eq!(picker.labels(), ["Beta"]);
         assert_eq!(picker.tabs()[2], ("second".to_owned(), true));
+    }
+
+    #[test]
+    fn model_rows_keep_context_separate_from_complete_metadata() {
+        let model = ModelInfo::new(
+            ModelRef::new(ProviderId::new("fixture"), ModelId::new("alpha")),
+            "Alpha",
+            128_000,
+        )
+        .with_optional_metadata(
+            Some("Fast general model".to_owned()),
+            None,
+            Some(ThinkingInfo {
+                default: "medium".to_owned(),
+                levels: vec![
+                    ThinkingLevel {
+                        id: "low".to_owned(),
+                        description: "Quick".to_owned(),
+                    },
+                    ThinkingLevel {
+                        id: "medium".to_owned(),
+                        description: "Balanced".to_owned(),
+                    },
+                ],
+            }),
+        );
+        let picker = ModelPicker::from_available(
+            AvailableModels {
+                models: vec![model],
+                errors: Vec::new(),
+            },
+            &BTreeMap::new(),
+            None,
+        );
+
+        let row = picker.visible_rows(1).remove(0);
+        assert_eq!(row.label, "Alpha");
+        assert_eq!(row.context.as_deref(), Some("128k"));
+        let expected_metadata = concat!(
+            "Provider: fixture · Runnable\n",
+            "Thinking: 2 levels: medium\n",
+            "Pricing: Unknown\n",
+            "Description: Fast general model"
+        );
+        assert_eq!(row.description.as_deref(), Some(expected_metadata));
     }
 }

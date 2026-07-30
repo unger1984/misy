@@ -513,7 +513,9 @@ async fn escape_cancels_the_core_head_when_tui_events_are_stale() {
     client
         .handle_input("stale-head-second")
         .expect("queued blocking prompt");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Keep TUI events stale while allowing the subprocess-backed core to advance to its second
+    // submission even when the full test binary is contending for process startup time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     client
         .handle_key(UiKey::Escape)
         .expect("cancel actual core head");

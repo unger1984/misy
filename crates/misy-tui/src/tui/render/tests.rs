@@ -74,6 +74,7 @@ fn list_line_truncates_both_columns_without_removing_the_gap() {
     let row = ListRowDisplay {
         number: 1,
         label: "Provider with a very long display name".to_owned(),
+        context: None,
         description: Some("authentication status with extra details".to_owned()),
         selected: true,
         current: false,

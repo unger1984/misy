@@ -178,6 +178,7 @@ impl AuthPromptForm {
                 ListRowDisplay {
                     number: index + 1,
                     label: field.label.clone(),
+                    context: None,
                     description: Some(if value.is_empty() {
                         "[ ]".to_owned()
                     } else {

@@ -78,8 +78,10 @@ model, authentication, session, and tool orchestration remain in the core.
   summaries, decoded image count/bytes, and blocked/truncated-source warnings. A zero model window
   is shown as unknown, and images explicitly have no fabricated token estimate. `Up`, `Down`,
   `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
-- `/model` shows provider tabs, compact context-window values, and searchable model metadata.
-  Models with multiple reasoning levels open a second picker before the profile is persisted.
+- `/model` shows provider tabs, an aligned compact context-window column, and searchable model
+  metadata. Missing description or pricing values are visibly marked `Unknown`, and the model row
+  states whether provider-controlled reasoning is available. Models with multiple reasoning levels
+  open a second picker before the profile is persisted.
   `/thinking` opens that level picker directly for the selected model, while the footer always
   shows the effective level.
 - `/compact [focus]` asks the core to compact idle root context. Automatic compaction uses the
@@ -131,9 +133,10 @@ model, authentication, session, and tool orchestration remain in the core.
   `Up` and `Down` move within the filtered model list. Its width is capped and centered on wider
   terminals, while provider tabs wrap across rows and keep the active tab visible on short screens.
   The model viewport uses the height left below those rows and scrolls the selection when the list
-  does not fit. The text filter is retained across tabs, and a background refresh preserves the
-  active tab and selected model when they still exist. Lists show up to eight scrollable numbered
-  rows, aligned dim second-column descriptions, and an
+  does not fit. Reversing direction moves the cursor through the visible rows before the viewport
+  starts scrolling at the opposite edge. The text filter is retained across tabs, and a background
+  refresh preserves the active tab and selected model when they still exist. Lists show up to eight
+  scrollable numbered rows, aligned dim second-column descriptions, and an
   accent-highlighted selection. Digits select visible numbered entries directly. The selected
   model has a checkmark; provider authentication is a second-column status. Providers without
   credentials are not queried, and a failure from one configured provider is shown without hiding

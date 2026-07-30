@@ -52,11 +52,36 @@ test("validates the key through the ordered catalog and preserves qualified IDs"
 		{
 			id: "cc/claude-opus-5",
 			display_name: "cc/claude-opus-5",
-			context_window: 128_000,
+			context_window: 0,
 			input_modalities: ["text", "image"],
 		},
 	]);
 	expect(instance.defaultModel(models)).toBe("cx/gpt-5.6-sol");
+});
+
+test("preserves optional catalog facts without inventing missing metadata", async () => {
+	const baseUrl = fakeServer(() =>
+		Response.json({
+			data: [
+				{
+					id: "cx/gpt-5.6-sol",
+					description: "Frontier coding model",
+					pricing: "$0.10 / 1M tokens",
+				},
+			],
+		}),
+	);
+
+	await expect(provider(baseUrl).listModels(credentials())).resolves.toEqual([
+		{
+			id: "cx/gpt-5.6-sol",
+			display_name: "cx/gpt-5.6-sol",
+			context_window: 0,
+			input_modalities: ["text"],
+			description: "Frontier coding model",
+			pricing: "$0.10 / 1M tokens",
+		},
+	]);
 });
 
 test("rejects remote catalog failures without reflecting response bodies or API keys", async () => {

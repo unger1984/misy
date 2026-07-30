@@ -1,10 +1,13 @@
 //! Shared filtering, selection, and scrolling for bottom-pane lists.
 
+use std::cell::Cell;
+
 /// One row in a modal list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ListRow<T> {
     pub(super) value: Option<T>,
     pub(super) label: String,
+    pub(super) context: Option<String>,
     pub(super) description: Option<String>,
     pub(super) current: bool,
     search_terms: Vec<String>,
@@ -15,6 +18,7 @@ pub(super) struct ListRow<T> {
 pub(super) struct ListRowDisplay {
     pub(super) number: usize,
     pub(super) label: String,
+    pub(super) context: Option<String>,
     pub(super) description: Option<String>,
     pub(super) selected: bool,
     pub(super) current: bool,
@@ -29,10 +33,16 @@ impl<T> ListRow<T> {
         Self {
             value: Some(value),
             label: label.into(),
+            context: None,
             description,
             current: false,
             search_terms: Vec::new(),
         }
+    }
+
+    pub(super) fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context = Some(context.into());
+        self
     }
 
     pub(super) fn selectable_with_search(
@@ -50,6 +60,7 @@ impl<T> ListRow<T> {
         Self {
             value: Some(value),
             label: label.into(),
+            context: None,
             description,
             current: true,
             search_terms: Vec::new(),
@@ -71,6 +82,7 @@ impl<T> ListRow<T> {
         Self {
             value: None,
             label: label.into(),
+            context: None,
             description: None,
             current: false,
             search_terms: Vec::new(),
@@ -86,7 +98,9 @@ pub(super) struct ListView<T> {
     filtered: Vec<usize>,
     query: String,
     selected: Option<usize>,
-    scroll_top: usize,
+    // Rendering supplies the real viewport height, so this cache keeps navigation stable without
+    // coupling input actions to terminal geometry.
+    scroll_top: Cell<usize>,
 }
 
 impl<T> ListView<T> {
@@ -97,7 +111,7 @@ impl<T> ListView<T> {
             filtered: Vec::new(),
             query: String::new(),
             selected: None,
-            scroll_top: 0,
+            scroll_top: Cell::new(0),
         };
         view.apply_filter();
         view
@@ -183,6 +197,7 @@ impl<T> ListView<T> {
                 ListRowDisplay {
                     number: filtered_index + 1,
                     label: row.label.clone(),
+                    context: row.context.clone(),
                     description: row.description.clone(),
                     selected: self.selected == Some(filtered_index),
                     current: row.current,
@@ -226,7 +241,7 @@ impl<T> ListView<T> {
             .map(|(index, _)| index)
             .collect();
         self.selected = self.first_selectable();
-        self.scroll_top = 0;
+        self.scroll_top.set(0);
     }
 
     fn selected_row(&self) -> Option<&ListRow<T>> {
@@ -262,18 +277,22 @@ impl<T> ListView<T> {
 
     fn visible_scroll_top(&self, visible_rows: usize) -> usize {
         let Some(selected) = self.selected else {
+            self.scroll_top.set(0);
             return 0;
         };
         if visible_rows == 0 {
-            return self.scroll_top;
+            return self.scroll_top.get();
         }
-        if selected < self.scroll_top {
+        let scroll_top = self.scroll_top.get();
+        let next = if selected < scroll_top {
             selected
-        } else if selected >= self.scroll_top + visible_rows {
+        } else if selected >= scroll_top.saturating_add(visible_rows) {
             selected + 1 - visible_rows
         } else {
-            self.scroll_top
-        }
+            scroll_top
+        };
+        self.scroll_top.set(next);
+        next
     }
 }
 
@@ -310,6 +329,34 @@ mod tests {
         assert_eq!(visible.first().map(|row| row.number), Some(2));
         assert_eq!(visible.last().map(|row| row.number), Some(9));
         assert!(visible.last().is_some_and(|row| row.selected));
+    }
+
+    #[test]
+    fn selection_moves_inside_the_viewport_before_scrolling_back_up() {
+        let rows = (1..=9)
+            .map(|number| ListRow::selectable(number, format!("Item {number}"), None))
+            .collect();
+        let mut view = ListView::new("items", rows);
+        for _ in 0..8 {
+            view.move_down();
+        }
+        assert_eq!(view.visible_rows(4)[0].number, 6);
+
+        for expected in [8, 7, 6] {
+            view.move_up();
+            let visible = view.visible_rows(4);
+            assert_eq!(visible[0].number, 6);
+            assert!(
+                visible
+                    .iter()
+                    .any(|row| row.number == expected && row.selected)
+            );
+        }
+
+        view.move_up();
+        let visible = view.visible_rows(4);
+        assert_eq!(visible[0].number, 5);
+        assert!(visible[0].selected);
     }
 
     #[test]

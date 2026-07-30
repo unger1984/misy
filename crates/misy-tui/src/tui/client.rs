@@ -542,10 +542,24 @@ impl<B: BrowserHandoff> TuiClient<B> {
                             .as_ref()
                             .is_some_and(|thinking| thinking.levels.len() > 1)
                     }) {
-                        let selected = metadata
-                            .thinking
-                            .as_ref()
-                            .map(|thinking| thinking.default.as_str());
+                        let snapshot = self.core.snapshot();
+                        let selected = snapshot
+                            .selected_thinking
+                            .as_deref()
+                            .filter(|level| {
+                                metadata.thinking.as_ref().is_some_and(|thinking| {
+                                    thinking
+                                        .levels
+                                        .iter()
+                                        .any(|candidate| candidate.id == *level)
+                                })
+                            })
+                            .or_else(|| {
+                                metadata
+                                    .thinking
+                                    .as_ref()
+                                    .map(|thinking| thinking.default.as_str())
+                            });
                         self.state.open_thinking(&metadata, selected);
                     } else {
                         self.select_model(model);

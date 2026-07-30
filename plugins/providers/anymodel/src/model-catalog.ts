@@ -3,8 +3,6 @@ import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import { type ApiKeyCredentials, isRecord, type Model } from "./types";
 
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-
 /** Fetches and normalizes the non-empty authenticated AnyModel model catalog. */
 export async function listModelCatalog(
 	config: ProviderConfig,
@@ -83,7 +81,7 @@ function contextWindow(entry: Record<string, unknown>): number {
 		if (typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xffffffff)
 			return value;
 	}
-	return DEFAULT_CONTEXT_WINDOW;
+	return 0;
 }
 
 function inputModalities(entry: Record<string, unknown>): ("text" | "image")[] {

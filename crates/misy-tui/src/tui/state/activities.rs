@@ -296,6 +296,7 @@ fn information_row(label: String) -> ListRowDisplay {
     ListRowDisplay {
         number: 0,
         label,
+        context: None,
         description: None,
         selected: false,
         current: false,

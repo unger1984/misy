@@ -80,26 +80,29 @@ async fn model_picker_opens_from_cached_models_before_the_refresh_arrives() {
         [("All".to_owned(), true), ("Fixture AI".to_owned(), false)]
     );
     let lines = buffer_lines(&render_buffer(client.state(), 67, 20), 67);
-    let first_context_column = lines
+    let first_context_edge = lines
         .iter()
         .find(|line| line.contains("Fixture") && line.contains("128k"))
         .and_then(|line| line.split("128k").next())
-        .map(|prefix| prefix.chars().count())
+        .map(|prefix| prefix.chars().count() + "128k".chars().count())
         .expect("first context value");
-    let second_context_column = lines
+    let second_context_edge = lines
         .iter()
         .find(|line| line.contains("Fixture B") && line.contains("64k"))
         .and_then(|line| line.split("64k").next())
-        .map(|prefix| prefix.chars().count())
+        .map(|prefix| prefix.chars().count() + "64k".chars().count())
         .expect("second context value");
-    assert_eq!(first_context_column, second_context_column, "{lines:#?}");
+    assert_eq!(first_context_edge, second_context_edge, "{lines:#?}");
     let rendered = lines.join("\n");
+    assert!(rendered.contains("Model"));
+    assert!(rendered.contains("Context"));
+    assert!(rendered.contains("Cost"));
+    assert!(rendered.contains("Provider"));
     assert!(rendered.contains("Fixture AI"));
-    assert!(rendered.contains("Provider: Fixture AI"));
-    assert!(rendered.contains("Pricing: Unknown"));
-    assert!(rendered.contains("Thinking:"));
-    assert!(rendered.contains("unavailable"));
-    assert!(rendered.contains("Runnable"));
+    assert!(rendered.contains("Unknown"));
+    let wide = buffer_lines(&render_buffer(client.state(), 120, 20), 120).join("\n");
+    assert!(wide.contains("Description"), "{wide}");
+    assert!(wide.contains("Fixture AI  Unknown"), "{wide}");
     client.handle_ctrl_c();
 }
 

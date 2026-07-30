@@ -8,6 +8,8 @@ pub(super) struct ListRow<T> {
     pub(super) value: Option<T>,
     pub(super) label: String,
     pub(super) context: Option<String>,
+    pub(super) pricing: Option<String>,
+    pub(super) provider: Option<String>,
     pub(super) description: Option<String>,
     pub(super) current: bool,
     search_terms: Vec<String>,
@@ -19,6 +21,8 @@ pub(super) struct ListRowDisplay {
     pub(super) number: usize,
     pub(super) label: String,
     pub(super) context: Option<String>,
+    pub(super) pricing: Option<String>,
+    pub(super) provider: Option<String>,
     pub(super) description: Option<String>,
     pub(super) selected: bool,
     pub(super) current: bool,
@@ -34,14 +38,23 @@ impl<T> ListRow<T> {
             value: Some(value),
             label: label.into(),
             context: None,
+            pricing: None,
+            provider: None,
             description,
             current: false,
             search_terms: Vec::new(),
         }
     }
 
-    pub(super) fn with_context(mut self, context: impl Into<String>) -> Self {
+    pub(super) fn with_model_columns(
+        mut self,
+        context: impl Into<String>,
+        pricing: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
         self.context = Some(context.into());
+        self.pricing = Some(pricing.into());
+        self.provider = Some(provider.into());
         self
     }
 
@@ -61,6 +74,8 @@ impl<T> ListRow<T> {
             value: Some(value),
             label: label.into(),
             context: None,
+            pricing: None,
+            provider: None,
             description,
             current: true,
             search_terms: Vec::new(),
@@ -83,6 +98,8 @@ impl<T> ListRow<T> {
             value: None,
             label: label.into(),
             context: None,
+            pricing: None,
+            provider: None,
             description: None,
             current: false,
             search_terms: Vec::new(),
@@ -198,6 +215,8 @@ impl<T> ListView<T> {
                     number: filtered_index + 1,
                     label: row.label.clone(),
                     context: row.context.clone(),
+                    pricing: row.pricing.clone(),
+                    provider: row.provider.clone(),
                     description: row.description.clone(),
                     selected: self.selected == Some(filtered_index),
                     current: row.current,

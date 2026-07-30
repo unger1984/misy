@@ -297,6 +297,8 @@ fn information_row(label: String) -> ListRowDisplay {
         number: 0,
         label,
         context: None,
+        pricing: None,
+        provider: None,
         description: None,
         selected: false,
         current: false,

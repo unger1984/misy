@@ -20,6 +20,7 @@ mod list;
 mod model_picker;
 mod model_popup;
 mod model_refresh;
+mod model_table;
 mod model_view;
 mod popup;
 mod presentation;

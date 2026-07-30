@@ -78,10 +78,10 @@ model, authentication, session, and tool orchestration remain in the core.
   summaries, decoded image count/bytes, and blocked/truncated-source warnings. A zero model window
   is shown as unknown, and images explicitly have no fabricated token estimate. `Up`, `Down`,
   `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
-- `/model` shows provider tabs, an aligned compact context-window column, and searchable model
-  metadata. Missing description or pricing values are visibly marked `Unknown`, and the model row
-  states whether provider-controlled reasoning is available. Models with multiple reasoning levels
-  open a second picker before the profile is persisted.
+- `/model` shows provider tabs and one compact table row per model with aligned model, context,
+  cost, provider, and description columns. Narrow layouts hide description and then cost before
+  compressing identity columns. Missing description or pricing values are visibly marked `Unknown`.
+  Models with multiple reasoning levels open a second picker before the profile is persisted.
   `/thinking` opens that level picker directly for the selected model, while the footer always
   shows the effective level.
 - `/compact [focus]` asks the core to compact idle root context. Automatic compaction uses the

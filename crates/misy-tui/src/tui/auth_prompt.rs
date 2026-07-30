@@ -179,6 +179,8 @@ impl AuthPromptForm {
                     number: index + 1,
                     label: field.label.clone(),
                     context: None,
+                    pricing: None,
+                    provider: None,
                     description: Some(if value.is_empty() {
                         "[ ]".to_owned()
                     } else {

@@ -1,5 +1,5 @@
 /** Authenticated AnyModel catalog retrieval and conservative response normalization. */
-import { endpointUrl, fetchWithTimeout } from "@misy/provider-sdk";
+import { endpointUrl, fetchWithTimeout, referencePricing } from "@misy/provider-sdk";
 import type { ProviderConfig } from "./config";
 import { type ApiKeyCredentials, isRecord, type Model } from "./types";
 
@@ -46,6 +46,7 @@ function normalizeModel(entry: unknown): Model[] {
 	if (!isRecord(entry) || typeof entry["id"] !== "string" || entry["id"].trim().length === 0)
 		return [];
 	const id = entry["id"];
+	const pricing = textMetadata(entry, "pricing") ?? referencePricing(id);
 	return [
 		{
 			id,
@@ -55,9 +56,7 @@ function normalizeModel(entry: unknown): Model[] {
 			...(textMetadata(entry, "description") === undefined
 				? {}
 				: { description: textMetadata(entry, "description") }),
-			...(textMetadata(entry, "pricing") === undefined
-				? {}
-				: { pricing: textMetadata(entry, "pricing") }),
+			...(pricing === undefined ? {} : { pricing }),
 		},
 	];
 }

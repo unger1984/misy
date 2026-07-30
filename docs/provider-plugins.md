@@ -108,6 +108,10 @@ Each model may also provide bounded `description`, opaque display-only `pricing`
 metadata containing an ordered level list and default level. Catalog results identify their source
 as `remote` or `bundled`; the core caches each provider atomically for fifteen minutes, preserves a
 stale catalog across transient refresh failures, and reports availability separately from age.
+Provider plugins keep explicit upstream pricing authoritative and may fill missing display prices
+from the shared, versioned models.dev-derived reference snapshot. Reference values use compact
+`$input/output` USD-per-million text; subscription catalogs may explicitly map their included models
+to `free`. The core continues to treat this text as opaque and never computes spend from it.
 
 ## Optional Capabilities
 

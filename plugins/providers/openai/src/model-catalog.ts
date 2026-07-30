@@ -1,6 +1,6 @@
 /** Discovers account-scoped Codex models and retains a bundled offline fallback. */
 
-import { fetchWithTimeout } from "@misy/provider-sdk";
+import { fetchWithTimeout, referencePricing } from "@misy/provider-sdk";
 import { authHeaders } from "./auth";
 import type { ProviderConfig } from "./config";
 import type { Credentials } from "./types";
@@ -87,7 +87,7 @@ export async function listModels(
 		const models = await discoverModels(config, credentials, path);
 		if (models !== undefined) {
 			lastCatalogSource = "remote";
-			reasoningByModel = reasoningLookup(models);
+			reasoningByModel = reasoningLookup([...FALLBACK_MODELS, ...models]);
 			return copyModels(models);
 		}
 	}
@@ -151,10 +151,12 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 	if (!isRecord(value)) return [];
 	const id = nonEmptyString(value["slug"]) ?? nonEmptyString(value["id"]);
 	if (!id || isHidden(value["visibility"])) return [];
-	const thinking = thinkingMetadata(
-		value["default_reasoning_level"],
-		value["supported_reasoning_levels"],
+	const fallback = FALLBACK_MODELS.find((model) => model.id === id);
+	const thinking = mergeThinking(
+		thinkingMetadata(value["default_reasoning_level"], value["supported_reasoning_levels"]),
+		fallback?.thinking,
 	);
+	const pricing = nonEmptyString(value["pricing"]) ?? fallback?.pricing ?? referencePricing(id);
 	return [
 		{
 			id,
@@ -166,9 +168,7 @@ function normalizeModel(value: unknown): CatalogEntry[] {
 			...(nonEmptyString(value["description"]) === undefined
 				? {}
 				: { description: nonEmptyString(value["description"]) }),
-			...(nonEmptyString(value["pricing"]) === undefined
-				? {}
-				: { pricing: nonEmptyString(value["pricing"]) }),
+			...(pricing === undefined ? {} : { pricing }),
 			priority: finiteNumber(value["priority"]) ?? Number.MAX_SAFE_INTEGER,
 		},
 	];
@@ -230,9 +230,23 @@ function reasoningDescription(id: string): string {
 			low: "Faster, lighter reasoning",
 			medium: "Balanced reasoning",
 			high: "Deeper reasoning",
-			xhigh: "Maximum reasoning",
+			xhigh: "Extra-high reasoning",
+			max: "Maximum reasoning",
 		}[id] ?? `Provider reasoning level ${id}`
 	);
+}
+
+function mergeThinking(
+	discovered: Model["thinking"] | undefined,
+	reference: Model["thinking"] | undefined,
+): Model["thinking"] | undefined {
+	if (!discovered) return reference;
+	if (!reference) return discovered;
+	const levels = [...discovered.levels];
+	for (const level of reference.levels) {
+		if (!levels.some((candidate) => candidate.id === level.id)) levels.push({ ...level });
+	}
+	return { default: discovered.default, levels };
 }
 
 function isHidden(visibility: unknown): boolean {
@@ -267,10 +281,16 @@ function reasoningLookup(models: readonly Model[]): Map<string, boolean> {
 }
 
 function imageModel(model: Omit<Model, "input_modalities">): Model {
+	const levels = model.id.startsWith("gpt-5.6")
+		? ["low", "medium", "high", "xhigh", "max"]
+		: ["low", "medium", "high", "xhigh"];
 	return {
 		...model,
+		...(model.pricing === undefined && referencePricing(model.id) !== undefined
+			? { pricing: referencePricing(model.id) }
+			: {}),
 		...(model.reasoning && model.thinking === undefined
-			? { thinking: thinkingMetadata("medium", ["low", "medium", "high", "xhigh"]) }
+			? { thinking: thinkingMetadata("medium", levels) }
 			: {}),
 		input_modalities: ["text", "image"],
 	};

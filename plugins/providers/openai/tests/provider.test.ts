@@ -243,6 +243,34 @@ test("returns bundled models when model discovery is unavailable", async () => {
 	]);
 });
 
+test("enriches Sol pricing and complete reasoning levels from the reference catalog", async () => {
+	const base = fakeServer(() =>
+		Response.json({
+			models: [
+				{
+					slug: "gpt-5.6-sol",
+					default_reasoning_level: "low",
+					supported_reasoning_levels: ["low"],
+				},
+			],
+		}),
+	);
+
+	const models = await new OpenAiProvider({ codexBaseUrl: base }).listModels(credentials());
+
+	expect(models[0]?.pricing).toBe("$5/30");
+	expect(models[0]?.thinking).toEqual({
+		default: "low",
+		levels: [
+			{ id: "low", description: "Faster, lighter reasoning" },
+			{ id: "medium", description: "Balanced reasoning" },
+			{ id: "high", description: "Deeper reasoning" },
+			{ id: "xhigh", description: "Extra-high reasoning" },
+			{ id: "max", description: "Maximum reasoning" },
+		],
+	});
+});
+
 test("normalizes ChatGPT subscription usage", async () => {
 	let received: CapturedRequest | undefined;
 	const base = fakeServer((request) => {

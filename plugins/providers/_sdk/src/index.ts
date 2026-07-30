@@ -12,6 +12,7 @@ export {
 	requireOauthCredentials,
 } from "./credentials";
 export { endpointUrl, fetchWithTimeout } from "./http";
+export { referencePricing } from "./model-metadata";
 export { preferredDefaultModel } from "./models";
 export { type ProviderAdapter, serve } from "./serve";
 export {

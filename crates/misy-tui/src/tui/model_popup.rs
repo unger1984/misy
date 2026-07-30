@@ -1,21 +1,20 @@
 //! Bounded centered-popup layout and rendering for provider and model pickers.
 
 use super::{
-    display_width::{text_width, truncate_to_width},
+    model_table::{self, ModelColumns},
     popup,
-    render::{list_line, modal_label_width, padded_line},
+    render::{list_line, modal_label_width},
     state::{ModalPresentation, UiState, spinner_frame},
     style,
 };
 use ratatui::{
     layout::Rect,
-    style::Style,
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 
 const MAX_MODEL_ROWS: u16 = 20;
-const MODEL_DETAIL_ROWS: u16 = 4;
+const MODEL_HEADER_ROWS: u16 = 1;
 
 pub(super) fn render(
     frame: &mut ratatui::Frame,
@@ -32,7 +31,7 @@ pub(super) fn render(
         layout
             .content
             .height
-            .saturating_sub(MODEL_DETAIL_ROWS)
+            .saturating_sub(MODEL_HEADER_ROWS)
             .max(1)
     };
     let modal = state
@@ -99,22 +98,23 @@ fn render_content(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentat
         render_operation(frame, area, operation);
         return;
     }
-    let label_width = modal_label_width(&modal.rows, area.width);
     let mut lines = Vec::new();
-    for row in &modal.rows {
-        if modal.tabs.is_empty() {
+    if modal.tabs.is_empty() {
+        let label_width = modal_label_width(&modal.rows, area.width);
+        for row in &modal.rows {
             lines.push(list_line(row, area.width, label_width));
-        } else {
-            lines.push(model_list_line(row, area.width, label_width));
-            if row.selected {
-                append_model_details(&mut lines, row);
-            }
         }
+    } else {
+        let columns = ModelColumns::for_rows(&modal.rows, area.width);
+        lines.push(model_table::header_line(area.width, columns));
+        lines.extend(
+            modal
+                .rows
+                .iter()
+                .map(|row| model_table::list_line(row, area.width, columns)),
+        );
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn render_operation(frame: &mut ratatui::Frame, area: Rect, operation: &str) {
@@ -128,84 +128,6 @@ fn render_operation(frame: &mut ratatui::Frame, area: Rect, operation: &str) {
         ])),
         area,
     );
-}
-
-fn model_list_line(
-    row: &super::list::ListRowDisplay,
-    width: u16,
-    label_width: usize,
-) -> Line<'static> {
-    let marker_style = if row.selected {
-        style::accent()
-    } else {
-        Style::default()
-    };
-    let current_style = if row.current {
-        style::accent()
-    } else {
-        Style::default()
-    };
-    let mut spans = vec![
-        Span::styled(if row.selected { "› " } else { "  " }, marker_style),
-        Span::styled(if row.current { "✓ " } else { "  " }, current_style),
-    ];
-    let context_width = row
-        .context
-        .as_ref()
-        .map_or(0, |context| text_width(context));
-    let prefix_width = 4;
-    let content_width = usize::from(width).saturating_sub(prefix_width);
-    let label_budget = if row.context.is_some() {
-        label_width.min(
-            content_width
-                .saturating_sub(context_width)
-                .saturating_sub(2),
-        )
-    } else {
-        content_width
-    };
-    spans.extend(styled_activity_label(&row.label, label_budget));
-    if let Some(context) = &row.context {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(context.clone(), style::accent()));
-    }
-    padded_line(spans, width, Style::default())
-}
-
-fn append_model_details(lines: &mut Vec<Line<'static>>, row: &super::list::ListRowDisplay) {
-    let Some(description) = &row.description else {
-        return;
-    };
-    lines.extend(
-        description
-            .lines()
-            .map(|detail| Line::styled(format!("      {detail}"), style::muted())),
-    );
-}
-
-fn styled_activity_label(label: &str, width: usize) -> Vec<Span<'static>> {
-    for (marker, marker_style) in [
-        ("● ", style::success()),
-        ("○ ", style::muted()),
-        ("× ", style::error()),
-        ("■ ", style::muted()),
-    ] {
-        if let Some(rest) = label.strip_prefix(marker) {
-            let rest_width = width.saturating_sub(text_width(marker));
-            let rest = padded_label(rest, rest_width);
-            return vec![
-                Span::styled(marker.to_owned(), marker_style),
-                Span::raw(rest),
-            ];
-        }
-    }
-    vec![Span::raw(padded_label(label, width))]
-}
-
-fn padded_label(label: &str, width: usize) -> String {
-    let label = truncate_to_width(label, width);
-    let padding = width.saturating_sub(text_width(&label));
-    format!("{label}{}", " ".repeat(padding))
 }
 
 fn help_text(modal: &ModalPresentation, width: u16) -> String {

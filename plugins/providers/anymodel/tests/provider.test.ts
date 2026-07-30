@@ -48,6 +48,7 @@ test("validates the key through the ordered catalog and preserves qualified IDs"
 			display_name: "Sol",
 			context_window: 200_000,
 			input_modalities: ["text"],
+			pricing: "$5/30",
 		},
 		{
 			id: "cc/claude-opus-5",
@@ -59,7 +60,7 @@ test("validates the key through the ordered catalog and preserves qualified IDs"
 	expect(instance.defaultModel(models)).toBe("cx/gpt-5.6-sol");
 });
 
-test("preserves optional catalog facts without inventing missing metadata", async () => {
+test("preserves provider facts ahead of reference metadata", async () => {
 	const baseUrl = fakeServer(() =>
 		Response.json({
 			data: [

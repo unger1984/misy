@@ -9,10 +9,12 @@
 
 ### Fixed
 
-- Made the model picker keep context values in an aligned column and expose provider catalog
-  descriptions, pricing, reasoning availability, and explicit unknown values; AnyModel no longer
-  fabricates a 128k context window when its catalog omits one. The reasoning step now marks the
-  provider default and returns to the preserved model list on `Esc`.
+- Made the model picker present model, context, cost, provider, and description as aligned table
+  columns instead of expanding the selected row into a multi-line metadata block. Missing catalog
+  values remain explicit, while missing prices are enriched from a models.dev-derived reference
+  snapshot in the same `$input/output` per-million format as OMP. AnyModel no longer fabricates a
+  128k context window when its catalog omits one. OpenAI reasoning metadata now restores the full
+  verified level set when live discovery returns only one level; `Esc` returns to the model list.
 - Kept long-list viewports stationary while the cursor moves within their visible rows, scrolling
   only after the cursor reaches the top or bottom edge.
 - Passed the pane identifier before reporting options as required by the Herdr CLI, allowing Misy

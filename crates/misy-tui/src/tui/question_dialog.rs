@@ -225,6 +225,8 @@ impl QuestionDialog {
                     page.selected.contains(&index),
                 ),
                 context: None,
+                pricing: None,
+                provider: None,
                 description: Some(option.description.clone()).filter(|text| !text.is_empty()),
                 selected: page.cursor == index,
                 current: page.selected.contains(&index),
@@ -242,6 +244,8 @@ impl QuestionDialog {
             number: other_index + 1,
             label: choice_label(&other, question.multi_select, page.other_selected),
             context: None,
+            pricing: None,
+            provider: None,
             description: Some("Type a custom answer".to_owned()),
             selected: page.cursor == other_index,
             current: page.other_selected,
@@ -284,6 +288,8 @@ impl QuestionDialog {
                     question.header.clone()
                 },
                 context: None,
+                pricing: None,
+                provider: None,
                 description: Some(if page.complete {
                     self.answer_for(question, page)
                 } else {

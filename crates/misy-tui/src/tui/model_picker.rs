@@ -204,13 +204,6 @@ fn rows_and_tabs(
                 || "unavailable".to_owned(),
                 |thinking| format!("{} levels: {}", thinking.levels.len(), thinking.default),
             );
-            let metadata = [
-                format!("Provider: {provider_name} · Runnable"),
-                format!("Thinking: {thinking}"),
-                format!("Pricing: {pricing}"),
-                format!("Description: {description}"),
-            ]
-            .join("\n");
             let search = format!(
                 "{} {} {} {} {} {}",
                 model.model.model.as_str(),
@@ -221,13 +214,23 @@ fn rows_and_tabs(
                 thinking
             );
             let row = if selected_model == Some(&model.model) {
-                ListRow::current_with_search(model.model, label, Some(metadata), search)
+                ListRow::current_with_search(
+                    model.model,
+                    label,
+                    Some(description.to_owned()),
+                    search,
+                )
             } else {
-                ListRow::selectable_with_search(model.model, label, Some(metadata), search)
+                ListRow::selectable_with_search(
+                    model.model,
+                    label,
+                    Some(description.to_owned()),
+                    search,
+                )
             };
             PickerRow {
                 provider,
-                row: row.with_context(context),
+                row: row.with_model_columns(context, pricing, provider_name),
             }
         })
         .collect::<Vec<_>>();
@@ -311,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn model_rows_keep_context_separate_from_complete_metadata() {
+    fn model_rows_expose_aligned_catalog_columns() {
         let model = ModelInfo::new(
             ModelRef::new(ProviderId::new("fixture"), ModelId::new("alpha")),
             "Alpha",
@@ -346,12 +349,8 @@ mod tests {
         let row = picker.visible_rows(1).remove(0);
         assert_eq!(row.label, "Alpha");
         assert_eq!(row.context.as_deref(), Some("128k"));
-        let expected_metadata = concat!(
-            "Provider: fixture · Runnable\n",
-            "Thinking: 2 levels: medium\n",
-            "Pricing: Unknown\n",
-            "Description: Fast general model"
-        );
-        assert_eq!(row.description.as_deref(), Some(expected_metadata));
+        assert_eq!(row.pricing.as_deref(), Some("Unknown"));
+        assert_eq!(row.provider.as_deref(), Some("fixture"));
+        assert_eq!(row.description.as_deref(), Some("Fast general model"));
     }
 }

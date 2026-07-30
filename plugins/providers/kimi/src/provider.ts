@@ -22,6 +22,7 @@ export class KimiProvider {
 	private readonly headers: KimiHeaders;
 	private readonly oauth: OAuthClient;
 	private protocols: ReadonlyMap<string, KimiProtocol>;
+	private modelSource: "remote" | "bundled" = "bundled";
 
 	/** Creates a provider, allowing endpoint and storage overrides for local tests. */
 	constructor(config: Partial<ProviderConfig> = {}) {
@@ -62,8 +63,14 @@ export class KimiProvider {
 	/** Lists live Kimi models, falling back to the bundled catalog if the endpoint is unavailable. */
 	async listModels(credentials: Credentials | undefined): Promise<Model[]> {
 		const catalog = await listModelCatalog(this.config, this.headers, credentials);
+		this.modelSource = catalog.authoritative ? "remote" : "bundled";
 		if (catalog.authoritative) this.protocols = catalog.protocols;
 		return catalog.models;
+	}
+
+	/** Reports whether the latest catalog came from live discovery or bundled fallback. */
+	catalogSource(): "remote" | "bundled" {
+		return this.modelSource;
 	}
 
 	/** Returns normalized Kimi Coding subscription limits plus credentials rotated by a refresh. */
@@ -179,8 +186,18 @@ export class KimiProvider {
 				},
 				body: JSON.stringify(
 					protocol === "anthropic"
-						? createAnthropicRequest(request.model_id, request.messages, request.tools)
-						: createChatRequest(request.model_id, request.messages, request.tools),
+						? createAnthropicRequest(
+								request.model_id,
+								request.messages,
+								request.tools,
+								request.max_output_tokens,
+							)
+						: createChatRequest(
+								request.model_id,
+								request.messages,
+								request.tools,
+								request.max_output_tokens,
+							),
 				),
 			},
 			this.config.requestTimeoutMs,

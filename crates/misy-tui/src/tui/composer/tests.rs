@@ -41,8 +41,8 @@ fn slash_popup_wraps_selection() {
     assert_eq!(
         composer.popup_rows(),
         [
-            "  /tasks  Show background tasks and agents",
-            "  /context  Show active context usage",
+            "  /thinking  Choose reasoning level",
+            "  /compact  Compact active context",
             "  /new  Start a new conversation",
             "  /clear  Start a new conversation",
             "  /resume  Resume a saved conversation",

@@ -216,6 +216,22 @@ impl ToolDispatcher {
             .collect()
     }
 
+    pub(crate) fn definition_names(&self) -> std::collections::BTreeSet<String> {
+        self.registry.definitions.keys().cloned().collect()
+    }
+
+    pub(crate) fn definitions_for_agent(
+        &self,
+        supports_images: bool,
+        supports_questions: bool,
+        allowed: Option<&std::collections::BTreeSet<String>>,
+    ) -> Vec<ToolDefinition> {
+        self.definitions_for_client(supports_images, supports_questions)
+            .into_iter()
+            .filter(|definition| allowed.is_none_or(|tools| tools.contains(&definition.name)))
+            .collect()
+    }
+
     pub(crate) fn definitions_for_client(
         &self,
         supports_images: bool,
@@ -224,23 +240,6 @@ impl ToolDispatcher {
         self.definitions_for(supports_images)
             .into_iter()
             .filter(|definition| supports_questions || definition.name != "AskUserQuestion")
-            .collect()
-    }
-
-    /// Returns local tool definitions allowed inside child-agent sessions.
-    pub(crate) fn definitions_for_child(
-        &self,
-        supports_images: bool,
-        supports_questions: bool,
-    ) -> Vec<ToolDefinition> {
-        self.registry
-            .definitions()
-            .into_iter()
-            .filter(|definition| {
-                !crate::core::agents::is_agent_tool(&definition.name)
-                    && (supports_images || definition.name != "view_image")
-                    && (supports_questions || definition.name != "AskUserQuestion")
-            })
             .collect()
     }
 
@@ -494,9 +493,8 @@ fn builtin_scope_policy(name: &str) -> Option<ToolScopePolicy> {
         "exec_command" => Some(ToolScopePolicy::WorkingDirectory("cwd")),
         "write_stdin" => Some(ToolScopePolicy::ActivityWorkingDirectory("task_id")),
         "task_list" | "task_stop" | "spawn_agent" | "agent_list" | "agent_wait"
-        | "agent_output" | "agent_message" | "agent_stop" | "SetTodoList" | "AskUserQuestion" => {
-            Some(ToolScopePolicy::None)
-        }
+        | "agent_output" | "agent_message" | "agent_stop" | "model_search" | "SetTodoList"
+        | "AskUserQuestion" => Some(ToolScopePolicy::None),
         _ => None,
     }
 }

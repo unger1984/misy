@@ -15,7 +15,7 @@ serve({
 	logout: () => provider.logout(),
 	listModels: async (credentials) => {
 		const models = await provider.listModels(credentials);
-		return { models, default_model: provider.defaultModel(models) };
+		return { models, default_model: provider.defaultModel(models), source: "remote" };
 	},
 	usage: () => provider.usage(),
 	chat: (request, requestId, notify, signal) =>

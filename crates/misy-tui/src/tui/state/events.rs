@@ -6,6 +6,13 @@ use misy_core::{ActivityOutput, CoreEvent, SubmissionId, ToolResult};
 impl UiState {
     pub(in crate::tui) fn apply_core_event(&mut self, event: CoreEvent) {
         match event {
+            CoreEvent::CompactionChanged { compaction } => {
+                if compaction.status == "completed"
+                    && let Some(checkpoint) = compaction.checkpoint
+                {
+                    self.add_compaction(checkpoint);
+                }
+            }
             CoreEvent::ActivityChanged { .. } => {}
             CoreEvent::ActivityFinished { output } => self.add_activity_finished(output),
             CoreEvent::AgentFinished { agent, result } => {

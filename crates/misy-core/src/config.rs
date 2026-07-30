@@ -70,18 +70,84 @@ impl MisyPaths {
     pub fn provider_plugins_dir(&self) -> PathBuf {
         self.root.join("plugins").join("providers")
     }
+
+    /// Returns the directory containing global child-agent role definitions.
+    pub fn agents_dir(&self) -> PathBuf {
+        self.root.join("agents")
+    }
+}
+
+/// Core-owned child-agent limits fixed when a root conversation starts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentConfig {
+    /// Root-inclusive number of concurrently live agent threads.
+    #[serde(default = "default_agent_threads")]
+    pub max_concurrent_threads_per_session: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_threads_per_session: default_agent_threads(),
+        }
+    }
+}
+
+/// Automatic and manual context-compaction settings.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CompactionConfig {
+    /// Whether known-window sessions compact before crossing their safe threshold.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// Fraction of the context window that triggers maintenance.
+    #[serde(default = "default_trigger_ratio")]
+    pub trigger_ratio: f64,
+    /// Explicit reserved tokens, or a model-window-derived reserve when absent.
+    #[serde(default)]
+    pub reserve_tokens: Option<u32>,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            trigger_ratio: default_trigger_ratio(),
+            reserve_tokens: None,
+        }
+    }
+}
+
+const fn default_agent_threads() -> usize {
+    4
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_trigger_ratio() -> f64 {
+    0.85
 }
 
 /// The on-disk configuration format. Versions are explicit so incompatible formats are rejected.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Config {
     /// On-disk schema revision used to reject incompatible files.
     pub version: u32,
     /// Model selected for direct interaction, if one has been saved.
     pub default_model: Option<ModelRef>,
+    /// Provider-owned reasoning level paired with [`Self::default_model`].
+    #[serde(default)]
+    pub default_thinking: Option<String>,
     /// Frontend-owned named keybinding overrides retained across core updates.
     #[serde(default)]
     pub keybindings: BTreeMap<String, Vec<String>>,
+    /// Root-inclusive agent-tree admission settings.
+    #[serde(default)]
+    pub agents: AgentConfig,
+    /// Context compaction settings.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 impl Config {
@@ -94,7 +160,10 @@ impl Default for Config {
         Self {
             version: Self::VERSION,
             default_model: None,
+            default_thinking: None,
             keybindings: BTreeMap::new(),
+            agents: AgentConfig::default(),
+            compaction: CompactionConfig::default(),
         }
     }
 }
@@ -114,6 +183,8 @@ pub enum ConfigError {
     Serialize(toml::ser::Error),
     /// The file uses a schema revision this build does not support.
     UnsupportedVersion(u32),
+    /// A current-version setting is outside its accepted range.
+    InvalidValue(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -128,6 +199,7 @@ impl fmt::Display for ConfigError {
             Self::UnsupportedVersion(version) => {
                 write!(formatter, "unsupported config version {version}")
             }
+            Self::InvalidValue(message) => write!(formatter, "invalid configuration: {message}"),
         }
     }
 }
@@ -315,10 +387,12 @@ impl ConfigStore {
         let mut config: Config = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         if config.version == 1 {
             config.version = Config::VERSION;
+            validate_config(&config)?;
             self.save(&config)?;
         } else if config.version != Config::VERSION {
             return Err(ConfigError::UnsupportedVersion(config.version));
         }
+        validate_config(&config)?;
         Ok(config)
     }
 
@@ -332,9 +406,35 @@ impl ConfigStore {
         if config.version != Config::VERSION {
             return Err(ConfigError::UnsupportedVersion(config.version));
         }
+        validate_config(config)?;
         let contents = toml::to_string_pretty(config).map_err(ConfigError::Serialize)?;
         write_atomic(&self.paths.config_file(), contents.as_bytes()).map_err(ConfigError::Io)
     }
+}
+
+fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    if !(1..=64).contains(&config.agents.max_concurrent_threads_per_session) {
+        return Err(ConfigError::InvalidValue(
+            "agents.max_concurrent_threads_per_session must be in 1..=64".to_owned(),
+        ));
+    }
+    if !(0.50..=0.95).contains(&config.compaction.trigger_ratio)
+        || !config.compaction.trigger_ratio.is_finite()
+    {
+        return Err(ConfigError::InvalidValue(
+            "compaction.trigger_ratio must be in 0.50..=0.95".to_owned(),
+        ));
+    }
+    if config
+        .compaction
+        .reserve_tokens
+        .is_some_and(|tokens| !(1_000..=1_000_000).contains(&tokens))
+    {
+        return Err(ConfigError::InvalidValue(
+            "compaction.reserve_tokens must be in 1000..=1000000".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {

@@ -85,7 +85,12 @@ export class AnyModelProvider {
 						"content-type": "application/json",
 					},
 					body: JSON.stringify(
-						createChatRequest(request.model_id, request.messages, request.tools),
+						createChatRequest(
+							request.model_id,
+							request.messages,
+							request.tools,
+							request.max_output_tokens,
+						),
 					),
 				},
 				this.config.requestTimeoutMs,

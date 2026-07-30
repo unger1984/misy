@@ -78,6 +78,18 @@ model, authentication, session, and tool orchestration remain in the core.
   summaries, decoded image count/bytes, and blocked/truncated-source warnings. A zero model window
   is shown as unknown, and images explicitly have no fabricated token estimate. `Up`, `Down`,
   `PageUp`, `PageDown`, `Home`, and `End` scroll the wrapped report; `Esc` closes it.
+- `/model` shows provider tabs, compact context-window values, and searchable model metadata.
+  Models with multiple reasoning levels open a second picker before the profile is persisted.
+  `/thinking` opens that level picker directly for the selected model, while the footer always
+  shows the effective level.
+- `/compact [focus]` asks the core to compact idle root context. Automatic compaction uses the
+  configured per-model threshold and reserve. `/context` counts effective agent-role descriptions
+  and the active compaction summary separately, lists role source/status warnings without exposing
+  instructions, and reports the automatic threshold. While compacting, the normal busy row shows
+  the trigger, elapsed time, token count, and cancellation hint. Success inserts a compact service
+  divider such as `Compacted context · 96k → 18k`; expanding it reveals a bounded summary preview.
+  Persisted dividers replay at their transcript checkpoint after resume, so prior messages remain
+  visible.
 - `/exit` takes no arguments and exits through the same cancellation, provider shutdown, and
   terminal-restoration path as `Ctrl+C`.
 - `/new` and `/clear` start the same clean conversation while retaining the previous persisted

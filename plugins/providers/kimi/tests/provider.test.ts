@@ -129,6 +129,7 @@ test("maps user PNGs and follows tool results with a Kimi user image message", a
 	await provider(base).streamChat(
 		{
 			model_id: "k3",
+			max_output_tokens: 12_345,
 			messages: [
 				{ role: "user", content: "plain" },
 				{ role: "user", content: "look", attachments: [image] },
@@ -154,6 +155,7 @@ test("maps user PNGs and follows tool results with a Kimi user image message", a
 	};
 	expect(captured?.body).toEqual({
 		model: "k3",
+		max_tokens: 12_345,
 		messages: [
 			{ role: "user", content: "plain" },
 			{

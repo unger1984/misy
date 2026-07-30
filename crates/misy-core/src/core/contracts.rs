@@ -3,8 +3,8 @@
 use super::session::SessionError;
 use crate::{
     ActivitySummary, AgentId, AgentSummary, ConfigError, CredentialError, ImageAttachment,
-    InputModality, InstructionWarning, Message, ModelInfo, ModelRef, ProviderDiscoveryError,
-    ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
+    InputModality, InstructionWarning, Message, ModelInfo, ModelProfile, ModelRef,
+    ProviderDiscoveryError, ProviderDisplayName, ProviderError, ProviderId, ToolCall, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,6 +61,11 @@ pub struct ProviderModelError {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreEvent {
+    /// Context compaction changed state.
+    CompactionChanged {
+        /// Latest bounded compaction projection.
+        compaction: crate::CompactionActivity,
+    },
     /// A background activity was added or changed state.
     ActivityChanged {
         /// Latest bounded activity projection.
@@ -263,6 +268,8 @@ pub enum CoreError {
     },
     /// The selected model is not advertised by its provider.
     UnknownModel(ModelRef),
+    /// A selected model does not advertise the requested reasoning level.
+    UnsupportedThinking(ModelProfile),
     /// No model has been selected for direct interaction.
     NoModelSelected,
     /// No active submission has this identifier.
@@ -273,6 +280,8 @@ pub enum CoreError {
     InvalidQuestionResponse(String),
     /// The process-wide live child-agent limit has been reached.
     AgentLimitReached,
+    /// A task path segment was malformed or already used by a sibling.
+    InvalidAgentTaskName(String),
     /// Every lossless background-completion mailbox slot is reserved.
     AgentMailboxFull,
     /// No retained child agent has this identifier.
@@ -289,6 +298,10 @@ pub enum CoreError {
     Session(SessionError),
     /// A session switch was requested while queued or active work still owns the conversation.
     SessionBusy,
+    /// No complete prefix exists before the two preserved user turns.
+    NothingToCompact,
+    /// Generated compaction did not reduce the active projection.
+    CompactionNoProgress,
     /// A session switch requires explicit disposal of retained child-agent state.
     SessionAgentStatePending {
         /// Live children that will be stopped by disposal.
@@ -348,13 +361,19 @@ impl fmt::Display for CoreError {
             Self::UnknownModel(model) => {
                 write!(formatter, "unknown model `{}`", model.model.as_str())
             }
+            Self::UnsupportedThinking(profile) => {
+                write!(formatter, "unsupported model profile `{profile}`")
+            }
             Self::NoModelSelected => formatter.write_str("no model is selected"),
             Self::UnknownSubmission(id) => write!(formatter, "unknown submission {}", id.get()),
             Self::UnknownQuestion(id) => write!(formatter, "unknown or resolved question `{id}`"),
             Self::InvalidQuestionResponse(message) => {
                 write!(formatter, "invalid question response: {message}")
             }
-            Self::AgentLimitReached => formatter.write_str("four child agents are already active"),
+            Self::AgentLimitReached => {
+                formatter.write_str("the root-inclusive agent thread limit is already active")
+            }
+            Self::InvalidAgentTaskName(message) => formatter.write_str(message),
             Self::AgentMailboxFull => {
                 formatter.write_str("the background agent result mailbox is full")
             }
@@ -375,6 +394,10 @@ impl fmt::Display for CoreError {
             Self::Session(error) => write!(formatter, "session error: {error}"),
             Self::SessionBusy => {
                 formatter.write_str("cannot switch sessions while a submission is active or queued")
+            }
+            Self::NothingToCompact => formatter.write_str("nothing to compact"),
+            Self::CompactionNoProgress => {
+                formatter.write_str("compaction did not reduce the active context")
             }
             Self::SessionAgentStatePending {
                 live_agents,

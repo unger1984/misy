@@ -164,6 +164,10 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			context_window: 272_000,
 			reasoning: true,
 			input_modalities: ["text"],
+			thinking: {
+				default: "low",
+				levels: [{ id: "low", description: "Faster, lighter reasoning" }],
+			},
 		},
 		{
 			id: "gpt-5.6-codex",
@@ -171,6 +175,10 @@ test("discovers models with headers, ordering, reasoning, and contexts", async (
 			context_window: 372_000,
 			reasoning: true,
 			input_modalities: ["text", "image"],
+			thinking: {
+				default: "medium",
+				levels: [{ id: "medium", description: "Balanced reasoning" }],
+			},
 		},
 		{
 			id: "zeta",
@@ -294,6 +302,8 @@ test("sends account identity and complete subscription request fields", async ()
 	await provider.streamChat(
 		{
 			model_id: "gpt-5.5",
+			thinking: "high",
+			max_output_tokens: 12_345,
 			messages: [
 				{ role: "system", content: "System instruction" },
 				{ role: "user", content: "Hi" },
@@ -323,7 +333,8 @@ test("sends account identity and complete subscription request fields", async ()
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 		include: ["reasoning.encrypted_content"],
-		reasoning: { effort: "medium", summary: "auto" },
+		reasoning: { effort: "high", summary: "auto" },
+		max_output_tokens: 12_345,
 		stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
 		text: { verbosity: "medium" },
 		input: [

@@ -3,7 +3,7 @@
 import { fetchWithTimeout } from "@misy/provider-sdk";
 import { authHeaders, OAuthClient, refreshIfNeeded } from "./auth";
 import { DEFAULT_CONFIG, type ProviderConfig } from "./config";
-import { listModels, type Model } from "./model-catalog";
+import { catalogSource, listModels, type Model } from "./model-catalog";
 import { createResponsesRequest, notifyResponseEvents } from "./responses-wire";
 import type { ChatRequest, Credentials, Json, Notify } from "./types";
 import { fetchUsage, type UsageReport, UsageRequestError } from "./usage";
@@ -54,6 +54,11 @@ export class OpenAiProvider {
 	/** Lists account-scoped ChatGPT Codex models, falling back to the bundled catalog on failure. */
 	async listModels(credentials: Credentials): Promise<Model[]> {
 		return await listModels(this.config, credentials);
+	}
+
+	/** Reports whether the latest catalog came from live discovery or bundled fallback. */
+	catalogSource(): "remote" | "bundled" {
+		return catalogSource();
 	}
 
 	/** Returns normalized ChatGPT subscription limits plus credentials rotated by a silent refresh. */
@@ -122,7 +127,13 @@ export class OpenAiProvider {
 					"content-type": "application/json",
 				},
 				body: JSON.stringify(
-					createResponsesRequest(request.model_id, request.messages, request.tools),
+					createResponsesRequest(
+						request.model_id,
+						request.messages,
+						request.tools,
+						request.thinking,
+						request.max_output_tokens,
+					),
 				),
 			},
 			this.config.requestTimeoutMs,

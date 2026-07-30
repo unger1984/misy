@@ -156,9 +156,9 @@ models_list() {
         while [ ! -f "$target.release" ]; do sleep 0.01; done
         reply \
           '{"models":[' \
-          '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+          '{"id":"fixture-model","display_name":"Fixture","context_window":128000,' \
           '"input_modalities":["text","image"]},' \
-          '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}'
+          '{"id":"fixture-model-b","display_name":"Fixture B","context_window":64000}]}'
       ) &
       return
       ;;
@@ -181,20 +181,30 @@ models_list() {
       touch "$target.responded"
       ;;
     *bad-models*) reply '{}' ;;
+    *thinking-persistence*)
+      reply \
+        '{"models":[' \
+        '{"id":"fixture-model","display_name":"Fixture","context_window":128000,' \
+        '"thinking":{"default":"medium","levels":[' \
+        '{"id":"low","description":"Low"},{"id":"medium","description":"Medium"}]}},' \
+        '{"id":"fixture-model-b","display_name":"Fixture B","context_window":64000,' \
+        '"thinking":{"default":"medium","levels":[' \
+        '{"id":"low","description":"Low"},{"id":"medium","description":"Medium"}]}}]}'
+      ;;
     *explicit-default*)
       reply \
         '{"models":[' \
-        '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+        '{"id":"fixture-model","display_name":"Fixture","context_window":128000,' \
         '"input_modalities":["text","image"]},' \
-        '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}],' \
+        '{"id":"fixture-model-b","display_name":"Fixture B","context_window":64000}],' \
         '"default_model":"fixture-model-b"}'
       ;;
     *)
       reply \
         '{"models":[' \
-        '{"id":"fixture-model","display_name":"Fixture","context_window":4096,' \
+        '{"id":"fixture-model","display_name":"Fixture","context_window":128000,' \
         '"input_modalities":["text","image"]},' \
-        '{"id":"fixture-model-b","display_name":"Fixture B","context_window":4096}]}'
+        '{"id":"fixture-model-b","display_name":"Fixture B","context_window":64000}]}'
       ;;
   esac
 }
@@ -245,6 +255,97 @@ chat_start() {
     # Ordered most-recent prompt first: a chat request carries the whole history, so the
     # newest message's branch must win the pattern match. The cancelled pair keeps short
     # sleeps so a queued third answer drains well inside the test deadline.
+    *'You compact coding-agent history'*)
+      case "$line" in
+        *'"max_output_tokens":'*) ;;
+        *) failed 'missing compaction output budget'; reply '{}'; return ;;
+      esac
+      case "$line" in
+        *'You are Misy'*|*'global rules'*|*'root rules'*)
+          failed 'ordinary instructions leaked into compaction'
+          reply '{}'
+          return
+          ;;
+      esac
+      case "$target" in *compaction-cancel*) sleep 30 ;; esac
+      text 'bounded compact summary'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"overflow-retry"'*)
+      if [ "${overflow_retry_seen:-0}" -eq 0 ]; then
+        overflow_retry_seen=1
+        failed 'maximum context length exceeded'
+      else
+        text overflow-recovered
+        complete
+      fi
+      reply '{}'
+      ;;
+    *'"content":"child-fallback-retryable"'*)
+      case "$line" in
+        *'"model_id":"fixture-model-b"'*) text fallback-recovered; complete ;;
+        *) failed 'rate limit exceeded' ;;
+      esac
+      reply '{}'
+      ;;
+    *'"content":"child-fallback-exhausted"'*)
+      case "$line" in
+        *'"model_id":"fixture-model-b"'*) failed 'server unavailable' ;;
+        *) failed 'rate limit exceeded' ;;
+      esac
+      reply '{}'
+      ;;
+    *'"content":"child-fallback-refusal"'*)
+      failed 'request refused by policy'
+      reply '{}'
+      ;;
+    *'"content":"child-fallback-after-output"'*)
+      text partial-output
+      failed 'rate limit exceeded'
+      reply '{}'
+      ;;
+    *'"content":"child-fallback-after-tool"'*)
+      case "$line" in
+        *'"tool_results":[{'*) failed 'rate limit exceeded' ;;
+        *)
+          call_tool boundary-tool SetTodoList \
+            '{"todos":[{"title":"boundary","status":"completed"}]}'
+          complete
+          ;;
+      esac
+      reply '{}'
+      ;;
+    *'"content":"spawn-fallback-retryable"'*)
+      call_tool spawn-fallback spawn_agent \
+        '{"task":"child-fallback-retryable","task_name":"fallback","run_in_background":false,"model":["fixture/fixture-model","fixture/fixture-model-b"],"fork_turns":"none"}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-fallback-exhausted"'*)
+      call_tool spawn-exhausted spawn_agent \
+        '{"task":"child-fallback-exhausted","task_name":"exhausted","run_in_background":true,"model":["fixture/fixture-model","fixture/fixture-model-b"],"fork_turns":"none"}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-fallback-refusal"'*)
+      call_tool spawn-refusal spawn_agent \
+        '{"task":"child-fallback-refusal","task_name":"refusal","run_in_background":true,"model":["fixture/fixture-model","fixture/fixture-model-b"],"fork_turns":"none"}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-fallback-after-output"'*)
+      call_tool spawn-partial spawn_agent \
+        '{"task":"child-fallback-after-output","task_name":"partial","run_in_background":true,"model":["fixture/fixture-model","fixture/fixture-model-b"],"fork_turns":"none"}'
+      complete
+      reply '{}'
+      ;;
+    *'"content":"spawn-fallback-after-tool"'*)
+      call_tool spawn-tool-boundary spawn_agent \
+        '{"task":"child-fallback-after-tool","task_name":"tool_boundary","run_in_background":true,"model":["fixture/fixture-model","fixture/fixture-model-b"],"fork_turns":"none"}'
+      complete
+      reply '{}'
+      ;;
     *'"content":"image-input"'*)
       case "$line" in
         *'"attachments":[{'*) ;;
@@ -383,7 +484,7 @@ chat_start() {
           ;;
         *)
           call_tool spawn-child-todo spawn_agent \
-            '{"task":"child-todo-task","description":"Todo child","run_in_background":false}'
+            '{"task":"child-todo-task","task_name":"todo","description":"Todo child","run_in_background":false}'
           ;;
       esac
       complete
@@ -519,7 +620,7 @@ chat_start() {
       ;;
     *'"content":"spawn-child-question"'*)
       call_tool spawn-child-question spawn_agent \
-        '{"task":"child-question-task","description":"Question child","run_in_background":false}'
+        '{"task":"child-question-task","task_name":"question","description":"Question child","run_in_background":false}'
       complete
       reply '{}'
       ;;
@@ -580,6 +681,16 @@ chat_start() {
       complete
       reply '{}'
       ;;
+    *'"content":"session-three"'*)
+      text three
+      complete
+      reply '{}'
+      ;;
+    *'session-downshift'*)
+      text downshift-turn
+      complete
+      reply '{}'
+      ;;
     *'"content":"block-session"'*)
       sleep 1
       complete
@@ -631,7 +742,7 @@ chat_start() {
       ;;
     *'"content":"spawn-message"'*)
       call_tool spawn-message spawn_agent \
-        '{"task":"child-message-task","description":"Message child","run_in_background":true}'
+        '{"task":"child-message-task","task_name":"message","description":"Message child","run_in_background":true}'
       complete
       reply '{}'
       ;;
@@ -653,7 +764,7 @@ chat_start() {
       ;;
     *'"content":"spawn-background"'*)
       call_tool spawn-background spawn_agent \
-        '{"task":"child-background-task","description":"Background child","run_in_background":true}'
+        '{"task":"child-background-task","task_name":"background","description":"Background child","run_in_background":true}'
       complete
       reply '{}'
       ;;
@@ -663,20 +774,13 @@ chat_start() {
       reply '{}'
       ;;
     *'"content":"child-sync-task"'*)
-      case "$line" in
-        *'"name":"spawn_agent"'*)
-          failed 'child received agent tool definitions'
-          reply '{}'
-          return
-          ;;
-      esac
       text child-sync-answer
       complete
       reply '{}'
       ;;
     *'"content":"spawn-sync"'*)
       call_tool spawn-sync spawn_agent \
-        '{"task":"child-sync-task","description":"Sync child","run_in_background":false}'
+        '{"task":"child-sync-task","task_name":"sync","description":"Sync child","run_in_background":false}'
       complete
       reply '{}'
       ;;

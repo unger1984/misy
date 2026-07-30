@@ -37,8 +37,9 @@ Read this document before making a new architecture or user-interaction choice.
   share the Codex-style 10,000-token default without claiming wire compatibility.
 - The shared activity UI follows the local Codex and Oh My Pi session/task picker patterns while
   retaining Misy's core/client boundary. `spawn_agent` supports synchronous and detached runs;
-  background results use an explicit pull mailbox. V1 permits four live children, forbids nested
-  spawn, and keeps each child history ephemeral and independent.
+  background results use an explicit pull mailbox. A configurable root-inclusive limit governs a
+  nested agent tree; child histories remain ephemeral and independent, and role tool allowlists
+  determine whether a child may spawn descendants.
 - From Codex, Misy adopts forked child sessions, request-correlated streams, and addressable
   wait/message/stop operations. From Oh My Pi, it adopts a shared sync/background lifecycle,
   core-owned activity projection, bounded concurrency, and owner-scoped cleanup.
@@ -74,10 +75,13 @@ Read this document before making a new architecture or user-interaction choice.
   scopes its portable PTY guarantee to processes that stay in the created Unix process group.
 - Protocol v2 prompt authentication is rendered as a generic TUI form. Secret values are masked
   and remain transient; the Rust core persists only the provider-owned opaque credential object.
+- Compaction preserves the append-only full transcript and replaces only a derived active-history
+  projection after persisting a manual or automatic checkpoint. Provider-native/archive
+  compaction strategies are outside v1.
 
 ## Deferred Scope
 
-MCP, permissions, recursive agents, agent roles/batches/worktree isolation, marketplace
+MCP, permissions, agent batches/worktree isolation, marketplace
 installation/update, daemon/public IPC, desktop UI, and a cross-process credential transaction
 policy are outside this MVP. The Kimi
 subscription device flow is supported through the version 2 provider protocol.

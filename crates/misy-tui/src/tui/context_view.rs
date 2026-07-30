@@ -75,6 +75,9 @@ mod tests {
             image_count: 0,
             image_bytes: 0,
             warnings: Vec::new(),
+            roles: Vec::new(),
+            auto_compaction_threshold: None,
+            compaction_reserve_tokens: None,
         });
         view.end();
         assert_eq!(view.effective_scroll(80), 80);

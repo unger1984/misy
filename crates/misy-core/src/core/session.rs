@@ -1,7 +1,7 @@
 //! Append-only persistence for core-owned conversation sessions.
 
 use super::HistoryEntry;
-use crate::{MessageRole, ModelRef, TodoItem};
+use crate::{MessageRole, ModelProfile, ModelRef, TodoItem};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -31,6 +31,8 @@ pub struct SessionSummary {
     pub preview: String,
     /// Model associated with the session summary, when known.
     pub model: Option<ModelRef>,
+    /// Provider-owned reasoning level paired with the saved model.
+    pub thinking: Option<String>,
 }
 
 /// Result of replacing the current conversation with a persisted session.
@@ -42,6 +44,8 @@ pub struct ResumeOutcome {
     pub history_len: usize,
     /// Canonical entries used by clients to rebuild their transcript projection.
     pub history: Vec<HistoryEntry>,
+    /// Persisted compaction dividers replayed alongside the canonical transcript.
+    pub compactions: Vec<CompactionCheckpoint>,
     /// Root checklist restored from the same append-only session.
     pub todos: Vec<TodoItem>,
     /// Non-fatal warning when the saved model cannot be selected.
@@ -111,6 +115,8 @@ struct SessionHeader {
     created_at: u64,
     cli_version: String,
     model: Option<ModelRef>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -131,9 +137,62 @@ struct SessionRecordEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRecord {
-    HistoryEntry { entry: HistoryEntry },
-    ModelChange { model: ModelRef },
-    TodoListUpdate { todos: Vec<TodoItem> },
+    HistoryEntry {
+        entry: HistoryEntry,
+    },
+    ModelChange {
+        model: ModelRef,
+        #[serde(default)]
+        thinking: Option<String>,
+    },
+    ThinkingChange {
+        thinking: Option<String>,
+    },
+    Compaction {
+        checkpoint: CompactionCheckpoint,
+    },
+    TodoListUpdate {
+        todos: Vec<TodoItem>,
+    },
+}
+
+/// Append-only checkpoint that replaces only provider-facing active history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompactionCheckpoint {
+    /// Bounded generated summary.
+    pub summary: String,
+    /// Index in the canonical transcript of the first verbatim retained entry.
+    pub first_kept_index: usize,
+    /// Profile that generated the summary.
+    pub profile: ModelProfile,
+    /// Estimated prompt tokens before compaction.
+    pub tokens_before: usize,
+    /// Estimated active tokens after compaction.
+    pub tokens_after: usize,
+    /// Stable trigger name: manual, threshold, overflow, or `model_downshift`.
+    pub trigger: String,
+    /// Epoch-millisecond completion time.
+    pub timestamp_ms: u64,
+    /// Canonical history length at which clients insert the visible service divider.
+    #[serde(default)]
+    pub history_len: usize,
+}
+
+/// Client-visible state for one core-owned context compaction.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompactionActivity {
+    /// Stable state name: `compacting`, `completed`, `cancelled`, or `failed`.
+    pub status: String,
+    /// Stable trigger name: manual, threshold, overflow, or `model_downshift`.
+    pub trigger: String,
+    /// Whether a client can currently request cancellation.
+    pub cancellable: bool,
+    /// Estimated prompt tokens before compaction.
+    pub tokens_before: usize,
+    /// Estimated active tokens after successful compaction.
+    pub tokens_after: Option<usize>,
+    /// Completed checkpoint used for transcript projection, when successful.
+    pub checkpoint: Option<CompactionCheckpoint>,
 }
 
 struct CurrentSession {
@@ -152,6 +211,8 @@ pub(crate) struct SessionState {
 pub(super) struct LoadedSession {
     pub(super) summary: SessionSummary,
     pub(super) history: Vec<HistoryEntry>,
+    pub(super) active_history: Vec<HistoryEntry>,
+    pub(super) compactions: Vec<CompactionCheckpoint>,
     pub(super) todos: Vec<TodoItem>,
     pub(super) next_ordinal: u64,
     pub(super) path: PathBuf,
@@ -185,16 +246,40 @@ impl SessionState {
         self.append(SessionRecord::HistoryEntry { entry }, model)
     }
 
-    pub(super) fn append_model(&mut self, model: ModelRef) -> Result<(), SessionError> {
+    pub(super) fn append_model(
+        &mut self,
+        model: ModelRef,
+        thinking: Option<String>,
+    ) -> Result<(), SessionError> {
         if self.current.is_none() {
             return Ok(());
         }
         self.append(
             SessionRecord::ModelChange {
                 model: model.clone(),
+                thinking,
             },
             Some(model),
         )
+    }
+
+    pub(super) fn append_thinking(
+        &mut self,
+        thinking: Option<String>,
+        model: Option<ModelRef>,
+    ) -> Result<(), SessionError> {
+        if self.current.is_none() {
+            return Ok(());
+        }
+        self.append(SessionRecord::ThinkingChange { thinking }, model)
+    }
+
+    pub(super) fn append_compaction(
+        &mut self,
+        checkpoint: CompactionCheckpoint,
+        model: Option<ModelRef>,
+    ) -> Result<(), SessionError> {
+        self.append(SessionRecord::Compaction { checkpoint }, model)
     }
 
     pub(super) fn append_todos(
@@ -255,6 +340,7 @@ impl SessionState {
                         created_at: unix_time(),
                         cli_version: env!("CARGO_PKG_VERSION").to_owned(),
                         model,
+                        thinking: None,
                     };
                     serde_json::to_writer(&mut file, &header)?;
                     file.write_all(b"\n")?;
@@ -328,8 +414,11 @@ fn load_path(path: &Path) -> Result<LoadedSession, SessionError> {
     let mut lines = BufReader::new(file).lines();
     let header = parse_header(&mut lines)?;
     let mut history = Vec::new();
+    let mut active_history = Vec::new();
     let mut todos = Vec::new();
+    let mut compactions = Vec::new();
     let mut model = header.model.clone();
+    let mut thinking = header.thinking.clone();
     let mut next_ordinal = 1;
     for line in lines.map_while(Result::ok) {
         let Ok(envelope) = serde_json::from_str::<SessionRecordEnvelope>(&line) else {
@@ -340,8 +429,22 @@ fn load_path(path: &Path) -> Result<LoadedSession, SessionError> {
             continue;
         };
         match record {
-            SessionRecord::HistoryEntry { entry } => history.push(entry),
-            SessionRecord::ModelChange { model: changed } => model = Some(changed),
+            SessionRecord::HistoryEntry { entry } => {
+                history.push(entry.clone());
+                active_history.push(entry);
+            }
+            SessionRecord::ModelChange {
+                model: changed,
+                thinking: changed_thinking,
+            } => {
+                model = Some(changed);
+                thinking = changed_thinking;
+            }
+            SessionRecord::ThinkingChange { thinking: changed } => thinking = changed,
+            SessionRecord::Compaction { checkpoint } => {
+                active_history = projected_history(&history, &checkpoint);
+                compactions.push(checkpoint);
+            }
             SessionRecord::TodoListUpdate { todos: updated } => todos = updated,
         }
     }
@@ -358,10 +461,13 @@ fn load_path(path: &Path) -> Result<LoadedSession, SessionError> {
         cwd: header.cwd,
         preview,
         model,
+        thinking,
     };
     Ok(LoadedSession {
         summary,
         history,
+        active_history,
+        compactions,
         todos,
         next_ordinal,
         path: path.to_owned(),
@@ -396,7 +502,26 @@ fn summarize_path(path: &Path) -> Result<SessionSummary, SessionError> {
         cwd: header.cwd,
         preview,
         model: header.model,
+        thinking: header.thinking,
     })
+}
+
+fn projected_history(
+    history: &[HistoryEntry],
+    checkpoint: &CompactionCheckpoint,
+) -> Vec<HistoryEntry> {
+    let mut projected = vec![HistoryEntry {
+        message: crate::Message::user(format!(
+            "Previous context was compacted.\n\n{}",
+            checkpoint.summary
+        )),
+        attachments: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        provider_metadata: serde_json::Value::Null,
+    }];
+    projected.extend(history.iter().skip(checkpoint.first_kept_index).cloned());
+    projected
 }
 
 fn parse_header(

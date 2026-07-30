@@ -4,32 +4,10 @@ use crate::ToolDefinition;
 
 const MAX_AGENT_TITLE_CHARS: usize = 80;
 
-pub(crate) fn tool_definitions() -> [ToolDefinition; 6] {
+pub(crate) fn tool_definitions() -> [ToolDefinition; 7] {
     [
-        ToolDefinition::new(
-            "spawn_agent",
-            "Run an independent child agent. Inline runs return the final result; background runs \
-             return an agent_id immediately and deliver completion through agent_wait.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["task"],
-                "properties": {
-                    "task": {"type": "string", "minLength": 1},
-                    "description": {"type": "string"},
-                    "run_in_background": {"type": "boolean", "default": false},
-                    "model": {
-                        "type": "object",
-                        "required": ["provider", "model"],
-                        "properties": {
-                            "provider": {"type": "string", "minLength": 1},
-                            "model": {"type": "string", "minLength": 1}
-                        },
-                        "additionalProperties": false
-                    }
-                },
-                "additionalProperties": false
-            }),
-        ),
+        spawn_definition(),
+        model_search_definition(),
         ToolDefinition::new(
             "agent_list",
             "List live and recent child agents owned by this conversation.",
@@ -44,7 +22,7 @@ pub(crate) fn tool_definitions() -> [ToolDefinition; 6] {
                     "agent_ids": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 4,
+                        "maxItems": 64,
                         "uniqueItems": true,
                         "items": {"type": "string", "pattern": "^agent-[1-9][0-9]*$"}
                     },
@@ -63,7 +41,7 @@ pub(crate) fn tool_definitions() -> [ToolDefinition; 6] {
                 "type": "object",
                 "required": ["agent_id"],
                 "properties": {
-                    "agent_id": {"type": "string", "pattern": "^agent-[1-9][0-9]*$"},
+                    "agent_id": {"type": "string", "minLength": 1},
                     "max_output_tokens": {
                         "type": "integer", "minimum": 1, "maximum": 1000000,
                         "default": 10000
@@ -79,7 +57,7 @@ pub(crate) fn tool_definitions() -> [ToolDefinition; 6] {
                 "type": "object",
                 "required": ["agent_id", "message"],
                 "properties": {
-                    "agent_id": {"type": "string", "pattern": "^agent-[1-9][0-9]*$"},
+                    "agent_id": {"type": "string", "minLength": 1},
                     "message": {"type": "string", "minLength": 1}
                 },
                 "additionalProperties": false
@@ -92,12 +70,59 @@ pub(crate) fn tool_definitions() -> [ToolDefinition; 6] {
                 "type": "object",
                 "required": ["agent_id"],
                 "properties": {
-                    "agent_id": {"type": "string", "pattern": "^agent-[1-9][0-9]*$"}
+                    "agent_id": {"type": "string", "minLength": 1}
                 },
                 "additionalProperties": false
             }),
         ),
     ]
+}
+
+fn spawn_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "spawn_agent",
+        "Run an independent child agent from a hot-reloaded role. A model string is strict; \
+         an array is the complete ordered fallback chain. agent_type/model overrides require \
+         fork_turns `none` or a positive integer.",
+        serde_json::json!({
+            "type": "object",
+            "required": ["task", "task_name"],
+            "properties": {
+                "task": {"type": "string", "minLength": 1},
+                "task_name": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+                "description": {"type": "string"},
+                "run_in_background": {"type": "boolean", "default": false},
+                "agent_type": {"type": "string", "minLength": 1},
+                "fork_turns": {
+                    "type": "string", "pattern": "^(none|all|[1-9][0-9]*)$", "default": "all"
+                },
+                "model": {"oneOf": [
+                    {"type": "string", "minLength": 3},
+                    {"type": "array", "minItems": 1, "uniqueItems": true,
+                     "items": {"type": "string", "minLength": 3}}
+                ]}
+            },
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn model_search_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "model_search",
+        "Search cached provider profiles, thinking levels, role membership, availability, and \
+         freshness.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "maxLength": 256},
+                "provider": {"type": "string", "maxLength": 64},
+                "agent_type": {"type": "string", "maxLength": 64},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8}
+            },
+            "additionalProperties": false
+        }),
+    )
 }
 
 pub(crate) fn is_agent_tool(name: &str) -> bool {
@@ -109,6 +134,7 @@ pub(crate) fn is_agent_tool(name: &str) -> bool {
             | "agent_output"
             | "agent_message"
             | "agent_stop"
+            | "model_search"
     )
 }
 

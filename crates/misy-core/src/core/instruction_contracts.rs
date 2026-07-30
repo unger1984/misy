@@ -1,6 +1,6 @@
 //! Public projections for hierarchical instruction context.
 
-use crate::{AgentId, ModelRef};
+use crate::{AgentId, AgentRoleSummary, ModelRef};
 use serde::{Deserialize, Serialize};
 
 /// The filesystem role of one `AGENTS.md` source.
@@ -119,6 +119,10 @@ pub enum ContextCategory {
     AgentsMd,
     /// Provider-visible local tool schemas.
     ToolDefinitions,
+    /// Effective role names/descriptions sent through the spawn tool contract.
+    CustomAgents,
+    /// Active provider-facing summary produced by the latest compaction.
+    CompactionSummary,
     /// Persisted conversation history and pending metadata.
     Messages,
     /// Unused advertised model context.
@@ -157,4 +161,10 @@ pub struct ContextReport {
     pub image_bytes: usize,
     /// Deduplicated instruction diagnostics.
     pub warnings: Vec<InstructionWarning>,
+    /// Effective role metadata without role instruction contents.
+    pub roles: Vec<AgentRoleSummary>,
+    /// Effective automatic-compaction threshold for the selected model.
+    pub auto_compaction_threshold: Option<usize>,
+    /// Tokens reserved below that threshold for the next response and tools.
+    pub compaction_reserve_tokens: Option<usize>,
 }

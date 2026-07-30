@@ -50,7 +50,8 @@ impl<B: BrowserHandoff> TuiClient<B> {
                 );
             }
         };
-        self.state.replay_history(&outcome.history);
+        self.state
+            .replay_history(&outcome.history, &outcome.compactions);
         self.state.set_session_id(Some(outcome.session.id.clone()));
         self.refresh_core_projection();
         let snapshot = self.core.snapshot();

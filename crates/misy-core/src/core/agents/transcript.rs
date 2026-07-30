@@ -157,9 +157,15 @@ mod tests {
     fn summary() -> AgentSummary {
         AgentSummary {
             id: AgentId::new(1),
+            parent: None,
+            path: "/root/fixture".to_owned(),
+            task_name: "fixture".to_owned(),
+            role: "default".to_owned(),
             activity_id: ActivityId::new(1),
             title: "fixture".to_owned(),
             model: ModelRef::new(ProviderId::new("fixture"), ModelId::new("model")),
+            thinking: None,
+            attempts: Vec::new(),
             status: ActivityStatus::Running,
             run_in_background: true,
             started_at_ms: 1,

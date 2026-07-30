@@ -5,7 +5,7 @@
 //! surface shared by the event projection ([`super::events`]) and the client.
 
 use super::UiState;
-use misy_core::{ActivityOutput, HistoryEntry, MessageRole};
+use misy_core::{ActivityOutput, CompactionCheckpoint, HistoryEntry, MessageRole};
 use std::{fmt, time::Duration};
 
 /// A renderable, user-visible transcript item.
@@ -56,6 +56,8 @@ pub enum TranscriptRow {
         /// Duration captured when the core advanced its active submission.
         elapsed: Duration,
     },
+    /// Persisted service divider for one successful active-history compaction.
+    Compaction(CompactionCheckpoint),
     /// Informational lifecycle message.
     Info(String),
     /// User-visible failure.
@@ -98,12 +100,32 @@ impl UiState {
         self.view = None;
     }
 
-    pub(in crate::tui) fn replay_history(&mut self, history: &[HistoryEntry]) {
+    pub(in crate::tui) fn replay_history(
+        &mut self,
+        history: &[HistoryEntry],
+        compactions: &[CompactionCheckpoint],
+    ) {
         self.clear_conversation();
-        for entry in history {
+        for (index, entry) in history.iter().enumerate() {
+            self.replay_compactions(compactions, index);
             self.replay_entry(entry);
         }
+        self.replay_compactions(compactions, history.len());
         self.response_submission = None;
+    }
+
+    fn replay_compactions(&mut self, compactions: &[CompactionCheckpoint], history_index: usize) {
+        self.transcript.extend(
+            compactions
+                .iter()
+                .filter(|checkpoint| checkpoint.history_len == history_index)
+                .cloned()
+                .map(TranscriptRow::Compaction),
+        );
+    }
+
+    pub(in crate::tui) fn add_compaction(&mut self, checkpoint: CompactionCheckpoint) {
+        self.transcript.push(TranscriptRow::Compaction(checkpoint));
     }
 
     fn replay_entry(&mut self, entry: &HistoryEntry) {

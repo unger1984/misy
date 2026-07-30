@@ -197,6 +197,7 @@ export class KimiProvider {
 								request.messages,
 								request.tools,
 								request.max_output_tokens,
+								request.thinking,
 							),
 				),
 			},

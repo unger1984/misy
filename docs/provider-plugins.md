@@ -277,6 +277,10 @@ fall back to the default on any other value.
 - `MISY_KIMI_REQUEST_TIMEOUT_MS` — per-request timeout (default 30000).
 - `MISY_KIMI_DATA_DIR` — plugin data directory (default `~/.local/share/misy/kimi`).
 
+Kimi K3 and K3-256K advertise `low`, `high`, and `max` thinking levels with `high` as the default.
+The plugin sends the selected level as top-level `reasoning_effort` on their OpenAI-compatible
+route. K2.7 Coding models remain always-thinking and do not advertise selectable effort levels.
+
 **anymodel** (`plugins/providers/anymodel/src/config.ts`)
 
 - `MISY_ANYMODEL_BASE_URL` — OpenAI-compatible API base URL (default

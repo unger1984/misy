@@ -140,6 +140,24 @@ test("preserves optional facts returned by the authenticated catalog", async () 
 	]);
 });
 
+test("uses Kimi K3 effort levels without inventing K2.7 levels", async () => {
+	const baseUrl = fakeServer(() =>
+		Response.json({ data: [{ id: "kmc/k3" }, { id: "kmc/kimi-for-coding" }] }),
+	);
+
+	const models = await provider(baseUrl).listModels(credentials());
+
+	expect(models[0]?.thinking).toEqual({
+		default: "high",
+		levels: [
+			{ id: "low", description: "Faster, lighter reasoning" },
+			{ id: "high", description: "Deeper reasoning" },
+			{ id: "max", description: "Maximum reasoning effort" },
+		],
+	});
+	expect(models[1]?.thinking).toBeUndefined();
+});
+
 test("rejects remote catalog failures without reflecting response bodies or API keys", async () => {
 	const baseUrl = fakeServer(() => new Response("not-for-logs reflected", { status: 401 }));
 	await expect(provider(baseUrl).listModels(credentials())).rejects.toThrow(

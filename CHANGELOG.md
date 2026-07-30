@@ -18,6 +18,9 @@
   returns only one level; `Esc` returns to the model list.
 - Kept long-list viewports stationary while the cursor moves within their visible rows, scrolling
   only after the cursor reaches the top or bottom edge.
+- Added Kimi K3 and K3-256K thinking selection with the official `low`, `high`, and `max` levels,
+  defaulting to `high` and sending the choice as `reasoning_effort` through both direct Kimi and
+  AnyModel routes.
 - Passed the pane identifier before reporting options as required by the Herdr CLI, allowing Misy
   sessions to appear in the Herdr Agents sidebar.
 

@@ -1,7 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+
+test("declares thinking capability for K3 effort selection", () => {
+	const manifest = JSON.parse(
+		readFileSync(`${import.meta.dir}/../misy-plugin.json`, "utf8"),
+	) as Record<string, unknown>;
+	expect(manifest).toMatchObject({
+		capabilities: { thinking: { version: 1 } },
+	});
+});
 
 afterEach(async () => {
 	for (const child of children) child.kill();

@@ -65,6 +65,7 @@ test("discovers Kimi models dynamically and supplies default context windows", a
 					display_name: "K3",
 					context_length: 1_048_576,
 					supports_image_in: true,
+					protocol: null,
 				},
 				{ id: "legacy", supports_image_in: false },
 				{ id: "kimi-k2-turbo-preview", supports_image_in: false },
@@ -82,6 +83,14 @@ test("discovers Kimi models dynamically and supplies default context windows", a
 			display_name: "K3",
 			context_window: 1_048_576,
 			input_modalities: ["text", "image"],
+			thinking: {
+				default: "high",
+				levels: [
+					{ id: "low", description: "Lower reasoning effort" },
+					{ id: "high", description: "Recommended reasoning effort" },
+					{ id: "max", description: "Maximum reasoning effort" },
+				],
+			},
 		},
 		{
 			id: "legacy",
@@ -129,6 +138,7 @@ test("maps user PNGs and follows tool results with a Kimi user image message", a
 	await provider(base).streamChat(
 		{
 			model_id: "k3",
+			thinking: "max",
 			max_output_tokens: 12_345,
 			messages: [
 				{ role: "user", content: "plain" },
@@ -156,6 +166,7 @@ test("maps user PNGs and follows tool results with a Kimi user image message", a
 	expect(captured?.body).toEqual({
 		model: "k3",
 		max_tokens: 12_345,
+		reasoning_effort: "max",
 		messages: [
 			{ role: "user", content: "plain" },
 			{
@@ -191,6 +202,7 @@ test("falls back to bundled models when Kimi's catalog endpoint is unavailable",
 		"kimi-for-coding",
 		"kimi-for-coding-highspeed",
 		"k3",
+		"k3-256k",
 	]);
 });
 

@@ -80,25 +80,36 @@ function enrichModel(model: Model, metadata: PublicModelMetadata | undefined): M
 function thinkingMetadata(entry: Record<string, unknown>, id: string): Model["thinking"] {
 	const requestedDefault = textMetadata(entry, "default_reasoning_level");
 	const advertised = stringArray(entry["supported_reasoning_levels"]);
-	const fallback = fallbackThinkingLevels(id);
+	const fallback = fallbackThinking(id);
 	const levels = [
-		...new Set([...(requestedDefault ? [requestedDefault] : []), ...advertised, ...fallback]),
+		...new Set([
+			...(requestedDefault ? [requestedDefault] : []),
+			...advertised,
+			...fallback.levels,
+		]),
 	];
 	if (levels.length === 0) return undefined;
+	const preferredDefault = requestedDefault ?? fallback.default;
 	const defaultLevel =
-		requestedDefault && levels.includes(requestedDefault) ? requestedDefault : levels[0];
+		preferredDefault && levels.includes(preferredDefault) ? preferredDefault : levels[0];
 	return {
 		default: defaultLevel ?? "low",
 		levels: levels.map((level) => ({ id: level, description: thinkingDescription(level) })),
 	};
 }
 
-function fallbackThinkingLevels(id: string): string[] {
+function fallbackThinking(id: string): { default?: string; levels: string[] } {
 	const normalized = id.toLowerCase();
-	if (/(?:image|imagen|flux|black-forest)/.test(normalized)) return [];
-	if (/gpt-5[.-]6/.test(normalized)) return ["low", "medium", "high", "xhigh", "max"];
-	if (/gpt-5/.test(normalized)) return ["low", "medium", "high", "xhigh"];
-	return /(?:claude|gemini|glm-5|qwen3|kimi|\bk[23])/.test(normalized) ? ["low", "high"] : [];
+	if (/(?:image|imagen|flux|black-forest)/.test(normalized)) return { levels: [] };
+	if (/(?:^|\/)k3(?:-|$)/.test(normalized)) {
+		return { default: "high", levels: ["low", "high", "max"] };
+	}
+	if (/gpt-5[.-]6/.test(normalized)) {
+		return { levels: ["low", "medium", "high", "xhigh", "max"] };
+	}
+	if (/gpt-5/.test(normalized)) return { levels: ["low", "medium", "high", "xhigh"] };
+	const reasoningFamily = /(?:claude|gemini|glm-5|qwen3)/.test(normalized);
+	return { levels: reasoningFamily ? ["low", "high"] : [] };
 }
 
 function thinkingDescription(level: string): string {

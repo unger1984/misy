@@ -16,6 +16,8 @@
   levels through its documented `reasoning_effort` field. It no longer fabricates a 128k context
   window. OpenAI reasoning metadata restores the full verified level set when live discovery
   returns only one level; `Esc` returns to the model list.
+- Added a visible model-search input below the provider tabs that retains and applies its query on
+  `All` and every provider tab.
 - Kept long-list viewports stationary while the cursor moves within their visible rows, scrolling
   only after the cursor reaches the top or bottom edge.
 - Added Kimi K3 and K3-256K thinking selection with the official `low`, `high`, and `max` levels,

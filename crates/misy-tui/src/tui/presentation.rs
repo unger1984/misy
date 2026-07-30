@@ -27,6 +27,7 @@ pub(super) fn list_presentation<T>(
     ModalPresentation {
         title: view.title().to_owned(),
         rows: view.visible_rows(visible_rows),
+        filter: None,
         operation,
         back_hint: false,
         tabs: Vec::new(),
@@ -42,6 +43,7 @@ pub(super) fn model_picker_presentation(
     ModalPresentation {
         title: "Select model".to_owned(),
         rows: picker.visible_rows(visible_rows),
+        filter: Some(picker.query().to_owned()),
         operation: None,
         back_hint: false,
         tabs: picker.tabs(),

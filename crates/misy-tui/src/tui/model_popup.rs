@@ -15,6 +15,8 @@ use ratatui::{
 
 const MAX_MODEL_ROWS: u16 = 20;
 const MODEL_HEADER_ROWS: u16 = 1;
+const MODEL_FILTER_ROWS: u16 = 1;
+const FILTER_PREFIX: &str = "Search: ";
 
 pub(super) fn render(
     frame: &mut ratatui::Frame,
@@ -31,7 +33,7 @@ pub(super) fn render(
         layout
             .content
             .height
-            .saturating_sub(MODEL_HEADER_ROWS)
+            .saturating_sub(MODEL_HEADER_ROWS + MODEL_FILTER_ROWS)
             .max(1)
     };
     let modal = state
@@ -39,12 +41,47 @@ pub(super) fn render(
         .unwrap_or_else(|| preview.clone());
     let help = help_text(&modal, layout.inner.width);
     popup::render_shell(frame, &layout, &tabs, &modal.title, &help);
+    let content = render_filter(frame, layout.content, &modal);
     if modal.loading {
-        render_loading(frame, layout.content);
+        render_loading(frame, content);
     } else {
-        render_content(frame, layout.content, &modal);
+        render_content(frame, content, &modal);
     }
     render_auth_prompt_cursor(frame, layout.content, state, &modal);
+}
+
+fn render_filter(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentation) -> Rect {
+    let Some(query) = &modal.filter else {
+        return area;
+    };
+    if area.height == 0 {
+        return area;
+    }
+    let value = if query.is_empty() {
+        Span::styled("type to filter models", style::muted())
+    } else {
+        Span::raw(query.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(FILTER_PREFIX, style::accent()),
+            value,
+        ])),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let cursor_column = super::display_width::text_width(FILTER_PREFIX)
+        .saturating_add(super::display_width::text_width(query));
+    let cursor_x = area
+        .x
+        .saturating_add(u16::try_from(cursor_column).unwrap_or(u16::MAX))
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, area.y));
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    )
 }
 
 fn render_auth_prompt_cursor(
@@ -106,7 +143,9 @@ fn render_content(frame: &mut ratatui::Frame, area: Rect, modal: &ModalPresentat
         }
     } else {
         let columns = ModelColumns::for_rows(&modal.rows, area.width);
-        lines.push(model_table::header_line(area.width, columns));
+        if area.height > 1 {
+            lines.push(model_table::header_line(area.width, columns));
+        }
         lines.extend(
             modal
                 .rows

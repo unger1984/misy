@@ -200,6 +200,12 @@ async fn model_picker_uses_the_herdr_style_popup_without_clipping_on_narrow_term
     let lines = buffer_lines(&buffer, 72);
     assert!(lines.iter().any(|line| line.contains("Select model")));
     assert!(lines.iter().any(|line| line.contains("─")));
+    assert!(lines.iter().any(|line| line.contains("Search:")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("type to filter models"))
+    );
     assert!(lines.iter().any(|line| line.contains("↑↓ select")));
     assert!(lines.iter().any(|line| line.contains("›")));
     assert!(
@@ -464,6 +470,18 @@ async fn model_picker_filters_and_confirms_with_a_transcript_message() {
     .await;
     client.insert_text("model-b");
     assert_eq!(client.state().picker_labels().len(), 1);
+    let filtered = buffer_lines(&render_buffer(client.state(), 100, 20), 100);
+    assert!(filtered.iter().any(|line| line.contains("Search: model-b")));
+    client
+        .handle_key(UiKey::Right)
+        .expect("switch to provider tab");
+    assert_eq!(client.state().picker_labels().len(), 1);
+    let provider_tab = buffer_lines(&render_buffer(client.state(), 100, 20), 100);
+    assert!(
+        provider_tab
+            .iter()
+            .any(|line| line.contains("Search: model-b"))
+    );
     client
         .handle_key(UiKey::Enter)
         .expect("select filtered model");

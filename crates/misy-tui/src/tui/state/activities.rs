@@ -282,6 +282,7 @@ pub(super) fn activity_presentation(
     ModalPresentation {
         title: "Activities".to_owned(),
         rows,
+        filter: None,
         operation: None,
         back_hint: false,
         tabs: picker.tabs(),

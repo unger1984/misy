@@ -82,6 +82,7 @@ pub(super) enum ActiveView {
 pub(super) struct ModalPresentation {
     pub(super) title: String,
     pub(super) rows: Vec<super::list::ListRowDisplay>,
+    pub(super) filter: Option<String>,
     pub(super) operation: Option<String>,
     pub(super) back_hint: bool,
     pub(super) tabs: Vec<(String, bool)>,
@@ -392,6 +393,7 @@ impl UiState {
             Some(ActiveView::Sessions(view)) => Some(ModalPresentation {
                 title: "Resume session".to_owned(),
                 rows: view.visible_rows(visible_rows),
+                filter: None,
                 operation: None,
                 back_hint: false,
                 tabs: Vec::new(),
@@ -401,6 +403,7 @@ impl UiState {
             Some(ActiveView::AgentDiscard(view)) => Some(ModalPresentation {
                 title: "Discard agent state?".to_owned(),
                 rows: view.visible_rows(visible_rows),
+                filter: None,
                 operation: None,
                 back_hint: false,
                 tabs: Vec::new(),
@@ -423,6 +426,7 @@ impl UiState {
                 Some(ModalPresentation {
                     title: format!("{display_name} — {status}"),
                     rows: actions.visible_rows(visible_rows),
+                    filter: None,
                     operation: self.provider_operation.as_ref().map(|(_, kind)| {
                         operation_label(*kind, self.provider_device_code.as_deref())
                     }),
@@ -435,6 +439,7 @@ impl UiState {
             Some(ActiveView::AuthPrompt(view)) => Some(ModalPresentation {
                 title: format!("{} — authentication", view.display_name),
                 rows: view.form.rows(),
+                filter: None,
                 operation: None,
                 back_hint: true,
                 tabs: Vec::new(),

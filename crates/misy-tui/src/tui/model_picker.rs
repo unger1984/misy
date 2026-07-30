@@ -147,6 +147,10 @@ impl ModelPicker {
             .collect()
     }
 
+    pub(super) fn query(&self) -> &str {
+        &self.query
+    }
+
     pub(super) fn visible_rows(&self, visible_rows: usize) -> Vec<ListRowDisplay> {
         self.list.visible_rows(visible_rows)
     }

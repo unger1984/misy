@@ -86,6 +86,43 @@ async fn nested_scopes_retry_the_whole_batch_before_any_write() {
 }
 
 #[tokio::test]
+async fn string_replacement_path_activates_nested_scope_before_editing() {
+    let (temporary, core, frontend, _) = test_core_in_workspace("string-replace-preflight");
+    fs::write(&frontend, "before").expect("write replacement fixture");
+    core.select_model(fixture_model())
+        .await
+        .expect("select model");
+    let mut events = core.subscribe_lossless();
+    let submission = core
+        .submit(Message::user("str-replace-instruction-preflight"))
+        .await
+        .expect("submit");
+    let events = receive_until(
+        &mut events,
+        submission,
+        |event| matches!(event, CoreEvent::Completed { submission: id } if *id == submission),
+    )
+    .await;
+
+    assert!(events.iter().any(|event| {
+        matches!(event, CoreEvent::ToolResult { result, .. }
+            if result.content.contains("instruction_scope_retry_required"))
+    }));
+    assert_eq!(
+        fs::read_to_string(&frontend).expect("read replaced fixture"),
+        "after"
+    );
+    assert!(
+        core.context_report()
+            .sources
+            .iter()
+            .any(|source| { source.display_path.ends_with("frontend/AGENTS.md") })
+    );
+    core.shutdown().await.expect("shutdown");
+    drop(temporary);
+}
+
+#[tokio::test]
 async fn new_and_resume_reload_base_instructions_transactionally() {
     let (temporary, core, frontend, _) = test_core_in_workspace("instruction-session-reload");
     core.select_model(fixture_model())

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-01
+
+### Added
+
+- Added the core-owned `StrReplaceFile` tool for exact UTF-8 replacements in existing regular files,
+  requiring a unique match by default and an explicit `replace_all` opt-in for multiple matches.
+- Added complete-input and projected-output limits capped at 4 MiB with checked pre-allocation size
+  validation, hierarchical `AGENTS.md` path preflight, and focused regression coverage.
+
 ## 2026-07-30
 
 ### Added

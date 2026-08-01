@@ -2,7 +2,7 @@
 
 use std::{fs, io::Read};
 
-const MAX_READ_FILE_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_TEXT_FILE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 
 pub(super) fn read_file_contents(path: &str) -> Result<String, String> {
@@ -14,11 +14,11 @@ pub(super) fn read_file_contents(path: &str) -> Result<String, String> {
     }
     let file = fs::File::open(path).map_err(|error| format!("could not read {path}: {error}"))?;
     let mut bytes = Vec::new();
-    file.take(MAX_READ_FILE_BYTES as u64 + 1)
+    file.take(MAX_TEXT_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("could not read {path}: {error}"))?;
-    let truncated = bytes.len() > MAX_READ_FILE_BYTES;
-    bytes.truncate(MAX_READ_FILE_BYTES);
+    let truncated = bytes.len() > MAX_TEXT_FILE_BYTES;
+    bytes.truncate(MAX_TEXT_FILE_BYTES);
     let mut content = match String::from_utf8(bytes) {
         Ok(content) => content,
         Err(error) if truncated && error.utf8_error().error_len().is_none() => {
@@ -31,12 +31,37 @@ pub(super) fn read_file_contents(path: &str) -> Result<String, String> {
     };
     if truncated {
         content.push_str(&format!(
-            "\n[... truncated: showing the first {MAX_READ_FILE_BYTES} of {} bytes. \
+            "\n[... truncated: showing the first {MAX_TEXT_FILE_BYTES} of {} bytes. \
              Use exec_command, e.g. `sed -n` or `tail`, to read the rest ...]",
             metadata.len()
         ));
     }
     Ok(content)
+}
+
+pub(super) fn read_complete_utf8_file(path: &str) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("could not read {path}: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "StrReplaceFile supports regular files only: {path} is not a regular file"
+        ));
+    }
+    if metadata.len() > MAX_TEXT_FILE_BYTES as u64 {
+        return Err(format!(
+            "could not read {path}: file exceeds the {MAX_TEXT_FILE_BYTES}-byte limit"
+        ));
+    }
+    let file = fs::File::open(path).map_err(|error| format!("could not read {path}: {error}"))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_TEXT_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {path}: {error}"))?;
+    if bytes.len() > MAX_TEXT_FILE_BYTES {
+        return Err(format!(
+            "could not read {path}: file exceeds the {MAX_TEXT_FILE_BYTES}-byte limit"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("could not read {path}: file is not valid UTF-8"))
 }
 
 pub(super) fn list_directory_entries(path: &str) -> Result<Vec<String>, String> {

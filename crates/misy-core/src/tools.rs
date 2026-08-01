@@ -17,6 +17,7 @@ mod definitions;
 mod filesystem;
 mod image_view;
 mod stdin;
+mod string_replace;
 #[cfg(test)]
 mod tests;
 
@@ -350,6 +351,7 @@ impl ToolDispatcher {
             "task_stop" => self.task_stop(call, owner),
             "write_stdin" => stdin::execute(call, owner, &self.activities, cancellation).await,
             "write_file" => self.write_file(call).await,
+            "StrReplaceFile" => string_replace::execute(call).await,
             _ => ToolResult::error(&call.id, format!("tool `{}` is not executable", call.name)),
         }
     }
@@ -487,7 +489,7 @@ fn compile_schema(schema: &Value) -> Result<Validator, ToolRegistryError> {
 
 fn builtin_scope_policy(name: &str) -> Option<ToolScopePolicy> {
     match name {
-        "list_directory" | "read_file" | "view_image" | "write_file" => {
+        "list_directory" | "read_file" | "view_image" | "write_file" | "StrReplaceFile" => {
             Some(ToolScopePolicy::PathArgument("path"))
         }
         "exec_command" => Some(ToolScopePolicy::WorkingDirectory("cwd")),

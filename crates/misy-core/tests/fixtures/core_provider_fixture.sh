@@ -30,6 +30,12 @@ call_write() {
   printf '"arguments":{"path":"%s","content":"%s"}}}\n' "$2" "$3"
 }
 
+call_replace() {
+  printf '{"jsonrpc":"2.0","method":"tool_call","params":'
+  printf '{"request_id":%s,"id":"%s","name":"StrReplaceFile",' "$id" "$1"
+  printf '"arguments":{"path":"%s","old":"%s","new":"%s"}}}\n' "$2" "$3" "$4"
+}
+
 call_background_shell() {
   printf '{"jsonrpc":"2.0","method":"tool_call","params":'
   printf '{"request_id":%s,"id":"background-1","name":"exec_command",' "$id"
@@ -432,6 +438,22 @@ chat_start() {
         reply '{}'
       fi
       ;;
+    *'"tool_call_id":"scope-replace-1"'*)
+      if [ "${scope_replace_seen:-0}" -eq 0 ]; then
+        case "$line" in
+          *'frontend rules'*) ;;
+          *) failed 'frontend AGENTS.md instructions missing before replacement'; reply '{}'; continue ;;
+        esac
+        scope_replace_seen=1
+        call_replace scope-replace-1 "$target/frontend/string-replace-preflight.txt" before after
+        complete
+        reply '{}'
+      else
+        text scoped-replace-done
+        complete
+        reply '{}'
+      fi
+      ;;
     *'"tool_call_id":"write-1"'*)
       text done
       complete
@@ -545,6 +567,11 @@ chat_start() {
     *'"content":"instruction-preflight"'*)
       call_write scope-write-1 "$target/frontend/instruction-preflight.txt" frontend
       call_write scope-write-2 "$target/backend/instruction-preflight.txt" backend
+      complete
+      reply '{}'
+      ;;
+    *'"content":"str-replace-instruction-preflight"'*)
+      call_replace scope-replace-1 "$target/frontend/string-replace-preflight.txt" before after
       complete
       reply '{}'
       ;;

@@ -41,6 +41,7 @@ fn dispatcher_declares_every_registered_tool() {
         [
             "AskUserQuestion",
             "SetTodoList",
+            "StrReplaceFile",
             "agent_list",
             "agent_message",
             "agent_output",
@@ -59,6 +60,186 @@ fn dispatcher_declares_every_registered_tool() {
             "write_stdin"
         ]
     );
+}
+
+#[tokio::test]
+async fn dispatcher_replaces_unique_and_all_non_overlapping_fragments() {
+    let root = test_root("string-replace-success");
+    fs::create_dir_all(&root).expect("create string replacement test directory");
+    let target = root.join("note.txt");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    fs::write(&target, "before middle before").expect("write repeated fixture");
+    let unique = dispatcher
+        .dispatch(&ToolCall::new(
+            "replace-unique",
+            "StrReplaceFile",
+            json!({"path": target, "old": "middle", "new": "center"}),
+        ))
+        .await;
+    assert!(!unique.is_error, "{}", unique.content);
+    assert!(unique.content.contains("1 replacement"));
+    assert_eq!(
+        fs::read_to_string(&target).expect("read unique replacement"),
+        "before center before"
+    );
+
+    let all = dispatcher
+        .dispatch(&ToolCall::new(
+            "replace-all",
+            "StrReplaceFile",
+            json!({"path": target, "old": "before", "new": "after", "replace_all": true}),
+        ))
+        .await;
+    assert!(!all.is_error, "{}", all.content);
+    assert!(all.content.contains("2 replacements"));
+    assert_eq!(
+        fs::read_to_string(&target).expect("read all replacements"),
+        "after center after"
+    );
+
+    fs::write(&target, "aaaa").expect("write overlap fixture");
+    let overlapping = dispatcher
+        .dispatch(&ToolCall::new(
+            "replace-overlap",
+            "StrReplaceFile",
+            json!({"path": target, "old": "aa", "new": "b", "replace_all": true}),
+        ))
+        .await;
+    assert!(!overlapping.is_error, "{}", overlapping.content);
+    assert!(overlapping.content.contains("2 replacements"));
+    assert_eq!(
+        fs::read_to_string(&target).expect("read overlap replacement"),
+        "bb"
+    );
+    fs::remove_dir_all(root).expect("remove string replacement test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_rejects_invalid_string_replacements_without_mutation() {
+    let root = test_root("string-replace-invalid");
+    fs::create_dir_all(&root).expect("create string replacement test directory");
+    let target = root.join("note.txt");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+    let cases = [
+        (
+            "absent",
+            json!({"path": target, "old": "missing", "new": "after"}),
+        ),
+        (
+            "ambiguous",
+            json!({"path": target, "old": "before", "new": "after"}),
+        ),
+        ("empty", json!({"path": target, "old": "", "new": "after"})),
+        (
+            "no-op",
+            json!({"path": target, "old": "before", "new": "before"}),
+        ),
+        (
+            "zero-all",
+            json!({"path": target, "old": "missing", "new": "after", "replace_all": true}),
+        ),
+    ];
+    for (id, arguments) in cases {
+        fs::write(&target, "before before").expect("reset fixture");
+        let result = dispatcher
+            .dispatch(&ToolCall::new(id, "StrReplaceFile", arguments))
+            .await;
+        assert!(result.is_error, "{} must fail", result.content);
+        assert_eq!(
+            fs::read_to_string(&target).expect("read unchanged fixture"),
+            "before before"
+        );
+    }
+    let missing = root.join("missing.txt");
+    let result = dispatcher
+        .dispatch(&ToolCall::new(
+            "missing",
+            "StrReplaceFile",
+            json!({"path": missing, "old": "before", "new": "after"}),
+        ))
+        .await;
+    assert!(result.is_error);
+    assert!(!missing.exists());
+    let directory = root.join("directory-target");
+    fs::create_dir(&directory).expect("create non-regular target");
+    let non_regular = dispatcher
+        .dispatch(&ToolCall::new(
+            "non-regular",
+            "StrReplaceFile",
+            json!({"path": directory, "old": "before", "new": "after"}),
+        ))
+        .await;
+    assert!(non_regular.is_error);
+    assert!(directory.is_dir());
+    fs::write(&target, [0xff]).expect("write invalid UTF-8 fixture");
+    let invalid_utf8 = dispatcher
+        .dispatch(&ToolCall::new(
+            "invalid-utf8",
+            "StrReplaceFile",
+            json!({"path": target, "old": "before", "new": "after"}),
+        ))
+        .await;
+    assert!(invalid_utf8.is_error);
+    assert_eq!(
+        fs::read(&target).expect("read invalid UTF-8 fixture"),
+        vec![0xff]
+    );
+    fs::remove_dir_all(root).expect("remove string replacement test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_enforces_string_replacement_size_boundaries_without_mutation() {
+    const MAX_TEXT_FILE_BYTES: usize = 4 * 1024 * 1024;
+    let root = test_root("string-replace-boundaries");
+    fs::create_dir_all(&root).expect("create string replacement test directory");
+    let target = root.join("note.txt");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    fs::write(&target, format!("z{}", "x".repeat(MAX_TEXT_FILE_BYTES - 2)))
+        .expect("write exact output fixture");
+    let exact = dispatcher
+        .dispatch(&ToolCall::new(
+            "exact",
+            "StrReplaceFile",
+            json!({"path": target, "old": "z", "new": "zz"}),
+        ))
+        .await;
+    assert!(!exact.is_error, "{}", exact.content);
+    assert_eq!(
+        fs::metadata(&target).expect("stat exact output").len(),
+        MAX_TEXT_FILE_BYTES as u64
+    );
+
+    fs::write(&target, "x".repeat(MAX_TEXT_FILE_BYTES)).expect("write amplification fixture");
+    let original = fs::read(&target).expect("read amplification fixture");
+    let amplified = dispatcher
+        .dispatch(&ToolCall::new(
+            "amplified",
+            "StrReplaceFile",
+            json!({"path": target, "old": "x", "new": "xy", "replace_all": true}),
+        ))
+        .await;
+    assert!(amplified.is_error);
+    assert_eq!(
+        fs::read(&target).expect("read unchanged amplification fixture"),
+        original
+    );
+
+    fs::write(&target, "x".repeat(MAX_TEXT_FILE_BYTES + 1)).expect("write oversized fixture");
+    let oversized = dispatcher
+        .dispatch(&ToolCall::new(
+            "oversized",
+            "StrReplaceFile",
+            json!({"path": target, "old": "x", "new": "y"}),
+        ))
+        .await;
+    assert!(oversized.is_error);
+    assert_eq!(
+        fs::metadata(&target).expect("stat oversized input").len(),
+        (MAX_TEXT_FILE_BYTES + 1) as u64
+    );
+    fs::remove_dir_all(root).expect("remove string replacement test directory");
 }
 
 #[tokio::test]

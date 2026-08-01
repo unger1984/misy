@@ -82,6 +82,23 @@ pub(super) fn builtin_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false,
             }),
         ),
+        ToolDefinition::new(
+            "StrReplaceFile",
+            "Replace an exact UTF-8 fragment in an existing file. By default, the fragment must \
+             occur exactly once; set replace_all to replace every non-overlapping occurrence. \
+             Input and output are limited to 4 MiB.",
+            serde_json::json!({
+                "type": "object",
+                "required": ["path", "old", "new"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                    "replace_all": {"type": "boolean", "default": false},
+                },
+                "additionalProperties": false,
+            }),
+        ),
     ];
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions

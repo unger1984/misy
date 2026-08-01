@@ -71,9 +71,11 @@ The repository already contains a working development-stage vertical slice:
   request cancellation, and an optional normalized usage capability;
 - bundled provider plugins for OpenAI, Anthropic, Kimi, and the API-key-based AnyModel catalog,
   implemented in TypeScript and run with Bun;
-- Rust-owned filesystem and unified `exec_command` tools, including JSON Schema validation,
-  automatic foreground-to-background yielding, optional macOS/Linux PTY input through
-  `write_stdin`, ordered bounded output, cancellation, and process-group cleanup;
+- Rust-owned filesystem tools, including bounded UTF-8 reads and `StrReplaceFile` for exact,
+  unique-by-default replacements in existing files (with an explicit all-occurrences mode), plus
+  unified `exec_command` with JSON Schema validation, automatic foreground-to-background yielding,
+  optional macOS/Linux PTY input through `write_stdin`, ordered bounded output, cancellation, and
+  process-group cleanup;
 - independent synchronous and background child-agent sessions with inherited context, scoped
   tools, addressable messaging, bounded transcripts, and a pull-based completion mailbox;
 - hierarchical global, project-root, and target-scoped nested `AGENTS.md` instructions with

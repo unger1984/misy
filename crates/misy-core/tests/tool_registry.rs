@@ -17,6 +17,7 @@ fn registry_exposes_the_builtin_tool_definitions() {
         [
             "AskUserQuestion",
             "SetTodoList",
+            "StrReplaceFile",
             "agent_list",
             "agent_message",
             "agent_output",
@@ -34,6 +35,44 @@ fn registry_exposes_the_builtin_tool_definitions() {
             "write_stdin"
         ]
     );
+}
+
+#[test]
+fn registry_exposes_the_string_replacement_contract() {
+    let registry = ToolRegistry::new();
+    let definition = registry
+        .get("StrReplaceFile")
+        .expect("string replacement definition");
+
+    assert_eq!(definition.name, "StrReplaceFile");
+    assert!(
+        registry
+            .validate_arguments(
+                "StrReplaceFile",
+                &json!({"path": "note.txt", "old": "before", "new": "after"}),
+            )
+            .is_ok()
+    );
+    assert!(
+        registry
+            .validate_arguments(
+                "StrReplaceFile",
+                &json!({"path": "note.txt", "old": "before", "new": "after", "replace_all": true}),
+            )
+            .is_ok()
+    );
+    for invalid in [
+        json!({"path": "note.txt", "old": "before"}),
+        json!({"path": "note.txt", "old": 1, "new": "after"}),
+        json!({"path": "note.txt", "old": "before", "new": "after", "replace_all": "yes"}),
+        json!({"path": "note.txt", "old": "before", "new": "after", "extra": true}),
+    ] {
+        assert!(
+            registry
+                .validate_arguments("StrReplaceFile", &invalid)
+                .is_err()
+        );
+    }
 }
 
 #[test]

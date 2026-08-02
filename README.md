@@ -71,7 +71,9 @@ The repository already contains a working development-stage vertical slice:
   request cancellation, and an optional normalized usage capability;
 - bundled provider plugins for OpenAI, Anthropic, Kimi, and the API-key-based AnyModel catalog,
   implemented in TypeScript and run with Bun;
-- Rust-owned filesystem tools, including bounded UTF-8 reads and `StrReplaceFile` for exact,
+- Rust-owned filesystem tools, including bounded UTF-8 `read_file` reads with optional one-based
+  line paging (`offset`, `limit`) inside the first 4 MiB readable prefix, and `StrReplaceFile`
+  for exact,
   unique-by-default replacements in existing files (with an explicit all-occurrences mode), plus
   unified `exec_command` with JSON Schema validation, automatic foreground-to-background yielding,
   optional macOS/Linux PTY input through `write_stdin`, ordered bounded output, cancellation, and

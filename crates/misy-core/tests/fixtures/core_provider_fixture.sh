@@ -24,6 +24,12 @@ call_read() {
   printf '"arguments":{"path":"%s"}}}\n' "$2"
 }
 
+call_read_paged() {
+  printf '{"jsonrpc":"2.0","method":"tool_call","params":'
+  printf '{"request_id":%s,"id":"%s","name":"read_file",' "$id" "$1"
+  printf '"arguments":{"path":"%s","limit":1}}}\n' "$2"
+}
+
 call_write() {
   printf '{"jsonrpc":"2.0","method":"tool_call","params":'
   printf '{"request_id":%s,"id":"%s","name":"write_file",' "$id" "$1"
@@ -454,6 +460,25 @@ chat_start() {
         reply '{}'
       fi
       ;;
+    *'"tool_call_id":"scope-paged-read-1"'*)
+      if [ "${scope_paged_read_seen:-0}" -eq 0 ]; then
+        case "$line" in
+          *'frontend rules'*) ;;
+          *) failed 'frontend AGENTS.md instructions missing before paged read'; reply '{}'; continue ;;
+        esac
+        scope_paged_read_seen=1
+        call_read_paged scope-paged-read-1 "$target/frontend/paged-read-preflight.txt"
+        complete
+        reply '{}'
+      else
+        case "$line" in
+          *'paged fixture'*) text scoped-paged-read-done ;;
+          *) failed 'paged read did not return fixture content' ;;
+        esac
+        complete
+        reply '{}'
+      fi
+      ;;
     *'"tool_call_id":"write-1"'*)
       text done
       complete
@@ -572,6 +597,11 @@ chat_start() {
       ;;
     *'"content":"str-replace-instruction-preflight"'*)
       call_replace scope-replace-1 "$target/frontend/string-replace-preflight.txt" before after
+      complete
+      reply '{}'
+      ;;
+    *'"content":"paged-read-instruction-preflight"'*)
+      call_read_paged scope-paged-read-1 "$target/frontend/paged-read-preflight.txt"
       complete
       reply '{}'
       ;;

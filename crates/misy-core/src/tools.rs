@@ -390,9 +390,26 @@ impl ToolDispatcher {
             return ToolResult::error(&call.id, "arguments.path must be a string");
         };
         let path = path.to_owned();
+        let paged = call.arguments.get("offset").is_some() || call.arguments.get("limit").is_some();
+        let offset = call
+            .arguments
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        let limit = call
+            .arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map_or(1000, |limit| limit as usize);
         match spawn_blocking({
             let path = path.clone();
-            move || filesystem::read_file_contents(&path)
+            move || {
+                if paged {
+                    filesystem::read_file_page(&path, offset, limit)
+                } else {
+                    filesystem::read_file_contents(&path)
+                }
+            }
         })
         .await
         {

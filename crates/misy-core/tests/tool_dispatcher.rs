@@ -388,6 +388,104 @@ async fn dispatcher_rejects_reading_a_directory_as_a_file() {
 }
 
 #[tokio::test]
+async fn dispatcher_reads_defaulted_and_explicit_line_pages_without_normalizing_content() {
+    let root = test_root("read-pages");
+    fs::create_dir_all(&root).expect("create read-pages test directory");
+    let target = root.join("pages.txt");
+    fs::write(&target, "first\r\nsecond\nthird\nfourth").expect("write page fixture");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+
+    let first = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-default-offset",
+            "read_file",
+            json!({"path": target, "limit": 2}),
+        ))
+        .await;
+    assert!(!first.is_error, "{}", first.content);
+    assert_eq!(
+        first.content,
+        "[read_file page offset=1 range=1-2]\nfirst\r\nsecond\n[next_offset=3]"
+    );
+
+    let middle = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-middle",
+            "read_file",
+            json!({"path": target, "offset": 3, "limit": 1}),
+        ))
+        .await;
+    assert!(!middle.is_error, "{}", middle.content);
+    assert_eq!(
+        middle.content,
+        "[read_file page offset=3 range=3-3]\nthird\n[next_offset=4]"
+    );
+
+    let final_page = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-final",
+            "read_file",
+            json!({"path": target, "offset": 4}),
+        ))
+        .await;
+    assert!(!final_page.is_error, "{}", final_page.content);
+    assert_eq!(
+        final_page.content,
+        "[read_file page offset=4 range=4-4]\nfourth\n[end_of_file]"
+    );
+
+    let after_end = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-after-end",
+            "read_file",
+            json!({"path": target, "offset": 5, "limit": 1}),
+        ))
+        .await;
+    assert!(!after_end.is_error, "{}", after_end.content);
+    assert_eq!(
+        after_end.content,
+        "[read_file page offset=5 range=empty]\n[end_of_file]"
+    );
+    fs::remove_dir_all(root).expect("remove read-pages test directory");
+}
+
+#[tokio::test]
+async fn dispatcher_marks_empty_and_boundary_limited_pages() {
+    let root = test_root("read-page-boundary");
+    fs::create_dir_all(&root).expect("create page-boundary test directory");
+    let empty = root.join("empty.txt");
+    fs::write(&empty, "").expect("write empty page fixture");
+    let dispatcher = ToolDispatcher::new(ToolRegistry::new());
+    let empty_page = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-empty",
+            "read_file",
+            json!({"path": empty, "offset": 1}),
+        ))
+        .await;
+    assert_eq!(
+        empty_page.content,
+        "[read_file page offset=1 range=empty]\n[end_of_file]"
+    );
+
+    let boundary = root.join("boundary.txt");
+    let content = "x\n".repeat(2 * 1024 * 1024);
+    fs::write(&boundary, format!("{content}after-boundary\n")).expect("write boundary fixture");
+    let boundary_page = dispatcher
+        .dispatch(&ToolCall::new(
+            "page-boundary",
+            "read_file",
+            json!({"path": boundary, "offset": 2 * 1024 * 1024, "limit": 1}),
+        ))
+        .await;
+    assert_eq!(
+        boundary_page.content,
+        "[read_file page offset=2097152 range=2097152-2097152]\nx\n[read_boundary_reached]"
+    );
+    fs::remove_dir_all(root).expect("remove page-boundary test directory");
+}
+
+#[tokio::test]
 async fn dispatcher_truncates_files_larger_than_the_read_cap() {
     let root = test_root("read-large");
     fs::create_dir_all(&root).expect("create read-large test directory");

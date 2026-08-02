@@ -146,6 +146,32 @@ fn registry_rejects_arguments_that_do_not_match_the_json_schema() {
 }
 
 #[test]
+fn registry_validates_optional_read_file_pagination() {
+    let registry = ToolRegistry::new();
+
+    for valid in [
+        json!({"path": "note.txt"}),
+        json!({"path": "note.txt", "offset": 101}),
+        json!({"path": "note.txt", "limit": 40}),
+        json!({"path": "note.txt", "offset": 101, "limit": 1000}),
+    ] {
+        assert!(registry.validate_arguments("read_file", &valid).is_ok());
+    }
+    for invalid in [
+        json!({"path": "note.txt", "offset": 0}),
+        json!({"path": "note.txt", "offset": -1}),
+        json!({"path": "note.txt", "offset": 1.5}),
+        json!({"path": "note.txt", "limit": 0}),
+        json!({"path": "note.txt", "limit": -1}),
+        json!({"path": "note.txt", "limit": 1.5}),
+        json!({"path": "note.txt", "limit": 1001}),
+        json!({"path": "note.txt", "unknown": true}),
+    ] {
+        assert!(registry.validate_arguments("read_file", &invalid).is_err());
+    }
+}
+
+#[test]
 fn registry_rejects_a_duplicate_registration() {
     let mut registry = ToolRegistry::new();
 

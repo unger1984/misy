@@ -18,16 +18,7 @@ pub(super) fn builtin_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false,
             }),
         ),
-        ToolDefinition::new(
-            "read_file",
-            "Read a UTF-8 file.",
-            serde_json::json!({
-                "type": "object",
-                "required": ["path"],
-                "properties": {"path": {"type": "string"}},
-                "additionalProperties": false,
-            }),
-        ),
+        read_file_definition(),
         image_view::definition(),
         exec_command_definition(),
         ToolDefinition::new(
@@ -102,6 +93,24 @@ pub(super) fn builtin_definitions() -> Vec<ToolDefinition> {
     ];
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
+}
+
+fn read_file_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "read_file",
+        "Read a bounded UTF-8 file. Optionally use one-based offset and limit to read a \
+         contiguous line page; omit both for the existing whole-file result.",
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            },
+            "additionalProperties": false,
+        }),
+    )
 }
 
 fn exec_command_definition() -> ToolDefinition {

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added optional one-based `offset` and bounded `limit` paging to `read_file`, with exact
+  continuation metadata and an explicit 4 MiB readable-prefix boundary indicator.
 - Added the core-owned `StrReplaceFile` tool for exact UTF-8 replacements in existing regular files,
   requiring a unique match by default and an explicit `replace_all` opt-in for multiple matches.
 - Added complete-input and projected-output limits capped at 4 MiB with checked pre-allocation size
